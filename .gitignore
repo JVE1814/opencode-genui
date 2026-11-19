@@ -1,0 +1,9 @@
+node_modules/
+# The desktop bundle is committed on purpose: OpenCode installs plugins with scripts disabled.
+dist/*
+!dist/gui-experimental.cjs
+playground/dist/
+test-results/
+playwright-report/
+*.log
+.DS_Store

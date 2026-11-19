@@ -1,0 +1,63 @@
+{
+  "name": "opencode-genui",
+  "version": "0.1.0",
+  "description": "Generative UI for the OpenCode desktop app: the agent renders interactive json-render UI inline in a session and in sidebar canvases.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jve1814/opencode-genui.git"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "json-render",
+    "generative-ui",
+    "solid"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
+  },
+  "files": [
+    "src/index.ts",
+    "src/shared",
+    "skills",
+    "dist/gui-experimental.cjs",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "bun scripts/build-skill.ts && vite build && bun scripts/check-bundle.ts",
+    "dev": "vite build --watch",
+    "playground": "vite --config playground/vite.config.ts",
+    "playground:build": "vite build --config playground/vite.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test --conditions browser test/unit",
+    "test:e2e": "playwright test",
+    "format": "prettier --write .",
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.3.0"
+  },
+  "prettier": {
+    "semi": false,
+    "printWidth": 120
+  },
+  "devDependencies": {
+    "@json-render/core": "0.23.2",
+    "@json-render/directives": "0.23.2",
+    "@json-render/solid": "0.23.2",
+    "@opencode/plugin": "2.3.2",
+    "@opencode/ui": "2.3.2",
+    "@playwright/test": "1.63.0",
+    "@types/bun": "^1.4.4",
+    "prettier": "3.6.2",
+    "solid-js": "^1.9.0",
+    "typescript": "^5.9",
+    "vite": "^7",
+    "vite-plugin-solid": "^2.11",
+    "zod": "^4.3.6"
+  }
+}

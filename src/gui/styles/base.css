@@ -1,0 +1,212 @@
+/*
+ * genui base: the surface root, the aliases every component stylesheet uses, and shared primitives.
+ *
+ * Rules for all genui CSS:
+ * - Every selector is scoped under [data-genui] and targets data attributes ([data-gu="card"], [data-slot="title"]),
+ *   never the app's own classes. Selectors stay at low specificity with :where() where a component may be nested.
+ * - Colors, fonts, radii and shadows come ONLY from the --gu-* aliases below, which map to the app's design tokens
+ *   (@opencode/ui, theme-aware: they follow the user's theme and light/dark mode). Do not reference --v2-* or literal
+ *   colors in component files; add an alias here instead (test/unit/tokens.test.ts checks every token exists).
+ * - Fallbacks are CSS system colors, which also follow light/dark, so the UI stays legible if a token is renamed.
+ * - No font-family literals: use var(--gu-font-sans) / var(--gu-font-mono).
+ */
+
+[data-genui] {
+  /* Surfaces */
+  --gu-bg: var(--v2-background-bg-base, Canvas);
+  --gu-bg-deep: var(--v2-background-bg-deep, Canvas);
+  --gu-layer-1: var(--v2-background-bg-layer-01, Canvas);
+  --gu-layer-2: var(--v2-background-bg-layer-02, Canvas);
+  --gu-layer-3: var(--v2-background-bg-layer-03, Canvas);
+  --gu-layer-4: var(--v2-background-bg-layer-04, Canvas);
+  --gu-bg-accent: var(--v2-background-bg-accent, AccentColor);
+  --gu-bg-contrast: var(--v2-background-bg-contrast, CanvasText);
+  --gu-bg-inverse: var(--v2-background-bg-inverse, CanvasText);
+  --gu-bg-button: var(--v2-background-bg-button-neutral, ButtonFace);
+
+  /* Text */
+  --gu-text: var(--v2-text-text-base, CanvasText);
+  --gu-text-muted: var(--v2-text-text-muted, GrayText);
+  --gu-text-faint: var(--v2-text-text-faint, GrayText);
+  --gu-text-accent: var(--v2-text-text-accent, LinkText);
+  --gu-text-accent-hover: var(--v2-text-text-accent-hover, LinkText);
+  --gu-text-contrast: var(--v2-text-text-contrast, Canvas);
+  --gu-text-inverse: var(--v2-text-text-inverse, Canvas);
+
+  /* Icons */
+  --gu-icon: var(--v2-icon-icon-base, CanvasText);
+  --gu-icon-muted: var(--v2-icon-icon-muted, GrayText);
+  --gu-icon-faint: var(--v2-icon-icon-faint, GrayText);
+  --gu-icon-accent: var(--v2-icon-icon-accent, AccentColor);
+
+  /* Borders and focus */
+  --gu-border-muted: var(--v2-border-border-muted, GrayText);
+  --gu-border: var(--v2-border-border-base, GrayText);
+  --gu-border-strong: var(--v2-border-border-strong, CanvasText);
+  --gu-focus: var(--v2-border-border-focus, Highlight);
+
+  /* Interaction overlays (layer over any background) */
+  --gu-hover: var(--v2-overlay-simple-overlay-hover, transparent);
+  --gu-pressed: var(--v2-overlay-simple-overlay-pressed, transparent);
+  --gu-scrim: var(--v2-overlay-simple-overlay-scrim, rgb(0 0 0 / 40%));
+
+  /* Status: bg / fg / border per tone */
+  --gu-info-bg: var(--v2-state-bg-info, Canvas);
+  --gu-info-fg: var(--v2-state-fg-info, CanvasText);
+  --gu-info-border: var(--v2-state-border-info, GrayText);
+  --gu-success-bg: var(--v2-state-bg-success, Canvas);
+  --gu-success-fg: var(--v2-state-fg-success, CanvasText);
+  --gu-success-border: var(--v2-state-border-success, GrayText);
+  --gu-warning-bg: var(--v2-state-bg-warning, Canvas);
+  --gu-warning-fg: var(--v2-state-fg-warning, CanvasText);
+  --gu-warning-border: var(--v2-state-border-warning, GrayText);
+  --gu-danger-bg: var(--v2-state-bg-danger, Canvas);
+  --gu-danger-fg: var(--v2-state-fg-danger, CanvasText);
+  --gu-danger-border: var(--v2-state-border-danger, GrayText);
+
+  /* Elevation */
+  --gu-shadow-raised: var(--v2-elevation-raised, none);
+  --gu-shadow-floating: var(--v2-elevation-floating, none);
+  --gu-shadow-overlay: var(--v2-elevation-overlay, none);
+  --gu-shadow-input: var(--v2-elevation-input, inset 0 0 0 1px GrayText);
+  --gu-shadow-button: var(--v2-elevation-button-neutral, inset 0 0 0 1px GrayText);
+  --gu-shadow-switch-off: var(--v2-elevation-switch-off, none);
+  --gu-shadow-switch-on: var(--v2-elevation-switch-on, none);
+
+  /* Categorical palette for charts and avatars (theme primitives) */
+  --gu-cat-1: var(--v2-blue-600, AccentColor);
+  --gu-cat-2: var(--v2-green-600, CanvasText);
+  --gu-cat-3: var(--v2-orange-600, CanvasText);
+  --gu-cat-4: var(--v2-purple-600, CanvasText);
+  --gu-cat-5: var(--v2-pink-600, CanvasText);
+  --gu-cat-6: var(--v2-cyan-600, CanvasText);
+
+  /* Typography */
+  --gu-font-sans: var(--font-family-sans, system-ui, sans-serif);
+  --gu-font-mono: var(--font-family-mono, ui-monospace, monospace);
+  --gu-size-sm: var(--font-size-small, 13px);
+  --gu-size-base: var(--font-size-base, 14px);
+  --gu-size-lg: var(--font-size-large, 16px);
+  --gu-size-xl: var(--font-size-x-large, 20px);
+  --gu-weight-regular: var(--font-weight-regular, 400);
+  --gu-weight-medium: var(--font-weight-medium, 500);
+  --gu-leading-tight: var(--line-height-tight, 12px);
+  --gu-leading-compact: var(--line-height-compact, 16px);
+  --gu-leading-base: var(--line-height-base, 20px);
+  --gu-leading-prose: var(--line-height-large, 150%);
+
+  /* Shape */
+  --gu-radius-xs: var(--radius-xs, 2px);
+  --gu-radius-sm: var(--radius-sm, 4px);
+  --gu-radius-md: var(--radius-md, 6px);
+  --gu-radius-lg: var(--radius-lg, 8px);
+  --gu-radius-xl: var(--radius-xl, 10px);
+
+  /* Spacing scale (gap/padding props map to these) */
+  --gu-space-none: 0px;
+  --gu-space-xs: 4px;
+  --gu-space-sm: 8px;
+  --gu-space-md: 12px;
+  --gu-space-lg: 16px;
+  --gu-space-xl: 24px;
+
+  /* Control metrics, matching @opencode/ui buttons and inputs */
+  --gu-control-sm: 24px;
+  --gu-control: 28px;
+  --gu-control-lg: 32px;
+
+  --gu-ease: cubic-bezier(0.2, 0, 0, 1);
+  --gu-duration: 120ms;
+
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  container-type: inline-size;
+  container-name: genui;
+  color: var(--gu-text);
+  font-family: var(--gu-font-sans);
+  font-size: var(--gu-size-base);
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-base);
+  text-align: start;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+[data-genui] *,
+[data-genui] *::before,
+[data-genui] *::after {
+  box-sizing: border-box;
+}
+
+/* Inline surfaces sit in the timeline: a quiet frame so generated UI reads as part of the message. */
+[data-genui][data-surface="inline"] {
+  margin-block: 4px;
+}
+
+/* Canvas surfaces fill the side panel and scroll there. */
+[data-genui][data-surface="canvas"] {
+  padding: 12px 16px 24px;
+}
+
+/* Shared: visually hidden but announced */
+[data-genui] :where([data-gu-sr]) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Shared: field label, description and error, used by every form component */
+[data-genui] :where([data-gu-field]) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+[data-genui] :where([data-gu-label]) {
+  font-size: var(--gu-size-sm);
+  font-weight: var(--gu-weight-medium);
+  line-height: var(--gu-leading-compact);
+  color: var(--gu-text);
+}
+
+[data-genui] :where([data-gu-description]) {
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  color: var(--gu-text-muted);
+}
+
+[data-genui] :where([data-gu-error]) {
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  color: var(--gu-danger-fg);
+}
+
+/* Shared: focus ring, as the app draws it */
+[data-genui] :where(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--gu-focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-genui] *,
+  [data-genui] *::before,
+  [data-genui] *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}
+
+:root[data-motion="reduce"] [data-genui] *,
+:root[data-motion="reduce"] [data-genui] *::before,
+:root[data-motion="reduce"] [data-genui] *::after {
+  transition-duration: 0ms !important;
+  animation-duration: 0ms !important;
+}

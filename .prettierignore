@@ -1,0 +1,6 @@
+dist/
+playground/dist/
+skills/genui/SKILL.md
+bun.lock
+test-results/
+playwright-report/
