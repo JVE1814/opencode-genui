@@ -24,6 +24,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "@json-render/solid@0.23.2": "patches/@json-render%2Fsolid@0.23.2.patch",
+  },
   "packages": {
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.8", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ=="],
 

@@ -1,8 +1,14 @@
 /*
  * genui chrome: what genui draws around generated UI. The error card and issues footer, the untrusted note, the
- * canvas chip in the reply, the canvas panel (header, notices) and its tab label. Same rules as base.css: scoped
- * under [data-genui], data attributes only, --gu-* aliases only. The one exception is the last block, which styles the
- * host's raw code block while a spec streams (progressive enhancement; the host's markup is not a contract).
+ * canvas chip in the reply, the source view, the canvas panel (header, notices) and its tab label. Same rules as
+ * base.css: scoped under [data-genui], data attributes only, --gu-* aliases only.
+ *
+ * Host-markup exceptions. A rule outside [data-genui] styles the app's own markup, which is not a contract: each one is
+ * a progressive enhancement that is harmless when the markup changes, a single rule at the end of this file under a
+ * comment saying why, and listed in HOST_MARKUP_EXCEPTIONS (test/unit/styles.test.ts). There is one:
+ *   1. The app's raw code block while a spec or canvas block streams: kept short and faded.
+ * Nothing here hides or moves the app's code block toolbar (its Copy button, and other plugins' CodeBlockAction
+ * buttons): genui's content keeps clear of it instead (see "Inside the app's code block").
  */
 
 /* ── Unknown component ─────────────────────────────────────────────────────────────────────────────────────────── */
@@ -193,18 +199,45 @@
   }
 }
 
+/* ── Inside the app's code block ───────────────────────────────────────────────────────────────────────────────── */
+
+/* Inline surfaces, canvas chips and source views render in place of a code block, whose toolbar (24px buttons, 4px from
+   the edge: Copy, and any CodeBlockAction buttons) shows over its top end corner. Each keeps an end gutter for it, so
+   the toolbar sits beside the UI and never covers it: as wide as the toolbar measures (reserveToolbar in
+   components/shared.tsx sets --_toolbar), or room for one button. */
+[data-genui]:is([data-surface="inline"], [data-surface="chip"], [data-surface="source"]) {
+  padding-inline-end: var(--_toolbar, 32px);
+}
+
+/* A canvas patch that is not the agent's, as plain text: the app's code block look, without a copy button of its own
+   (the app's stays in the corner). */
+[data-genui][data-surface="source"] > [data-gu-chrome="source"] {
+  margin: 0;
+  max-height: 240px;
+  padding: var(--gu-space-sm) var(--gu-space-md);
+  overflow: auto;
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+  color: var(--gu-text-muted);
+  font-family: var(--gu-font-mono);
+  font-size: 12px;
+  line-height: var(--gu-leading-compact);
+  white-space: pre;
+}
+
 /* ── Canvas chip (a canvas block in the reply) ─────────────────────────────────────────────────────────────────── */
 
 [data-genui][data-surface="chip"] {
   margin-block: 4px;
 }
 
+/* The chip spans the row (up to the toolbar's gutter), like the other blocks of the reply. */
 [data-genui] [data-gu-chrome="chip"] {
   display: flex;
   align-items: center;
   gap: var(--gu-space-sm);
   min-width: 0;
-  max-width: 420px;
   padding: 6px 6px 6px var(--gu-space-sm);
   border-radius: var(--gu-radius-lg);
   background-color: var(--gu-layer-1);
@@ -353,6 +386,17 @@
   font-size: var(--gu-size-sm);
 }
 
+/* A canvas whose root has arrived before anything it shows: the quiet notice stays over the empty surface, where it
+   was before the surface rendered. */
+[data-genui][data-gu-chrome="canvas"] [data-slot="drawing"] {
+  position: relative;
+}
+
+[data-genui][data-gu-chrome="canvas"] [data-slot="drawing"] > [data-gu-chrome="notice"] {
+  position: absolute;
+  inset: 0 0 auto;
+}
+
 /* ── Canvas tab label ──────────────────────────────────────────────────────────────────────────────────────────── */
 
 /* Inside the host's tab trigger: inline, sized by its content (no size containment). */
@@ -380,10 +424,11 @@
   white-space: nowrap;
 }
 
-/* ── The host's raw code block while a spec streams ────────────────────────────────────────────────────────────── */
+/* ── Host-markup exception 1: the app's raw code block while a spec streams ─────────────────────────────────────── */
 
 /* Until its fence closes, the app shows a spec or canvas block as highlighted JSONL. Keep it short and faded, so a
-   long spec does not push the conversation around before the UI replaces it. */
+   long spec does not push the conversation around before the UI replaces it. If the app's markup changes, the block
+   simply shows at full height. */
 [data-component="markdown-code"]:is([data-language="spec" i], [data-language="canvas" i]):not([data-code-content])
   > pre {
   max-height: 128px;

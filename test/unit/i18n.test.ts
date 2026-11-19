@@ -66,4 +66,19 @@ describe("i18n", () => {
       expect(message.replace(/\{\{\s*[\w.-]+\s*\}\}/g, ""), key).not.toMatch(/\{\{|\}\}/)
     }
   })
+
+  test("each key is defined in exactly one fragment", async () => {
+    const dir = path.join(SRC, "gui/i18n")
+    const owner = new Map<string, string>()
+    const duplicates: string[] = []
+    for (const name of readdirSync(dir).filter((file) => file !== "en.ts")) {
+      const fragment = (await import(path.join(dir, name))).default as Record<string, string>
+      for (const key of Object.keys(fragment)) {
+        if (owner.has(key)) duplicates.push(`${key}: ${owner.get(key)} and ${name}`)
+        else owner.set(key, name)
+      }
+    }
+    expect(owner.size).toBe(Object.keys(en).length)
+    expect(duplicates).toEqual([])
+  })
 })

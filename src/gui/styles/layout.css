@@ -330,6 +330,38 @@
   display: none;
 }
 
+/* With tabs hidden past an edge, that edge fades out, as the app's own tab strip does (tabs.css, --tab-strip-fade-*).
+   trackOverflow (components/shared.tsx) sets data-overflow-start / -end. */
+[data-genui] [data-gu="tabs"] > [data-slot="list"]:is([data-overflow-start], [data-overflow-end]) {
+  --_fade-start: 0px;
+  --_fade-end: 0px;
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--_fade-start),
+    #000 calc(100% - var(--_fade-end)),
+    transparent
+  );
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"]:is([data-overflow-start], [data-overflow-end]):dir(rtl) {
+  mask-image: linear-gradient(
+    to left,
+    transparent,
+    #000 var(--_fade-start),
+    #000 calc(100% - var(--_fade-end)),
+    transparent
+  );
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"][data-overflow-start] {
+  --_fade-start: 32px;
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"][data-overflow-end] {
+  --_fade-end: 32px;
+}
+
 [data-genui] [data-gu="tabs"] > [data-slot="list"] > [data-slot="tab"] {
   appearance: none;
   display: flex;

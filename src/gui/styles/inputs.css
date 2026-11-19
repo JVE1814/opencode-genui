@@ -597,43 +597,55 @@
   background: transparent;
 }
 
+/* The app's switch thumb (switch.css): a grey-200 knob under the depth gradient, so a Slider and a Switch in one form
+   read as one control family. */
 [data-genui] [data-gu="slider"] [data-slot="input"]::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
+  box-sizing: border-box;
   width: 14px;
   height: 14px;
   margin-top: 3px;
-  border: 0;
+  border: 0.5px solid var(--gu-depth-top);
   border-radius: var(--gu-radius-sm);
-  background-color: var(--gu-icon-contrast, var(--gu-text-contrast));
-  box-shadow: var(--gu-shadow-button);
+  background: linear-gradient(180deg, var(--gu-depth-top) 0%, var(--gu-depth-bot) 100%), var(--gu-thumb);
+  box-shadow: var(--gu-shadow-elements);
 }
 
 [data-genui] [data-gu="slider"] [data-slot="input"]::-moz-range-thumb {
+  box-sizing: border-box;
   width: 14px;
   height: 14px;
-  border: 0;
+  border: 0.5px solid var(--gu-depth-top);
   border-radius: var(--gu-radius-sm);
-  background-color: var(--gu-icon-contrast, var(--gu-text-contrast));
-  box-shadow: var(--gu-shadow-button);
+  background: linear-gradient(180deg, var(--gu-depth-top) 0%, var(--gu-depth-bot) 100%), var(--gu-thumb);
+  box-shadow: var(--gu-shadow-elements);
 }
 
 @media (hover: hover) {
   [data-genui] [data-gu="slider"] [data-slot="input"]:hover:not(:disabled)::-webkit-slider-thumb {
-    background-image: linear-gradient(0deg, var(--gu-hover), var(--gu-hover));
+    background-image:
+      linear-gradient(0deg, var(--gu-hover), var(--gu-hover)),
+      linear-gradient(180deg, var(--gu-depth-top) 0%, var(--gu-depth-bot) 100%);
   }
 
   [data-genui] [data-gu="slider"] [data-slot="input"]:hover:not(:disabled)::-moz-range-thumb {
-    background-image: linear-gradient(0deg, var(--gu-hover), var(--gu-hover));
+    background-image:
+      linear-gradient(0deg, var(--gu-hover), var(--gu-hover)),
+      linear-gradient(180deg, var(--gu-depth-top) 0%, var(--gu-depth-bot) 100%);
   }
 }
 
 [data-genui] [data-gu="slider"] [data-slot="input"]:active:not(:disabled)::-webkit-slider-thumb {
-  background-image: linear-gradient(0deg, var(--gu-pressed), var(--gu-pressed));
+  background-image:
+    linear-gradient(0deg, var(--gu-pressed), var(--gu-pressed)),
+    linear-gradient(180deg, var(--gu-depth-top) 0%, var(--gu-depth-bot) 100%);
 }
 
 [data-genui] [data-gu="slider"] [data-slot="input"]:active:not(:disabled)::-moz-range-thumb {
-  background-image: linear-gradient(0deg, var(--gu-pressed), var(--gu-pressed));
+  background-image:
+    linear-gradient(0deg, var(--gu-pressed), var(--gu-pressed)),
+    linear-gradient(180deg, var(--gu-depth-top) 0%, var(--gu-depth-bot) 100%);
 }
 
 [data-genui] [data-gu="slider"] [data-slot="input"]:focus-visible::-webkit-slider-thumb {

@@ -1,4 +1,4 @@
-import { createEffect, onCleanup, untrack } from "solid-js"
+import { createEffect, getOwner, onCleanup, untrack } from "solid-js"
 import {
   CodeBlock,
   Command,
@@ -14,7 +14,7 @@ import {
 } from "@opencode/plugin/gui"
 import { Schema } from "effect"
 import { compareRefs } from "../protocol/fold.ts"
-import { ensureInstructions, removeInstructions } from "../runtime/activation.ts"
+import { activationTarget, ensureInstructions, removeInstructions, sameActivation } from "../runtime/activation.ts"
 import { EMPTY_PERSISTED } from "../runtime/snapshot.ts"
 import { clearSurfaces, peekSurface, surfaceKeyPrefix } from "../runtime/surfaces.ts"
 import { CANVAS_TAB_PREFIX, INSTRUCTION_KEY, LANGUAGES } from "../shared/constants.ts"
@@ -24,7 +24,7 @@ import { createHostAdapter } from "./adapter.ts"
 import { canvasPanel } from "./canvas.tsx"
 import { DEFAULT_PREFS, type Host, type SurfaceContext } from "./host.ts"
 import { renderBlock } from "./inline.tsx"
-import { flushSurfaceWrites, writeStore, type SessionStore } from "./persist.ts"
+import { clearStoredSurfaces, flushOnAbort, flushSurfaceWrites, type SessionStore } from "./persist.ts"
 import { createSessionRegistry, type SessionRegistry } from "./sessions.ts"
 import { SettingsView } from "./settings.tsx"
 import { css } from "./styles/index.ts"
@@ -82,7 +82,8 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
   const options = parseOptions(ctx.options)
   const host = createHostAdapter(ctx, () => ctx.stores.prefs.value)
   const store = (session: SessionRef): SessionStore => ctx.stores.session(session)
-  const sessions = createSessionRegistry(store)
+  // Session roots take the plugin root's context, so their errors fail the plugin whoever first asked for a session.
+  const sessions = createSessionRegistry(store, { owner: getOwner() })
   const closed = new Set<string>()
   const closedKey = (session: SessionRef, canvas: string) => `${session.key}\n${canvas}`
   const tabKey = (canvas: string) => `${ctx.id}:${CANVAS_TAB_PREFIX}${canvas}`
@@ -155,11 +156,9 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
         return true
       })
       flushSurfaceWrites()
+      // Also the sessions whose store has not loaded in this window: the write waits for the load.
       const targets = session ? [session] : ctx.sessions.list()
-      for (const target of targets)
-        writeStore(store(target), (value) =>
-          Object.keys(value.surfaces ?? {}).length === 0 ? value : { ...value, surfaces: {} },
-        )
+      for (const target of targets) clearStoredSurfaces(store(target))
     },
   }
 
@@ -172,7 +171,12 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     window.addEventListener("pagehide", flush)
     onCleanup(() => window.removeEventListener("pagehide", flush))
   }
+  // When the plugin goes away (reload, update, disable, options change), pending writes go first: the host aborts the
+  // signal before it disposes the session stores, and an onCleanup here only runs after that. The flush at cleanup is
+  // for a host that disposes without aborting (and writes nothing when the abort already flushed).
+  const stopFlush = flushOnAbort(ctx.signal, flush)
   onCleanup(() => {
+    stopFlush()
     flush()
     sessions.dispose()
   })
@@ -205,44 +209,41 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
   })
 
   // ── Activation: tell the agent about genui in sessions shown here ─────────────────────────────────────────────
-  const sessionKey = () => {
-    const session = ctx.sessions.current()
-    if (!session || session.pending) return undefined
-    let info: { readonly parentID?: unknown } | undefined
-    try {
-      info = session.server.data.session.get(session.id) as { readonly parentID?: unknown } | undefined
-    } catch {
-      // A data store without session info (an older host): treat it as a top-level session.
-      info = {}
-    }
-    // Wait for the session's info; a subagent's session gets nothing, its parent already has the hint.
-    if (!info || info.parentID) return undefined
-    return session.key
-  }
+  // Runs again for a reconnect or a restarted server's new client, so a put that failed is retried; ensureInstructions
+  // keeps it to one request per client and session.
+  const target = () => activationTarget(ctx.sessions.current())
   if (options.instructions === "session") {
     let warned = false
-    createKeyed(sessionKey, (key) => {
-      const session = untrack(() => ctx.sessions.current())
-      if (!session || session.key !== key) return
-      void ensureInstructions(session.server.client, session.id, INSTRUCTION_KEY, hintFor(options)).then((result) => {
-        if (result !== "failed" || warned || ctx.signal.aborted) return
-        warned = true
-        ctx.toast.show({
-          title: ctx.t("activation.failed.title"),
-          description: ctx.t("activation.failed.description"),
-          variant: "error",
+    createKeyed(
+      target,
+      (run) => {
+        void ensureInstructions(run.client, run.sessionID, INSTRUCTION_KEY, hintFor(options)).then((result) => {
+          if (result !== "failed" || warned || ctx.signal.aborted) return
+          warned = true
+          ctx.toast.show({
+            title: ctx.t("activation.failed.title"),
+            description: ctx.t("activation.failed.description"),
+            variant: "error",
+          })
         })
-      })
-    })
+      },
+      { equals: sameActivation },
+    )
   } else {
     // A previous "session" setting may have left the entry behind.
     const cleaned = new Set<string>()
-    createKeyed(sessionKey, (key) => {
-      const session = untrack(() => ctx.sessions.current())
-      if (!session || session.key !== key || cleaned.has(key)) return
-      cleaned.add(key)
-      void removeInstructions(session.server.client, session.id, INSTRUCTION_KEY)
-    })
+    createKeyed(
+      target,
+      (run) => {
+        if (cleaned.has(run.key)) return
+        cleaned.add(run.key)
+        // A failed removal is tried again on the next reconnect or client.
+        void removeInstructions(run.client, run.sessionID, INSTRUCTION_KEY).then((ok) => {
+          if (!ok) cleaned.delete(run.key)
+        })
+      },
+      { equals: sameActivation },
+    )
   }
 
   // ── Inline blocks and canvas chips ────────────────────────────────────────────────────────────────────────────
@@ -280,19 +281,17 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     if (picked !== undefined && !ctx.signal.aborted) env.openCanvas(session, picked)
   }
 
+  // Reads only the canvas ids (equality-guarded), so a streaming canvas does not contribute the item again each tick.
   ctx.add(MenuItem, () => {
     const session = ctx.sessions.current()
-    const canvases = session ? sessions.get(session).index.canvases() : []
-    const opened =
-      !!session &&
-      canvases.length > 0 &&
-      canvases.every((canvas) => ctx.layout.state(tabKey(canvas.id), session) !== "closed")
+    const ids = session ? sessions.get(session).index.canvasIds() : []
+    const opened = !!session && ids.length > 0 && ids.every((id) => ctx.layout.state(tabKey(id), session) !== "closed")
     return {
       menu: "session.panel" as const,
       id: "canvas",
       title: ctx.t("menu.canvas"),
       icon: "layout-right" as const,
-      ...(canvases.length > 0 ? { description: ctx.plural("menu.canvas.count", canvases.length) } : {}),
+      ...(ids.length > 0 ? { description: ctx.plural("menu.canvas.count", ids.length) } : {}),
       ...(opened ? { opened: true } : {}),
       run: () => void pickCanvas(),
     }

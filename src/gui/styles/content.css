@@ -219,16 +219,19 @@
   color: var(--gu-info-fg);
 }
 
+/* The app's success and warning foregrounds are too light on their own backgrounds for 13px text in the light theme
+   (3.97:1 and 2.35:1). Mixed with the body text they stay recognizably green and amber and pass AA in both themes
+   (the mix darkens them on light backgrounds and lightens them on dark ones). */
 [data-genui] [data-gu="badge"][data-variant="success"] {
   background-color: var(--gu-success-bg);
   box-shadow: inset 0 0 0 0.5px var(--gu-success-border);
-  color: var(--gu-success-fg);
+  color: color-mix(in srgb, var(--gu-success-fg) 70%, var(--gu-text));
 }
 
 [data-genui] [data-gu="badge"][data-variant="warning"] {
   background-color: var(--gu-warning-bg);
   box-shadow: inset 0 0 0 0.5px var(--gu-warning-border);
-  color: var(--gu-warning-fg);
+  color: color-mix(in srgb, var(--gu-warning-fg) 55%, var(--gu-text));
 }
 
 [data-genui] [data-gu="badge"][data-variant="danger"] {
@@ -240,7 +243,8 @@
 /* ── Alert ──────────────────────────────────────────────────────────────────────────────────────────────────────── */
 
 /* A status callout on the state colors: the tinted background and hairline of the danger tag, an 8px frame like the
-   settings list, the state icon and title in the state's foreground and the message in body text. */
+   settings list, the state icon in the state's foreground, and title and message in body text (as the app's tone
+   cards do: the warning and success foregrounds are too light for text on their own backgrounds). */
 [data-genui] [data-gu="alert"] {
   --_bg: var(--gu-info-bg);
   --_fg: var(--gu-info-fg);
@@ -295,7 +299,7 @@
 
 [data-genui] [data-gu="alert"] > [data-slot="content"] > [data-slot="title"] {
   margin: 0;
-  color: var(--_fg);
+  color: var(--gu-text);
   font-weight: var(--gu-weight-medium);
   overflow-wrap: anywhere;
 }

@@ -2,8 +2,8 @@ import { children, createMemo, createSignal, For, Index, Show, type JSX } from "
 import type { ComponentName } from "../../catalog/components.ts"
 import { useHost } from "../host.ts"
 import { MarkdownText } from "./content.tsx"
-import { fire } from "./inputs.tsx"
-import { bool, list, num, oneOf, str, uid, useBound, type GenuiComponent } from "./shared.tsx"
+import { useActivation } from "./inputs.tsx"
+import { bool, list, num, oneOf, str, trackOverflow, uid, useBound, type GenuiComponent } from "./shared.tsx"
 
 // Layout components: Stack, Grid, Card, Separator, Tabs, Accordion, Collapsible. Styles: src/gui/styles/layout.css.
 
@@ -22,8 +22,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 /**
  * The rendered children of a slotted component as a list, child N at index N. An element hidden by `visible` keeps
- * its index as `null`, so "child N belongs to item N" holds while elements come and go. Read `ctx.children` only
- * through this: each read of the getter renders the children anew.
+ * its index as `null`, so "child N belongs to item N" holds while elements come and go. The nodes keep their identity
+ * while the element changes (`ctx.children` is stable, see src/gui/element.ts), so a panel's inputs keep focus.
  */
 function useChildList(read: () => JSX.Element) {
   const resolved = children(read)
@@ -159,6 +159,7 @@ function tabItems(value: unknown): TabItem[] {
 
 const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
   const base = uid("tabs")
+  const activate = useActivation(ctx)
   const tabs = createMemo(() => tabItems(ctx.props.tabs))
   const [value, setValue] = useBound(ctx, "value", "", (next) => (typeof next === "string" ? next : undefined))
   const panels = useChildList(() => ctx.children)
@@ -195,7 +196,7 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
     const tab = tabs()[index]
     if (!tab || tab.value === active()) return
     setValue(tab.value)
-    void fire(ctx, "change")
+    void activate("change")
   }
 
   const onKeyDown = (event: KeyboardEvent, index: number) => {
@@ -227,7 +228,15 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
 
   return (
     <div data-gu="tabs">
-      <div data-slot="list" role="tablist" aria-orientation="horizontal" ref={listRef}>
+      <div
+        data-slot="list"
+        role="tablist"
+        aria-orientation="horizontal"
+        ref={(element) => {
+          listRef = element
+          trackOverflow(element)
+        }}
+      >
         <Index each={tabs()}>
           {(tab, index) => (
             <button

@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test"
 import type { Spec } from "@json-render/core"
 import { readFile } from "node:fs/promises"
 import { renderSkill, SKILL_PATH } from "../../scripts/build-skill.ts"
-import { ACTION_NAMES, actionDefinitions, COMPONENT_NAMES, componentDefinitions } from "../../src/catalog/index.ts"
+import {
+  ACTION_NAMES,
+  ACTIVATION_EVENTS,
+  actionDefinitions,
+  COMPONENT_NAMES,
+  componentDefinitions,
+  describeActivations,
+  OUTWARD_BURST,
+} from "../../src/catalog/index.ts"
 import { applyPromptFixes, buildPrompt, catalogPrompt, PROMPT_FIXES } from "../../src/catalog/prompt.ts"
 import { scanFences } from "../../src/protocol/fence.ts"
 import { applyPatches, EMPTY_SPEC } from "../../src/protocol/patch.ts"
@@ -143,6 +151,32 @@ describe("buildPrompt", () => {
       .join("\n")
     expect(prompt).toContain(indented)
     expect(prompt).toContain(MAX_SENT_MESSAGE.toLocaleString("en-US"))
+  })
+
+  test("a sent message stays within MAX_SENT_MESSAGE, with or without data", () => {
+    expect(formatSentMessage({ text: "x".repeat(50_000) })).toHaveLength(MAX_SENT_MESSAGE)
+    const withData = formatSentMessage({ text: "y".repeat(50_000), data: { blob: "z".repeat(50_000) } })
+    expect(withData.length).toBeLessThanOrEqual(MAX_SENT_MESSAGE)
+    expect(withData).toContain("```json\n")
+    expect(withData).toContain("... (truncated)")
+  })
+
+  test("states the outward-action rules genui enforces, from the same table", () => {
+    expect(prompt).toContain(`activates a control: ${describeActivations()}.`)
+    for (const [type, events] of Object.entries(ACTIVATION_EVENTS)) {
+      expect(componentDefinitions[type as keyof typeof componentDefinitions]).toBeDefined()
+      for (const event of events) {
+        expect(describeActivations()).toContain(`on.${event} of`)
+        expect(describeActivations()).toContain(type)
+        expect(
+          (componentDefinitions[type as keyof typeof componentDefinitions] as { events?: string[] }).events,
+        ).toContain(event)
+      }
+    }
+    expect(prompt).toContain(`at most ${OUTWARD_BURST} of them`)
+    expect(prompt).toContain("never run from watch")
+    expect(prompt).not.toContain("(loading data,")
+    expect(prompt).not.toContain('{ "$item": "field" } resolves to the absolute state path,')
   })
 
   test("uses an agent's system line, not json-render's default", () => {

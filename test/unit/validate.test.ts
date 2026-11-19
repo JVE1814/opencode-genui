@@ -3,6 +3,7 @@ import type { Spec } from "@json-render/core"
 import { getCatalog } from "../../src/catalog/index.ts"
 import { normalizeSpec } from "../../src/protocol/normalize.ts"
 import {
+  ACTIVATION_RULE,
   formatIssuesForAgent,
   MAX_AGENT_MESSAGE,
   validateSurface,
@@ -113,6 +114,17 @@ describe("validateSurface: structure and fatal", () => {
     })
     const normalized = normalizeSpec(raw)
     expect(normalized.state).toEqual({ __genui: { name: "x" } })
+    expect(validateSurface(normalized).issues).toEqual([])
+  })
+
+  test("a state holding only seeds of both roots (__genui, __genui_secret) counts as absent", () => {
+    const raw = spec({
+      list: { type: "Stack", props: {}, repeat: { statePath: "/items" }, children: ["row"] },
+      row: { type: "Text", props: { text: { $item: "name" } } },
+      pw: { type: "Input", props: { label: "Password", type: "password", value: "x" } },
+    })
+    const normalized = normalizeSpec(raw)
+    expect(normalized.state).toEqual({ __genui_secret: { pw: "x" } })
     expect(validateSurface(normalized).issues).toEqual([])
   })
 
@@ -228,6 +240,13 @@ describe("validateSurface: props", () => {
     expect(validateSurface(fine).issues).toEqual([])
   })
 
+  test("a password Input is validated through its secret seed", () => {
+    const normalized = normalizeSpec(
+      spec({ pw: { type: "Input", props: { label: "P", type: "password", value: true } } }),
+    )
+    expect(codes(validateSurface(normalized).issues)).toEqual(["invalid_props"])
+  })
+
   test("unknown props are not reported", () => {
     expect(validateSurface(spec({ t: { type: "Text", props: { text: "x", className: "big" } } })).issues).toEqual([])
   })
@@ -265,6 +284,96 @@ describe("validateSurface: actions", () => {
     expect(result.fatal).toBe(false)
   })
 
+  test("unknown actions in chains are still found after the normalizer moved them into reserved params", () => {
+    const raw = spec({
+      b: {
+        type: "Button",
+        props: { label: "B" },
+        on: { press: { action: "copyText", params: { text: "x" }, onSuccess: { action: "celebrate" } } },
+      },
+    })
+    expect(validateSurface(normalizeSpec(raw)).issues.map((issue) => issue.message)).toEqual([
+      'unknown action "celebrate" in on.press.onSuccess',
+    ])
+  })
+
+  test("prop expressions json-render cannot evaluate are reported: two directives in one object, a $cond that is a path", () => {
+    const result = validateSurface(
+      spec({
+        a: { type: "Text", props: { text: { $format: "number", $concat: ["a", "b"], value: 3 } } },
+        b: { type: "Text", props: { text: { $cond: "/isAdmin", $then: "Admin", $else: "User" } } },
+        c: {
+          type: "Text",
+          props: { text: { $cond: { $state: "/isAdmin" }, $then: { $format: "number", value: 1 }, $else: "x" } },
+        },
+      }),
+    )
+    expect(result.issues.map((issue) => [issue.code, issue.elementKey, issue.message.split(",")[0]])).toEqual([
+      ["invalid_expression", "a", '"text" has several directives ($format'],
+      ["invalid_expression", "b", '"text" has a $cond that is not a condition'],
+    ])
+  })
+
+  test("onSuccess/onError handlers written as expressions are reported as ignored", () => {
+    const raw = spec({
+      q: {
+        type: "Input",
+        props: { label: "Q" },
+        watch: {
+          "/q": {
+            action: "showToast",
+            params: { title: "t" },
+            onSuccess: { action: "sendPrompt", params: { $state: "/evil" } },
+            onError: { action: "showToast", $state: "/h" },
+          },
+        },
+      },
+    })
+    for (const input of [raw, normalizeSpec(raw)])
+      expect(validateSurface(input).issues.map((issue) => [issue.code, issue.message.split(":")[0]])).toEqual([
+        ["dynamic_chain", 'watch["/q"].onSuccess is ignored'],
+        ["dynamic_chain", 'watch["/q"].onError is ignored'],
+      ])
+  })
+
+  test("outward actions where no activation can happen never run, and say so", () => {
+    const raw = spec({
+      q: {
+        type: "Input",
+        props: { label: "Q" },
+        on: {
+          submit: { action: "sendPrompt", params: { text: "ok" } },
+          blur: { action: "sendPrompt", params: { text: "x" } },
+          focus: [{ action: "setState", params: { statePath: "/f", value: true } }, { action: "copyText" }],
+        },
+        watch: {
+          "/q": [
+            { action: "showToast", params: { title: "t" } },
+            { action: "showToast", params: { title: "t" }, onSuccess: { action: "openLink" } },
+            { action: "openCanvas", params: { canvas: "main" }, confirm: true },
+          ],
+        },
+      },
+      s: { type: "Slider", props: {}, on: { change: { action: "insertPrompt", params: { text: "x" } } } },
+      go: { type: "Button", props: { label: "Go" }, on: { press: { action: "openLink", params: { url: "x" } } } },
+    })
+    for (const input of [raw, normalizeSpec(raw)]) {
+      const issues = validateSurface(input).issues
+      expect(issues.map((issue) => [issue.code, issue.elementKey, issue.message.split(":")[0]])).toEqual([
+        ["outward_action_in_event", "q", "sendPrompt in on.blur never runs"],
+        ["outward_action_in_event", "q", "copyText in on.focus[1] never runs"],
+        ["outward_action_in_watch", "q", 'openLink in watch["/q"][1].onSuccess never runs'],
+        ["confirm_in_watch", "q", 'openCanvas in watch["/q"][2] asks for a confirm, so it never runs'],
+        ["outward_action_in_event", "s", "insertPrompt in on.change never runs"],
+      ])
+      expect(issues.every((issue) => issue.severity === "warning" && issue.message.endsWith(ACTIVATION_RULE))).toBe(
+        true,
+      )
+    }
+    expect(ACTIVATION_RULE).toContain("on.press of Button or Link")
+    expect(ACTIVATION_RULE).toContain("on.submit of Input")
+  })
+
   test("a binding without an action is reported", () => {
     const result = validateSurface(
       spec({ b: { type: "Button", props: { label: "B" }, on: { press: { params: {} } } } }),
@@ -280,6 +389,42 @@ describe("validateSurface: actions", () => {
       narrowed,
     )
     expect(codes(result.issues)).toEqual(["unknown_component", "unknown_action"])
+  })
+})
+
+describe("validateSurface: validation checks", () => {
+  test("patterns the safe matcher cannot run are reported, before and after normalizing", () => {
+    const raw = spec({
+      f: {
+        type: "Input",
+        props: {
+          label: "F",
+          checks: [
+            { type: "pattern", args: { pattern: "^(a+)+$" }, message: "ok, runs safely" },
+            { type: "pattern", args: { pattern: "^(\\w)\\1$" }, message: "backreference" },
+            { type: "pattern", args: { pattern: "(?=x)" }, message: "lookahead" },
+          ],
+        },
+      },
+    })
+    for (const input of [raw, normalizeSpec(raw)]) {
+      expect(only(validateSurface(input).issues, "unsupported_pattern").map((issue) => issue.message)).toEqual([
+        "the pattern of checks[1] is ignored: backreferences are not supported",
+        "the pattern of checks[2] is ignored: lookarounds are not supported",
+      ])
+    }
+  })
+
+  test("checks written as expressions are reported, before and after normalizing", () => {
+    const raw = spec({
+      a: { type: "Input", props: { label: "A", checks: { $state: "/rules" } } },
+      b: { type: "Input", props: { label: "B", checks: [{ type: { $state: "/t" }, message: "m" }] } },
+    })
+    for (const input of [raw, normalizeSpec(raw)]) {
+      const issues = only(validateSurface(input).issues, "dynamic_check")
+      expect(issues.map((issue) => issue.elementKey)).toEqual(["a", "b"])
+      expect(issues.every((issue) => issue.severity === "warning")).toBe(true)
+    }
   })
 })
 

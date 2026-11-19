@@ -1,5 +1,8 @@
 // Copy added by the content components (src/gui/components/content.tsx).
 export default {
+  // Link text for a Markdown image without alt text (Markdown images show as links, see components/markdown.ts).
+  "c.markdown.image": "Image",
+
   "c.code.copy": "Copy code",
   "c.code.copied": "Copied to clipboard",
   "c.code.copyFailed": "Couldn't copy to clipboard",

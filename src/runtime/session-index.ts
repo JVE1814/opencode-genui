@@ -35,14 +35,26 @@ export interface SessionIndexInput {
 }
 
 export interface SessionIndex {
-  /** The live canvases, ordered by first appearance. */
+  /** The live canvases, ordered by first appearance. Changes on every streaming update of any canvas. */
   readonly canvases: Accessor<readonly CanvasState[]>
+  /** The ids of the live canvases, in the same order; notifies only when the ids change. */
+  readonly canvasIds: Accessor<readonly string[]>
   /** One canvas, reactively; notifies only when that canvas changes. */
   canvas(id: string): CanvasState | undefined
+  /** Whether a canvas is live, reactively; notifies only when that flips. */
+  exists(id: string): boolean
   /** Canvases a block closed; their snapshots should be deleted. */
   readonly removed: Accessor<ReadonlySet<string>>
-  /** Whether a `spec` or `canvas` block with this `ParsedBlock.hash` is in an assistant text part (trust). */
-  knows(hash: string): boolean
+  /**
+   * Whether a `spec` or `canvas` block with exactly this normalized text (`ParsedBlock.text`) is in an assistant text
+   * part: the block is the agent's own (trust). Compared exactly, never by hash.
+   */
+  knows(text: string): boolean
+  /**
+   * The normalized text of the newest closed inline block whose header has this `id`, or undefined. Blocks the agent
+   * re-sent with the same id share their UI state; only the newest one drives it.
+   */
+  latestInline(id: string): string | undefined
   /**
    * Canvases that started live (in a reply still being written when the index became ready, or in a later one) and have
    * drawn something, not consumed yet. A patch whose base is not loaded is an update, never a new canvas.
@@ -72,7 +84,10 @@ interface PartScan {
 
 interface Scan {
   readonly blocks: readonly CanvasBlock[]
-  readonly hashes: ReadonlySet<string>
+  /** The normalized texts of every block in assistant text. */
+  readonly texts: ReadonlySet<string>
+  /** Inline header id -> the normalized text of the newest closed block with that id. */
+  readonly latest: ReadonlyMap<string, string>
   readonly newest?: string
   /** The newest message that is not a reply still being written. */
   readonly settled?: string
@@ -92,6 +107,13 @@ const sameSet = <T>(a: ReadonlySet<T>, b: ReadonlySet<T>) => {
   if (a === b) return true
   if (a.size !== b.size) return false
   for (const item of a) if (!b.has(item)) return false
+  return true
+}
+
+const sameMap = <K, V>(a: ReadonlyMap<K, V>, b: ReadonlyMap<K, V>) => {
+  if (a === b) return true
+  if (a.size !== b.size) return false
+  for (const [key, value] of a) if (b.get(key) !== value) return false
   return true
 }
 
@@ -181,7 +203,8 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   const scan = createMemo<Scan>(() => {
     const revert = input.revert?.()
     const blocks: CanvasBlock[] = []
-    const hashes = new Set<string>()
+    const texts = new Set<string>()
+    const latest = new Map<string, string>()
     const complete = new Map<string, boolean>()
     const seenParts = new Set<string>()
     const seenBlocks = new Set<string>()
@@ -213,8 +236,13 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
         }
 
         for (const scanned of cached.blocks) {
-          hashes.add(scanned.parsed.hash)
-          if (scanned.canvas === undefined) continue
+          texts.add(scanned.parsed.text)
+          if (scanned.canvas === undefined) {
+            // The app renders a block once its fence closes; one still streaming does not take over its id yet.
+            const id = scanned.parsed.header.id
+            if (id !== undefined && scanned.closed) latest.set(id, scanned.parsed.text)
+            continue
+          }
           const key = `${partKey}\u0000${scanned.ordinal}`
           seenBlocks.add(key)
           let block = canvasBlocks.get(key)
@@ -246,7 +274,8 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     if (!sorted) blocks.sort((a, b) => compareRefs(a.ref, b.ref))
     return {
       blocks,
-      hashes,
+      texts,
+      latest,
       ...(newest !== undefined ? { newest } : {}),
       ...(settled !== undefined ? { settled } : {}),
       complete,
@@ -254,11 +283,16 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   })
 
   const newest = createMemo(() => scan().newest)
-  const known = createMemo(() => scan().hashes, undefined, { equals: sameSet })
+  const known = createMemo(() => scan().texts, undefined, { equals: sameSet })
+  const latest = createMemo(() => scan().latest, undefined, { equals: sameMap })
 
+  // A snapshot is from after a revert when it is past the staged revert point, or newer than the newest message. An
+  // empty transcript says nothing (a restarted server's store before it syncs): its snapshots stand.
   const reverted = (snapshot: CanvasSnapshot) => {
+    const cut = input.revert?.()
+    if (cut !== undefined && snapshot.after.messageID >= cut) return true
     const last = newest()
-    return last === undefined || snapshot.after.messageID > last
+    return last !== undefined && snapshot.after.messageID > last
   }
 
   // A snapshot from after a revert describes messages that are gone, so the fold ignores it. A snapshot that is the
@@ -299,15 +333,25 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   })
 
   const canvases = createMemo(() => [...fold().canvases.values()], undefined, { equals: sameArray })
+  const canvasIds = createMemo(() => canvases().map((state) => state.id), undefined, { equals: sameArray })
   const removed = createMemo(() => fold().removed, undefined, { equals: sameSet })
 
+  // Per-id selectors, owned by the index's root, not by whichever component asked first.
   const byId = new Map<string, Accessor<CanvasState | undefined>>()
   const canvas = (id: string) => {
     let memo = byId.get(id)
     if (!memo) {
-      // Owned by the index's root, not by whichever component asked first.
       memo = runWithOwner(owner, () => createMemo(() => fold().canvases.get(id)))!
       byId.set(id, memo)
+    }
+    return memo()
+  }
+  const existsById = new Map<string, Accessor<boolean>>()
+  const exists = (id: string) => {
+    let memo = existsById.get(id)
+    if (!memo) {
+      memo = runWithOwner(owner, () => createMemo(() => canvas(id) !== undefined))!
+      existsById.set(id, memo)
     }
     return memo()
   }
@@ -360,9 +404,12 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
 
   return {
     canvases,
+    canvasIds,
     canvas,
+    exists,
     removed,
-    knows: (hash) => known().has(hash),
+    knows: (text) => known().has(text),
+    latestInline: (id) => latest().get(id),
     fresh,
     consumeFresh(id) {
       if (consumed.has(id)) return

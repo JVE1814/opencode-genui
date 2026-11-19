@@ -4,8 +4,8 @@ import { useStateStore } from "@json-render/solid"
 import { isIconName } from "../../catalog/icons.ts"
 import { isRemoteImage, safeUrl, urlHost } from "../../protocol/url.ts"
 import { useHost, type Host } from "../host.ts"
-import { fire } from "./inputs.tsx"
-import { bool, display, list, num, oneOf, str, uid, type GenuiComponent } from "./shared.tsx"
+import { useActivation } from "./inputs.tsx"
+import { bool, display, list, num, oneOf, str, trackOverflow, uid, type GenuiComponent } from "./shared.tsx"
 
 // Data components: Table, Progress, Skeleton, Spinner, Stat, Image, Avatar. Styles: src/gui/styles/data.css.
 // GuardedImage and statePath are shared with overlay.tsx (Carousel, Dialog, Drawer).
@@ -120,6 +120,12 @@ function cellValue(row: unknown, column: TableColumn): unknown {
 const isEmptyCell = (value: unknown) =>
   value === null || value === undefined || (typeof value === "string" && EMPTY_CELLS.has(value.trim()))
 
+/**
+ * A short value without spaces, such as an identifier ("api-gateway", "us-east-1") or a version: kept on one line, as
+ * the browser would otherwise break it at every hyphen in a narrow column. Longer values still wrap.
+ */
+const unbreakable = (text: string) => text.length > 0 && text.length <= 32 && !/\s/.test(text)
+
 const isNumericCell = (value: unknown) =>
   typeof value === "number" ? Number.isFinite(value) : typeof value === "string" && NUMERIC.test(value.trim())
 
@@ -142,6 +148,7 @@ function isNumericColumn(cells: readonly (readonly unknown[])[], column: number)
 const Table: GenuiComponent<"Table"> = (ctx) => {
   const host = useHost()
   const store = useStateStore()
+  const activate = useActivation(ctx)
 
   const rows = createMemo(() => list(ctx.props.rows).slice(0, MAX_ROWS))
   const columns = createMemo(() => tableColumns(ctx.props.columns, rows()))
@@ -178,7 +185,7 @@ const Table: GenuiComponent<"Table"> = (ctx) => {
     const target = path()
     if (!target) return
     store.set(target, index)
-    void fire(ctx, "select")
+    void activate("select")
   }
 
   const onRowKeyDown = (event: KeyboardEvent, index: number) => {
@@ -209,7 +216,7 @@ const Table: GenuiComponent<"Table"> = (ctx) => {
   }
 
   return (
-    <div data-gu="table" data-selectable={selectable() ? "" : undefined}>
+    <div data-gu="table" data-selectable={selectable() ? "" : undefined} ref={trackOverflow}>
       <table role={selectable() ? "grid" : undefined} aria-readonly={selectable() ? "true" : undefined}>
         <Show when={caption()}>
           <caption data-slot="caption">{caption()}</caption>
@@ -248,7 +255,11 @@ const Table: GenuiComponent<"Table"> = (ctx) => {
                 >
                   <Index each={row()}>
                     {(cell, column) => (
-                      <td data-align={aligns()[column]} data-numeric={aligns()[column] === "end" ? "" : undefined}>
+                      <td
+                        data-align={aligns()[column]}
+                        data-numeric={aligns()[column] === "end" ? "" : undefined}
+                        data-nowrap={unbreakable(cell()) ? "" : undefined}
+                      >
                         {cell()}
                       </td>
                     )}

@@ -68,8 +68,9 @@ Inputs keep what the user enters. Bind each input you want back to a state path 
 
 - insertPrompt { text } puts text in the message box for the user to edit and send.
 - openLink { url } opens an http(s) or mailto URL. copyText { text, label? } copies to the clipboard. showToast { title, description?, variant? } shows a notification. openCanvas { canvas } shows a canvas tab.
-- sendPrompt, insertPrompt, openLink and copyText leave the UI: they run only in response to the user's click or key press (such as on.press), never from watch, at most once a second, and the app may ask the user to confirm.
-- "confirm" on an action binding asks the user first, e.g. {"action":"sendPrompt","params":{"text":"Delete the branch"},"confirm":{"title":"Delete branch?","message":"This cannot be undone.","variant":"danger"}}. It works for the custom actions only, not for setState, pushState, removeState or validateForm.
+- sendPrompt, insertPrompt, openLink and copyText leave the UI, so they run only when the user activates a control: on.press of Button or Link, on.select of DropdownMenu or Table, on.submit of Input or on.change of Select, Radio, Checkbox, Switch, Toggle, ToggleGroup, ButtonGroup, Pagination or Tabs. Bound anywhere else (watch, on.focus, on.blur, a Slider's on.change) they never run. One activation runs at most 3 of them, in order (say, copyText then openLink); the next activation in the same UI must come at least 1 s later. The app may ask the user to confirm first, showing exactly what will be sent, opened or copied.
+- "confirm" on an action binding asks the user first, e.g. {"action":"sendPrompt","params":{"text":"Delete the branch"},"confirm":{"title":"Delete branch?","message":"This cannot be undone.","variant":"danger"}}. It works for the custom actions only, not for setState, pushState, removeState or validateForm, and never in watch, on.focus or on.blur.
+- onSuccess runs after an action succeeded and onError after it failed. When the user declines a confirm or the app refuses the action, neither runs and the rest of the bound actions stop. Write each onSuccess/onError out as { "action": ..., "params": {...} } or { "set": {...} }: one written as an expression, or read from state, is ignored.
 - Use setState, pushState and removeState for changes within the UI (tabs, toggles, list edits); they need no round trip to you.
 
 ## Design
@@ -132,7 +133,7 @@ Use action "pushState" to append items to arrays. Params: { statePath: "/arrayPa
 Values inside pushState can contain { "$state": "/statePath" } references to read current state (e.g. the text from an input field).
 Use "$id" inside a pushState value to auto-generate a unique ID.
 Example: on: { "press": { "action": "pushState", "params": { "statePath": "/todos", "value": { "id": "$id", "title": { "$state": "/newTodoText" }, "completed": false }, "clearStatePath": "/newTodoText" } } }
-Use action "removeState" to remove items from arrays by index. Params: { statePath: "/arrayPath", index: N }. Inside a repeated element's children, use { "$index": true } for the current item index. Action params support the same expressions as props: { "$item": "field" } resolves to the absolute state path, { "$index": true } resolves to the index number, and { "$state": "/path" } reads a value from state.
+Use action "removeState" to remove items from arrays by index. Params: { statePath: "/arrayPath", index: N }. Inside a repeated element's children, use { "$index": true } for the current item index. Action params support the same expressions as props: { "$item": "field" } resolves to the absolute state path for built-ins (to the field's value for sendPrompt and the other custom actions), { "$index": true } resolves to the index number, and { "$state": "/path" } reads a value from state.
 For lists where users can add/remove items (todos, carts, etc.), use pushState and removeState instead of hardcoding with setState.
 
 IMPORTANT: State paths use RFC 6901 JSON Pointer syntax (e.g. "/todos/0/title"). Do NOT use JavaScript-style dot notation (e.g. "/todos.length" is WRONG). To generate unique IDs for new items, use "$id" instead of trying to read array length.
@@ -264,7 +265,7 @@ Built-in validation types:
   - email — valid email format
   - minLength — minimum string length (args: { "min": N })
   - maxLength — maximum string length (args: { "max": N })
-  - pattern — match a regex (args: { "pattern": "regex" })
+  - pattern — match a regular expression (args: { "pattern": "regex" }), without backreferences or lookarounds, at most 256 characters; a value longer than 1000 characters fails it
   - min — minimum numeric value (args: { "min": N })
   - max — maximum numeric value (args: { "max": N })
   - numeric — value must be a number
@@ -288,7 +289,7 @@ Maps state paths (JSON Pointers) to action bindings. When the value at a watched
 Example (cascading select — changing the country resets the city):
   {"type":"Select","props":{"label":"Country","value":{"$bindState":"/form/country"},"options":["US","Canada","UK"]},"watch":{"/form/country":{"action":"setState","params":{"statePath":"/form/city","value":""}}},"children":[]}
 
-Use `watch` for cascading dependencies where changing one field should trigger side effects (loading data, resetting dependent fields, computing derived values).
+Use `watch` for cascading dependencies where changing one field should change others (resetting dependent fields, computing derived values) with setState, pushState or removeState. sendPrompt, insertPrompt, openLink and copyText never run from watch.
 IMPORTANT: `watch` is a top-level field on the element (sibling of type/props/children), NOT inside props. Watchers only fire when the value changes, not on initial render.
 
 RULES:
@@ -312,5 +313,5 @@ RULES:
 18. Always include realistic, professional-looking sample data. For blogs include 3-4 posts with varied titles, authors, dates, categories. For products include names, prices, images. Never leave data empty.
 19. There are no color, style or className props: the app's theme styles every component.
 20. Bind every input you need back to a state path of your own with $bindState, and send it with sendPrompt from a button.
-21. sendPrompt, insertPrompt, openLink and copyText run only from the user's click or key press, never from watch.
+21. sendPrompt, insertPrompt, openLink and copyText run only when the user activates a control, never from watch, on.focus or on.blur.
 22. Never put secrets in a spec.

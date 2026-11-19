@@ -1,10 +1,10 @@
-import { createMemo, Show, type JSX } from "solid-js"
+import { createMemo, Show, untrack, type JSX } from "solid-js"
 import type { CodeBlockProps } from "@opencode/plugin/gui"
 import { compileBlock } from "../protocol/compile.ts"
 import { blockKind, canvasIdOf, isMeaningful, parseBlock, type ParsedBlock } from "../protocol/surface.ts"
 import { getSurface, surfaceKey } from "../runtime/surfaces.ts"
-import { HostContext } from "./host.ts"
-import { persistSurface, surfaceEntry } from "./persist.ts"
+import { reserveToolbar } from "./components/shared.tsx"
+import { inlineSurfaceId, persistSurface, surfaceEntry } from "./persist.ts"
 import type { GuiEnv } from "./setup.tsx"
 import { SurfaceView } from "./surface.tsx"
 
@@ -13,14 +13,24 @@ import { SurfaceView } from "./surface.tsx"
  * - an inline block renders as UI in place, its state kept per session and block id;
  * - a canvas block the session's index knows (it is in the agent's reply) renders as a chip that opens the canvas;
  * - a canvas block the index does not know (tool output, a file preview) renders as an untrusted preview when it is
- *   a whole canvas, and keeps its code when it only patches one.
+ *   a whole canvas, and keeps its source when it only patches one.
  *
  * Returns undefined, so the app keeps showing the code, for a block with nothing to render.
  */
 export function renderBlock(env: GuiEnv, props: CodeBlockProps): JSX.Element | undefined {
   const block = parseBlock(props.code)
   if (!isMeaningful(block) && Object.keys(block.header).length === 0) return undefined
-  if (blockKind(props.language, block.header) === "canvas") return <CanvasBlock env={env} props={props} block={block} />
+  if (blockKind(props.language, block.header) === "canvas") {
+    // A patch for a canvas that is not the agent's has nothing to show but its code: when that is already known, the
+    // app keeps its own highlighted code (and its one Copy button).
+    const foreignPatch = untrack(() => {
+      const session = props.session
+      const index = session ? env.sessions.get(session).index : undefined
+      return !!index && index.ready() && !index.knows(block.text) && !(block.hasRoot && !block.header.close)
+    })
+    if (foreignPatch) return undefined
+    return <CanvasBlock env={env} props={props} block={block} />
+  }
   return <InlineSurface env={env} props={props} block={block} />
 }
 
@@ -34,14 +44,21 @@ function InlineSurface(input: {
   const { env, props, block } = input
   // Read `props.session` where it is used: it is a getter that changes when another session is routed.
   const session = () => props.session
-  const id = input.preview ? `preview-${block.hash}` : (block.header.id ?? block.hash)
   const entry = createMemo(() => {
     const current = session()
     return current ? env.sessions.get(current) : undefined
   })
-  const runtime = createMemo(() => getSurface(surfaceKey(session()?.key, "inline", id)))
+  // Trust is the exact text of the block among the agent's text parts (see SessionIndex.knows).
+  const trusted = createMemo(() => !input.preview && !!entry()?.index.knows(block.text))
+  const newest = createMemo(() => {
+    const id = block.header.id
+    if (id === undefined || !trusted()) return true
+    const latest = entry()?.index.latestInline(id)
+    return latest === undefined || latest === block.text
+  })
+  const surfaceId = createMemo(() => inlineSurfaceId(block, trusted(), newest()))
+  const runtime = createMemo(() => getSurface(surfaceKey(session()?.key, "inline", surfaceId())))
   const compiled = () => compileBlock(block)
-  const trusted = () => !input.preview && !!entry()?.index.knows(block.hash)
 
   persistSurface({
     runtime,
@@ -49,12 +66,12 @@ function InlineSurface(input: {
       const current = session()
       return current ? env.store(current) : undefined
     },
-    entry: () => surfaceEntry("inline", id),
+    entry: () => surfaceEntry("inline", surfaceId()),
   })
 
   const info = env.surfaceInfo({
     kind: "inline",
-    id: () => id,
+    id: () => block.header.id ?? block.hash,
     title: () => block.header.title,
     trusted,
     session,
@@ -82,7 +99,7 @@ function CanvasBlock(input: { readonly env: GuiEnv; readonly props: CodeBlockPro
   // While the index loads, assume the block is the agent's (the timeline shows assistant text far more often).
   const chip = () => {
     const index = entry()?.index
-    return !!index && (!index.ready() || index.knows(block.hash))
+    return !!index && (!index.ready() || index.knows(block.text))
   }
   return (
     <Show
@@ -90,10 +107,14 @@ function CanvasBlock(input: { readonly env: GuiEnv; readonly props: CodeBlockPro
       fallback={
         <Show
           when={block.hasRoot && !block.header.close}
+          // A patch for a canvas that turned out not to be the agent's after this rendered: its source as plain text.
+          // The app's own Copy button stays over the block's corner, so this draws no copy control of its own.
           fallback={
-            <HostContext.Provider value={env.host}>
-              <env.host.ui.Code content={props.code} language={props.language} />
-            </HostContext.Provider>
+            <div data-genui="" data-surface="source" ref={reserveToolbar}>
+              <pre data-gu-chrome="source">
+                <code>{props.code}</code>
+              </pre>
+            </div>
           }
         >
           <InlineSurface env={env} props={props} block={block} preview />
@@ -123,7 +144,7 @@ function Chip(input: { readonly env: GuiEnv; readonly props: CodeBlockProps; rea
   }
 
   return (
-    <div data-genui="" data-surface="chip">
+    <div data-genui="" data-surface="chip" ref={reserveToolbar}>
       <div data-gu-chrome="chip" data-state={closed() ? "closed" : state()?.streaming ? "live" : "idle"}>
         <span data-slot="icon">
           <host.ui.Icon name="layout-right" />

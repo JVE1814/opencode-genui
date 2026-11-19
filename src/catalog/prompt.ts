@@ -1,7 +1,8 @@
 import { standardDirectives } from "@json-render/directives"
 import { CANVAS_LANGUAGE, DEFAULT_CANVAS, INLINE_LANGUAGE } from "../shared/constants.ts"
 import { formatSentMessage, MAX_SENT_MESSAGE } from "../shared/message.ts"
-import { getCatalog } from "./index.ts"
+import { MAX_PATTERN_INPUT, MAX_PATTERN_LENGTH } from "../protocol/pattern.ts"
+import { describeActivations, getCatalog, OUTWARD_BURST, OUTWARD_INTERVAL_MS } from "./index.ts"
 
 const FENCE = "```"
 const SPEC = `${FENCE}${INLINE_LANGUAGE}`
@@ -77,8 +78,9 @@ ${indent(sentExample)}
 
 - insertPrompt { text } puts text in the message box for the user to edit and send.
 - openLink { url } opens an http(s) or mailto URL. copyText { text, label? } copies to the clipboard. showToast { title, description?, variant? } shows a notification. openCanvas { canvas } shows a canvas tab.
-- sendPrompt, insertPrompt, openLink and copyText leave the UI: they run only in response to the user's click or key press (such as on.press), never from watch, at most once a second, and the app may ask the user to confirm.
-- "confirm" on an action binding asks the user first, e.g. {"action":"sendPrompt","params":{"text":"Delete the branch"},"confirm":{"title":"Delete branch?","message":"This cannot be undone.","variant":"danger"}}. It works for the custom actions only, not for setState, pushState, removeState or validateForm.
+- sendPrompt, insertPrompt, openLink and copyText leave the UI, so they run only when the user activates a control: ${describeActivations()}. Bound anywhere else (watch, on.focus, on.blur, a Slider's on.change) they never run. One activation runs at most ${OUTWARD_BURST} of them, in order (say, copyText then openLink); the next activation in the same UI must come at least ${OUTWARD_INTERVAL_MS / 1000} s later. The app may ask the user to confirm first, showing exactly what will be sent, opened or copied.
+- "confirm" on an action binding asks the user first, e.g. {"action":"sendPrompt","params":{"text":"Delete the branch"},"confirm":{"title":"Delete branch?","message":"This cannot be undone.","variant":"danger"}}. It works for the custom actions only, not for setState, pushState, removeState or validateForm, and never in watch, on.focus or on.blur.
+- onSuccess runs after an action succeeded and onError after it failed. When the user declines a confirm or the app refuses the action, neither runs and the rest of the bound actions stop. Write each onSuccess/onError out as { "action": ..., "params": {...} } or { "set": {...} }: one written as an expression, or read from state, is ignored.
 - Use setState, pushState and removeState for changes within the UI (tabs, toggles, list edits); they need no round trip to you.
 
 ## Design
@@ -95,15 +97,16 @@ const SYSTEM = `You can answer with interactive UI as well as text. This referen
 const RULES = [
   "There are no color, style or className props: the app's theme styles every component.",
   "Bind every input you need back to a state path of your own with $bindState, and send it with sendPrompt from a button.",
-  "sendPrompt, insertPrompt, openLink and copyText run only from the user's click or key press, never from watch.",
+  "sendPrompt, insertPrompt, openLink and copyText run only when the user activates a control, never from watch, on.focus or on.blur.",
   "Never put secrets in a spec.",
 ]
 
 /**
  * Minimal edits to json-render's generated prompt where it contradicts OpenCode or this catalog: it only knows the
  * `spec` fence, its dynamic-prop examples set colors, its watch example calls an action that does not exist here (on a
- * Select without its required label), and its event examples bind `press` on the first catalog component (Stack, which
- * has no events). Each `from` must occur
+ * Select without its required label) and suggests watch for loading data, its event examples bind `press` on the first
+ * catalog component (Stack, which has no events), it says `$item` params resolve to a path (genui's own actions get the
+ * value), and its `pattern` check knows no limits. Each `from` must occur
  * in the generated text; a test checks that, so a json-render update that changes the wording fails loudly.
  */
 export const PROMPT_FIXES: readonly { readonly from: string; readonly to: string }[] = [
@@ -138,6 +141,18 @@ export const PROMPT_FIXES: readonly { readonly from: string; readonly to: string
   {
     from: 'Example: A Stack with on: { "press":',
     to: 'Example: A Button with on: { "press":',
+  },
+  {
+    from: '{ "$item": "field" } resolves to the absolute state path,',
+    to: '{ "$item": "field" } resolves to the absolute state path for built-ins (to the field\'s value for sendPrompt and the other custom actions),',
+  },
+  {
+    from: '- pattern — match a regex (args: { "pattern": "regex" })',
+    to: `- pattern — match a regular expression (args: { "pattern": "regex" }), without backreferences or lookarounds, at most ${MAX_PATTERN_LENGTH} characters; a value longer than ${MAX_PATTERN_INPUT} characters fails it`,
+  },
+  {
+    from: "Use `watch` for cascading dependencies where changing one field should trigger side effects (loading data, resetting dependent fields, computing derived values).",
+    to: "Use `watch` for cascading dependencies where changing one field should change others (resetting dependent fields, computing derived values) with setState, pushState or removeState. sendPrompt, insertPrompt, openLink and copyText never run from watch.",
   },
 ]
 

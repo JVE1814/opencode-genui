@@ -1,7 +1,8 @@
 import { defineConfig, devices } from "@playwright/test"
 
-// End-to-end tests run against the playground (a fake OpenCode desktop host, see playground/README.md).
-const PORT = 5179
+// End-to-end tests run against the playground (a fake OpenCode desktop host, see playground/README.md). PW_PORT picks
+// another port, so a run never shares (or loses) a dev server another run started.
+const PORT = Number(process.env.PW_PORT ?? 5179)
 
 export default defineConfig({
   testDir: "test/e2e",

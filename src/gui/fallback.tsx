@@ -1,4 +1,4 @@
-import { createMemo, For, Show, type JSX } from "solid-js"
+import { children, createMemo, For, Show, type JSX } from "solid-js"
 import type { ComponentRenderProps } from "@json-render/solid"
 import type { LineError } from "../protocol/surface.ts"
 import type { SurfaceIssue } from "../protocol/validate.ts"
@@ -11,15 +11,20 @@ const SHOWN_ISSUES = 12
 export const plural = (host: Host, key: string, count: number) =>
   host.t(`${key}.${count === 1 ? "one" : "other"}`, { count })
 
-/** What the renderer shows for an element whose type the catalog does not have: a muted note, then its children. */
+/**
+ * What the renderer shows for an element whose type the catalog does not have: a muted note, then its children.
+ * `props.children` comes from the element renderer (src/gui/element.ts), which keeps it stable across updates.
+ */
 export function UnknownElement(props: ComponentRenderProps): JSX.Element {
   const host = useHost()
   const type = () => (typeof props.element?.type === "string" ? props.element.type.slice(0, 60) : "?")
+  const kids = children(() => props.children)
+  const hasChildren = () => kids.toArray().some((node) => node !== null && node !== undefined && node !== "")
   return (
     <div data-gu-chrome="unknown">
       <span data-slot="note">{host.t("surface.unknown", { type: type() })}</span>
-      <Show when={props.children}>
-        <div data-slot="children">{props.children}</div>
+      <Show when={hasChildren()}>
+        <div data-slot="children">{kids()}</div>
       </Show>
     </div>
   )

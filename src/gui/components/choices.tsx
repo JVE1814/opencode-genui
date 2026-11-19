@@ -3,7 +3,7 @@ import { isIconName, type GenuiIconName } from "../../catalog/icons.ts"
 import { safeUrl } from "../../protocol/url.ts"
 import { useHost, useSurface } from "../host.ts"
 import { openLink } from "../outward.ts"
-import { fire, stableList } from "./inputs.tsx"
+import { stableList, useActivation } from "./inputs.tsx"
 import { bool, list, num, oneOf, str, useBound, type GenuiComponent } from "./shared.tsx"
 
 // Buttons and choice controls: Button, Link, Toggle, ToggleGroup, ButtonGroup, DropdownMenu, Pagination. Styles:
@@ -82,6 +82,7 @@ const BUTTON_VARIANTS = { primary: "contrast", secondary: "neutral", ghost: "gho
 const Button: GenuiComponent<"Button"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
+  const activate = useActivation(ctx)
   const [busy, setBusy] = createSignal(false)
   const variant = () => oneOf(ctx.props.variant, ["primary", "secondary", "ghost", "danger"] as const, "secondary")
   const icon = () => (isIconName(ctx.props.icon) ? ctx.props.icon : undefined)
@@ -92,7 +93,7 @@ const Button: GenuiComponent<"Button"> = (ctx) => {
     running = true
     const timer = setTimeout(() => setBusy(true), BUSY_DELAY_MS)
     try {
-      await fire(ctx, "press")
+      await activate("press")
     } finally {
       clearTimeout(timer)
       running = false
@@ -121,18 +122,19 @@ const Button: GenuiComponent<"Button"> = (ctx) => {
 // ---------------------------------------------------------------------------------------------------------------------
 
 // Only http(s) and mailto hrefs become links (src/protocol/url.ts), and they open through the outward gate, never in
-// the app's window. Without a usable href it is a button that looks like a link and fires on.press.
+// the app's window. Without a usable href it is a button that looks like a link and fires on.press. A click is one
+// activation: the href opens first, then on.press runs within the same burst (and not when the link was refused).
 const Link: GenuiComponent<"Link"> = (ctx) => {
   const host = useHost()
   const surface = useSurface()
+  const activate = useActivation(ctx)
   const url = createMemo(() => safeUrl(ctx.props.href, "link"))
   const blocked = () => !url() && str(ctx.props.href).trim() !== ""
   const label = () => str(ctx.props.label) || url() || ""
 
   const open = (event: MouseEvent, href: string) => {
     event.preventDefault()
-    void openLink(host, surface, href)
-    void fire(ctx, "press")
+    void activate("press", () => openLink(host, surface, href))
   }
 
   return (
@@ -144,7 +146,7 @@ const Link: GenuiComponent<"Link"> = (ctx) => {
           data-gu="link"
           data-blocked={blocked() ? "" : undefined}
           title={blocked() ? host.t("c.link.blocked") : undefined}
-          onClick={() => void fire(ctx, "press")}
+          onClick={() => void activate("press")}
         >
           {label()}
         </button>
@@ -174,6 +176,7 @@ const Link: GenuiComponent<"Link"> = (ctx) => {
 const Toggle: GenuiComponent<"Toggle"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
+  const activate = useActivation(ctx)
   const [pressed, setPressed] = useBound<boolean>(ctx, "pressed", false, asBoolean)
   const icon = () => (isIconName(ctx.props.icon) ? ctx.props.icon : undefined)
 
@@ -186,7 +189,7 @@ const Toggle: GenuiComponent<"Toggle"> = (ctx) => {
       disabled={bool(ctx.props.disabled)}
       onClick={() => {
         setPressed(!pressed())
-        void fire(ctx, "change")
+        void activate("change")
       }}
     >
       <Show when={icon()}>{(name) => <ui.Icon name={name()} />}</Show>
@@ -202,6 +205,7 @@ const Toggle: GenuiComponent<"Toggle"> = (ctx) => {
 const ToggleGroup: GenuiComponent<"ToggleGroup"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
+  const activate = useActivation(ctx)
   const items = stableList(() => parseItems(ctx.props.items), sameItem)
   const [value, setValue] = useBound<unknown>(ctx, "value", undefined)
   const multiple = () => ctx.props.type === "multiple"
@@ -224,7 +228,7 @@ const ToggleGroup: GenuiComponent<"ToggleGroup"> = (ctx) => {
       if (current.length === 1 && current[0] === item.value) return
       setValue(item.value)
     }
-    void fire(ctx, "change")
+    void activate("change")
   }
 
   return (
@@ -264,6 +268,7 @@ const ToggleGroup: GenuiComponent<"ToggleGroup"> = (ctx) => {
 // The app's segmented control (navigation/segmented-control), with its static pressed look: the sliding indicator is
 // an animation from a library the plugin cannot load.
 const ButtonGroup: GenuiComponent<"ButtonGroup"> = (ctx) => {
+  const activate = useActivation(ctx)
   const buttons = stableList(() => parseItems(ctx.props.buttons), sameItem)
   const [selected, setSelected] = useBound<string>(ctx, "selected", "", asKey)
 
@@ -281,7 +286,7 @@ const ButtonGroup: GenuiComponent<"ButtonGroup"> = (ctx) => {
               onClick={() => {
                 if (pressed()) return
                 setSelected(button.value)
-                void fire(ctx, "change")
+                void activate("change")
               }}
             >
               <span data-slot="label">{button.label}</span>
@@ -300,6 +305,7 @@ const ButtonGroup: GenuiComponent<"ButtonGroup"> = (ctx) => {
 const DropdownMenu: GenuiComponent<"DropdownMenu"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
+  const activate = useActivation(ctx)
   const items = stableList(() => parseItems(ctx.props.items), sameItem)
   const [, setValue] = useBound<string>(ctx, "value", "", asKey)
   const entries = createMemo(() =>
@@ -308,7 +314,7 @@ const DropdownMenu: GenuiComponent<"DropdownMenu"> = (ctx) => {
       ...(item.icon ? { icon: item.icon } : {}),
       onSelect: () => {
         setValue(item.value)
-        void fire(ctx, "select")
+        void activate("select")
       },
     })),
   )
@@ -347,6 +353,7 @@ function pageRange(current: number, total: number): (number | "ellipsis")[] {
 const Pagination: GenuiComponent<"Pagination"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
+  const activate = useActivation(ctx)
   const total = () => clamp(Math.floor(num(ctx.props.totalPages, 1)), 1, MAX_PAGES)
   const [stored, setPage] = useBound<number>(ctx, "page", 1, asPage)
   const page = () => clamp(Math.round(stored()), 1, total())
@@ -356,7 +363,7 @@ const Pagination: GenuiComponent<"Pagination"> = (ctx) => {
     const next = clamp(target, 1, total())
     if (next === page()) return
     setPage(next)
-    void fire(ctx, "change")
+    void activate("change")
   }
 
   return (

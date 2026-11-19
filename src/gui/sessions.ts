@@ -1,4 +1,13 @@
-import { createEffect, createMemo, createRoot, createSignal, onCleanup, untrack, type Accessor } from "solid-js"
+import {
+  createEffect,
+  createMemo,
+  createRoot,
+  createSignal,
+  onCleanup,
+  untrack,
+  type Accessor,
+  type Owner,
+} from "solid-js"
 import type { SessionRef } from "@opencode/plugin/gui"
 import type { CanvasSnapshot } from "../protocol/fold.ts"
 import { backfill } from "../runtime/backfill.ts"
@@ -10,10 +19,21 @@ import { writeStore, type SessionStore } from "./persist.ts"
 export const SNAPSHOT_SAVE_DELAY_MS = 300
 
 /**
- * How long the index waits for the session's messages when it has snapshots, before it treats an empty transcript as
- * loaded. Until then, an empty list means "not loaded yet", and every snapshot would look newer than the transcript.
+ * How long the index waits for the session's store and messages before it counts as loaded with whatever it has. Until
+ * then, canvas tabs stay hidden; after it, a store that never loads (a failed storage read, a session whose location
+ * stays unknown) leaves the index without snapshots instead of loading forever.
  */
 export const MESSAGES_GRACE_MS = 4000
+
+export interface SessionRegistryOptions {
+  /**
+   * The owner whose context every session root inherits: the plugin's root in setup, so an error in an index's effects
+   * fails the plugin (the host's handler for it) whoever first asked for the session. Disposal stays with the registry.
+   */
+  readonly owner?: Owner | null
+  /** MESSAGES_GRACE_MS, for tests. */
+  readonly graceMs?: number
+}
 
 /** One session's canvas index and what keeps it in step with the store. Lives in its own reactive root. */
 export interface SessionEntry {
@@ -57,7 +77,11 @@ function mergeMessages(previous: readonly MessageLike[], next: readonly MessageL
   return [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
-function createEntry(session: SessionRef, store: (session: SessionRef) => SessionStore): SessionEntry {
+function createEntry(
+  session: SessionRef,
+  store: (session: SessionRef) => SessionStore,
+  options: SessionRegistryOptions,
+): SessionEntry {
   return createRoot((dispose) => {
     const id = session.id
     // The session's server is a live ref: its data and client are read each time, as a restarted server replaces them.
@@ -86,14 +110,16 @@ function createEntry(session: SessionRef, store: (session: SessionRef) => Sessio
     const [extra, setExtra] = createSignal<readonly MessageLike[]>([])
 
     const [grace, setGrace] = createSignal(false)
-    const graceTimer = setTimeout(() => setGrace(true), MESSAGES_GRACE_MS)
+    const graceTimer = setTimeout(() => setGrace(true), options.graceMs ?? MESSAGES_GRACE_MS)
     onCleanup(() => clearTimeout(graceTimer))
 
-    // Ready once the snapshots have loaded and the window has too (or there is nothing a missing window would hide).
+    // Ready once the snapshots have loaded and the window has too (or there is nothing a missing window would hide), or
+    // after the grace period with whatever is there: no spinner waits forever on a store that never loads.
     const loaded = createMemo<boolean>(
       (previous) =>
         previous ||
-        (persisted().ready() && (messages().length > 0 || Object.keys(snapshots()).length === 0 || grace())),
+        grace() ||
+        (persisted().ready() && (messages().length > 0 || Object.keys(snapshots()).length === 0)),
       false,
     )
 
@@ -225,14 +251,17 @@ function createEntry(session: SessionRef, store: (session: SessionRef) => Sessio
         if (next.server !== untrack(ref).server) setRef(next)
       },
     } as SessionEntry & { update(next: SessionRef): void }
-  })
+  }, options.owner)
 }
 
 /**
  * The per-session canvas indexes of this window, one reactive root each, created when a session is first rendered and
  * disposed when its shell tab closes (`prune`).
  */
-export function createSessionRegistry(store: (session: SessionRef) => SessionStore): SessionRegistry {
+export function createSessionRegistry(
+  store: (session: SessionRef) => SessionStore,
+  options: SessionRegistryOptions = {},
+): SessionRegistry {
   const entries = new Map<string, SessionEntry & { update(next: SessionRef): void }>()
   return {
     get(session) {
@@ -241,7 +270,7 @@ export function createSessionRegistry(store: (session: SessionRef) => SessionSto
         existing.update(session)
         return existing
       }
-      const created = createEntry(session, store) as SessionEntry & { update(next: SessionRef): void }
+      const created = createEntry(session, store, options) as SessionEntry & { update(next: SessionRef): void }
       entries.set(session.key, created)
       return created
     },

@@ -11,7 +11,8 @@ import {
   type JSX,
 } from "solid-js"
 import { useStateBinding } from "@json-render/solid"
-import { useHost } from "../host.ts"
+import { useHost, useSurface } from "../host.ts"
+import { hasIntent } from "../outward.ts"
 import { MarkdownText } from "./content.tsx"
 import { GuardedImage, statePath } from "./data.tsx"
 import { list, str, uid, type GenuiComponent } from "./shared.tsx"
@@ -46,9 +47,17 @@ interface ModalContext {
  * A modal shown while the boolean at state path `openPath` is true. Escape, a click on the backdrop and the close
  * button write false there; writing false from elsewhere (a setState action) closes it. The path is reactive: when the
  * spec changes it, the modal follows the new path's value.
+ *
+ * On an untrusted surface (a block in tool output or a previewed file) a modal opens only while the surface dispatches
+ * an activation of one of its controls (a press, a pick, Enter in a field, a choice; see `withIntent` in
+ * src/gui/outward.ts): never from the spec's initial state, a watch, focus or blur (tabbing through a field), since a
+ * model-written modal over the whole window is a phishing tool. An open it refuses writes false back, so the user's own
+ * press can open it later. The modal then says where it comes from.
  */
 function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
   const host = useHost()
+  const surface = useSurface()
+  const untrusted = surface?.trusted === false
   const id = uid(kind)
   const title = () => str(ctx.props.title)
   const description = () => str(ctx.props.description).trim()
@@ -80,6 +89,10 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
       if (attempt < 20 && typeof requestAnimationFrame === "function") {
         requestAnimationFrame(() => show(element, attempt + 1))
       }
+      return
+    }
+    if (untrusted && !hasIntent(surface)) {
+      setOpen(false)
       return
     }
     try {
@@ -117,7 +130,10 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
       data-gu={kind}
       ref={dialog}
       aria-labelledby={`${id}-title`}
-      aria-describedby={description() ? `${id}-description` : undefined}
+      aria-describedby={
+        [description() ? `${id}-description` : "", untrusted ? `${id}-untrusted` : ""].filter(Boolean).join(" ") ||
+        undefined
+      }
       onClose={() => {
         if (!disposed && open()) setOpen(false)
       }}
@@ -138,6 +154,14 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
             <Show when={description()}>
               <p data-slot="description" id={`${id}-description`}>
                 {description()}
+              </p>
+            </Show>
+            <Show when={untrusted}>
+              <p data-slot="untrusted" id={`${id}-untrusted`}>
+                <span data-slot="icon" aria-hidden="true">
+                  <host.ui.Icon name="shield" size="small" />
+                </span>
+                <span>{host.t("c.dialog.untrusted")}</span>
               </p>
             </Show>
           </div>

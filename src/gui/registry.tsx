@@ -1,6 +1,7 @@
-import { defineRegistry, type Actions, type ComponentRegistry, type Components } from "@json-render/solid"
-import { ACTION_NAMES } from "../catalog/actions.ts"
-import { getCatalog, type GenuiCatalog } from "../catalog/index.ts"
+import type { DirectiveDefinition } from "@json-render/core"
+import { standardDirectives } from "@json-render/directives"
+import type { ComponentRegistry, ComponentRenderer, Components } from "@json-render/solid"
+import type { GenuiCatalog } from "../catalog/index.ts"
 import { chartComponents } from "./components/chart.tsx"
 import { choiceComponents } from "./components/choices.tsx"
 import { contentComponents } from "./components/content.tsx"
@@ -8,6 +9,8 @@ import { dataComponents } from "./components/data.tsx"
 import { inputComponents } from "./components/inputs.tsx"
 import { layoutComponents } from "./components/layout.tsx"
 import { overlayComponents } from "./components/overlay.tsx"
+import { buildRegistry, createElementRenderer, guardDirectives, type ElementImpl } from "./element.ts"
+import { UnknownElement } from "./fallback.tsx"
 
 /** Every catalog component's native implementation. `satisfies` makes a missing one a type error. */
 export function genuiComponents(): Components<GenuiCatalog> {
@@ -22,19 +25,31 @@ export function genuiComponents(): Components<GenuiCatalog> {
   } satisfies Components<GenuiCatalog>
 }
 
-let registry: ComponentRegistry | undefined
+/** What every surface renders with: json-render's `registry`, the Renderer's `fallback`, and the `directives`. */
+export interface Rendering {
+  readonly registry: ComponentRegistry
+  readonly fallback: ComponentRenderer
+  readonly directives: DirectiveDefinition[]
+}
+
+let rendering: Rendering | undefined
 
 /**
- * The component registry every surface renders with, built on first use (the bundle is also evaluated in the desktop's
- * main process, where it must stay cheap). The registry's own action handlers are no-ops: each surface passes the real
- * ones (src/gui/actions.ts) to its JSONUIProvider, bound to that surface.
+ * Built on first use (the bundle is also evaluated in the desktop's main process, where it must stay cheap).
+ *
+ * Every element, known type or not, renders through one element renderer (src/gui/element.ts) that keeps children
+ * mounted while the element changes and follows changes of its type; it is both each registry entry and the
+ * fallback. Action handlers are not part of it: each surface passes its own (src/gui/actions.ts) to its provider.
  */
-export function getRegistry(): ComponentRegistry {
-  if (!registry) {
-    const actions = Object.fromEntries(
-      ACTION_NAMES.map((name) => [name, async () => {}]),
-    ) as unknown as Actions<GenuiCatalog>
-    registry = defineRegistry(getCatalog(), { components: genuiComponents(), actions }).registry
+export function getRendering(): Rendering {
+  if (!rendering) {
+    const components = genuiComponents() as unknown as Record<string, ElementImpl>
+    const element = createElementRenderer(components, UnknownElement)
+    rendering = {
+      registry: buildRegistry(Object.keys(components), element),
+      fallback: element,
+      directives: guardDirectives(standardDirectives),
+    }
   }
-  return registry
+  return rendering
 }

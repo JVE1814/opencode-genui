@@ -31,6 +31,32 @@ const form = (): Spec =>
 const codes = (surface: { issues: readonly { code: string }[] }) => surface.issues.map((issue) => issue.code)
 
 describe("compileSpec", () => {
+  test("an outward action in a watch is tagged, still renders, and is reported (also while streaming)", () => {
+    const raw = deepFreeze({
+      root: "q",
+      elements: {
+        q: {
+          type: "Input",
+          props: { label: "Query", value: { $bindState: "/query" } },
+          watch: {
+            "/query": [
+              { action: "showToast", params: { title: "ran" } },
+              { action: "sendPrompt", params: { text: "x" } },
+            ],
+          },
+        },
+      },
+      state: { query: "" },
+    }) as unknown as Spec
+    for (const streaming of [false, true]) {
+      const compiled = compileSpec(raw, { streaming })
+      expect(compiled.fatal).toBe(false)
+      expect(compiled.spec).not.toBeNull()
+      expect(codes(compiled)).toEqual(["outward_action_in_watch"])
+      expect((compiled.spec!.elements.q as Loose).watch["/query"][1].params.__genuiPassive).toBe('watch["/query"]')
+    }
+  })
+
   test("normalizes and validates", () => {
     const raw = form()
     const compiled = compileSpec(raw)

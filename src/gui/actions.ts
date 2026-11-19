@@ -1,14 +1,37 @@
-import { CONFIRM_PARAM, type ActionName } from "../catalog/actions.ts"
+import type { ActionBinding } from "@json-render/core"
+import {
+  CONFIRM_PARAM,
+  ON_ERROR_PARAM,
+  ON_SUCCESS_PARAM,
+  PASSIVE_PARAM,
+  RESERVED_PARAMS,
+  type ActionName,
+} from "../catalog/actions.ts"
+import { normalizeChained } from "../protocol/normalize.ts"
 import { sanitizeId } from "../protocol/surface.ts"
 import { safeUrl } from "../protocol/url.ts"
 import { formatSentMessage } from "../shared/message.ts"
 import type { Host, SurfaceContext } from "./host.ts"
-import { allowOutward, hasUserGesture, openLink, type RequestedConfirm } from "./outward.ts"
+import {
+  allowOutward,
+  confirmIntent,
+  confirmOptions,
+  hasIntent,
+  hasUserGesture,
+  openLink,
+  type RequestedConfirm,
+} from "./outward.ts"
 
 /**
- * Thrown when an action does not run: the user declined its confirm, there was no user gesture, the rate limit hit, or
- * its input was refused. Throwing (rather than resolving) keeps json-render from running the binding's `onSuccess` and
- * the actions bound after it, as its own confirm dialog does on cancel. Components that fire events treat it as quiet.
+ * Thrown when an action does not run: the user declined its confirm, it was not the result of an activation, the rate
+ * limit hit, or its input was refused. A refusal is not a failure: it never runs the binding's onError (nor onSuccess),
+ * and it stops the rest of the binding's chain, as json-render's own confirm dialog does on cancel. Components that fire
+ * events treat it as quiet.
+ *
+ * How: the normalizer moves a custom action's onSuccess/onError into reserved params (src/protocol/normalize.ts), so
+ * json-render's executeAction sees neither. A refusal thrown here then propagates through executeAction and execute
+ * into the element's emit loop, which stops; genui's handler runs onSuccess after a success and onError after a genuine
+ * failure itself.
  */
 export class ActionRefused extends Error {
   override readonly name = "ActionRefused"
@@ -21,9 +44,24 @@ export type ActionHandler = (params: Record<string, unknown>) => Promise<void>
 
 export type Handlers = Record<ActionName, ActionHandler>
 
+/** An action binding as json-render's `execute` takes it. */
+export type Binding = ActionBinding
+
+/**
+ * json-render's own `execute` and state `set` for chained handlers, connected from inside the provider by
+ * `ChainBridge` (src/gui/chain.ts): a chained action then runs exactly as a bound one (built-ins included), and a `set`
+ * reaches watches.
+ */
+export interface ChainLink {
+  execute?: (binding: Binding) => Promise<void>
+  set?: (path: string, value: unknown) => void
+}
+
 export interface HandlerOptions {
   /** Reads the surface's state, for `${/path}` placeholders in a requested confirm's text (as json-render's own). */
   readonly read?: (path: string) => unknown
+  /** Where onSuccess/onError handlers run (see ChainLink). Without it, chained actions and sets are skipped. */
+  readonly link?: ChainLink
 }
 
 /** Toasts a surface may show per window of time, so a `watch` loop cannot flood the corner of the window. */
@@ -87,24 +125,47 @@ export function readConfirm(value: unknown, read?: HandlerOptions["read"]): Requ
   }
 }
 
-/** Splits the confirm the normalizer moved into `params[CONFIRM_PARAM]` from the action's own params. */
-export function takeConfirm(
-  params: unknown,
-  read?: HandlerOptions["read"],
-): { readonly params: Record<string, unknown>; readonly confirm: RequestedConfirm | undefined } {
-  if (!isRecord(params)) return { params: {}, confirm: undefined }
-  if (!Object.hasOwn(params, CONFIRM_PARAM)) return { params, confirm: undefined }
-  const { [CONFIRM_PARAM]: requested, ...rest } = params
-  return { params: rest, confirm: readConfirm(requested, read) }
+/** An action's own params, and what the normalizer put in its reserved params (see src/catalog/actions.ts). */
+export interface Reserved {
+  readonly params: Record<string, unknown>
+  readonly confirm: RequestedConfirm | undefined
+  /** Where the binding runs when that is not an activation (`watch["/q"]`, `on.blur`); outward actions refuse. */
+  readonly passive: string | undefined
+  readonly onSuccess: unknown
+  readonly onError: unknown
+}
+
+/** Splits the reserved params the normalizer added (confirm, chains, passive tag) from the action's own params. */
+export function takeReserved(params: unknown, read?: HandlerOptions["read"]): Reserved {
+  if (!isRecord(params))
+    return { params: {}, confirm: undefined, passive: undefined, onSuccess: undefined, onError: undefined }
+  if (!RESERVED_PARAMS.some((key) => Object.hasOwn(params, key)))
+    return { params, confirm: undefined, passive: undefined, onSuccess: undefined, onError: undefined }
+  const own: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(params)) if (!RESERVED_PARAMS.includes(key)) own[key] = value
+  const passive = params[PASSIVE_PARAM]
+  return {
+    params: own,
+    confirm: readConfirm(params[CONFIRM_PARAM], read),
+    passive: passive === undefined || passive === null || passive === false ? undefined : String(passive),
+    onSuccess: params[ON_SUCCESS_PARAM],
+    onError: params[ON_ERROR_PARAM],
+  }
 }
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : typeof error === "string" ? error : "")
 
 /**
- * The handlers of genui's custom actions for one surface. Outward actions (send, insert, open link, copy) go through
- * the outward gate: a user gesture, one per second per surface, and a confirm when the settings, the surface's trust or
- * the binding ask for one. `showToast` and `openCanvas` are rate limited, and ask first only when the binding has a
- * `confirm` (which then also needs a user gesture). A handler that does not run throws `ActionRefused`.
+ * The handlers of genui's custom actions for one surface.
+ *
+ * - Outward actions (send, insert, open link, copy) go through the outward gate (src/gui/outward.ts): they run only as
+ *   the result of an activation of a control in this surface, a few per activation, one activation per second, with a
+ *   confirm when the settings, the surface's trust or the binding ask for one. In a passive binding (watch, on.focus,
+ *   on.blur, ...) they are refused outright.
+ * - `showToast` and `openCanvas` are rate limited, and ask first only when the binding has a `confirm`, which then also
+ *   needs an activation.
+ * - A handler that does not run throws `ActionRefused`; onSuccess runs after a success, onError after a genuine failure
+ *   (which it then handles, so the binding's chain goes on, as in json-render).
  */
 export function createHandlers(host: Host, surface: SurfaceContext, options: HandlerOptions = {}): Handlers {
   const toastTimes: number[] = []
@@ -114,17 +175,33 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
     throw new ActionRefused(reason)
   }
 
-  // A confirm the binding asked for on an action that does not leave the surface. A dialog that pops up on its own
-  // is hostile, so it needs a user gesture too.
-  const confirmRequested = async (requested: RequestedConfirm, title: string, detail?: string) => {
-    if (!hasUserGesture()) return false
-    const notes = [requested.message, surface.trusted ? undefined : host.t("confirm.untrusted"), detail].filter(Boolean)
-    return host.confirm({
-      title: requested.title || title,
-      ...(notes.length > 0 ? { description: notes.join("\n\n") } : {}),
-      confirm: requested.confirmLabel || host.t("confirm.continue"),
-      ...(requested.cancelLabel ? { cancel: requested.cancelLabel } : {}),
-      ...(requested.danger ? { danger: true } : {}),
+  // A confirm the binding asked for on an action that does not leave the surface. A dialog that pops up on its own is
+  // hostile, so it needs an activation of this surface too.
+  const confirmRequested = async (reserved: Reserved, title: string, detail?: string) => {
+    if (reserved.passive !== undefined || !hasIntent(surface) || !hasUserGesture()) return false
+    return confirmIntent(
+      host,
+      surface,
+      confirmOptions(host, surface, {
+        title,
+        ...(detail ? { detail } : {}),
+        confirmLabel: host.t("confirm.continue"),
+        ...(reserved.confirm ? { requested: reserved.confirm } : {}),
+      }),
+    )
+  }
+
+  // The outward gate for an action a spec bound.
+  const outward = (
+    reserved: Reserved,
+    name: string,
+    input: { title: string; detail: string; confirmLabel: string },
+  ) => {
+    if (reserved.passive !== undefined) refuse(`${name}: not from an activation (${reserved.passive})`)
+    return allowOutward(host, surface, {
+      ...input,
+      requireIntent: true,
+      ...(reserved.confirm ? { requested: reserved.confirm } : {}),
     })
   }
 
@@ -133,19 +210,51 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
     return refuse("no session")
   }
 
+  // Runs an onSuccess/onError handler: a chained action through json-render (its params were resolved with the bound
+  // action's), or `set` through the provider's store, with "$error.message" filled in for onError. The resolved handler
+  // is normalized again first, with the parent's passive tag: whatever the resolution produced, json-render never sees
+  // a `confirm` (its dialog never renders, so the dispatch would hang) or onSuccess/onError of its own, and a chain of a
+  // passive binding stays passive.
+  const runChained = async (handler: unknown, parent: Reserved, error?: unknown) => {
+    const binding = normalizeChained(handler, parent.passive)
+    if (!binding) return
+    if (typeof binding.action === "string") {
+      await options.link?.execute?.(binding as unknown as Binding)
+      return
+    }
+    const set = options.link?.set
+    if (!set || !isRecord(binding.set)) return
+    for (const [path, value] of Object.entries(binding.set))
+      set(path, value === "$error.message" && error !== undefined ? errorText(error) : value)
+  }
+
+  // Wraps an action's body with its chain: onSuccess after a success, onError after a genuine failure (then handled),
+  // neither after a refusal (which propagates and stops the binding's chain).
+  const action =
+    (body: (params: Record<string, unknown>, reserved: Reserved) => Promise<void>): ActionHandler =>
+    async (raw) => {
+      const reserved = takeReserved(raw, options.read)
+      try {
+        await body(reserved.params, reserved)
+      } catch (error) {
+        if (isRefusal(error) || !isRecord(reserved.onError)) throw error
+        await runChained(reserved.onError, reserved, error)
+        return
+      }
+      await runChained(reserved.onSuccess, reserved)
+    }
+
   return {
-    async sendPrompt(raw) {
-      const { params, confirm } = takeConfirm(raw, options.read)
+    sendPrompt: action(async (params, reserved) => {
       const message = formatSentMessage(
         params.data === undefined ? { text: text(params.text) } : { text: text(params.text), data: params.data },
       )
       const send = surface.sendPrompt
       if (!send) return noSession()
-      const ok = await allowOutward(host, surface, {
+      const ok = await outward(reserved, "sendPrompt", {
         title: host.t("confirm.send"),
         detail: message,
         confirmLabel: host.t("confirm.sendLabel"),
-        ...(confirm ? { requested: confirm } : {}),
       })
       if (!ok) refuse("sendPrompt")
       try {
@@ -155,43 +264,43 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
         host.toast({ title: host.t("action.sendFailed"), ...(description ? { description } : {}), variant: "error" })
         throw error
       }
-    },
+    }),
 
-    async insertPrompt(raw) {
-      const { params, confirm } = takeConfirm(raw, options.read)
+    insertPrompt: action(async (params, reserved) => {
       const value = text(params.text)
       if (!value.trim()) refuse("insertPrompt: no text")
       const insert = surface.insertPrompt
       if (!insert) return noSession()
-      const ok = await allowOutward(host, surface, {
+      const ok = await outward(reserved, "insertPrompt", {
         title: host.t("confirm.insert"),
         detail: value,
         confirmLabel: host.t("confirm.insertLabel"),
-        ...(confirm ? { requested: confirm } : {}),
       })
       if (!ok) refuse("insertPrompt")
       insert(value)
-    },
+    }),
 
-    async openLink(raw) {
-      const { params, confirm } = takeConfirm(raw, options.read)
+    openLink: action(async (params, reserved) => {
+      if (reserved.passive !== undefined) refuse(`openLink: not from an activation (${reserved.passive})`)
       const url = safeUrl(params.url, "link")
       if (!url) {
         host.toast({ title: host.t("action.linkBlocked"), variant: "error" })
         return refuse("openLink: refused URL")
       }
-      if (!(await openLink(host, surface, url, confirm))) refuse("openLink")
-    },
+      const opened = await openLink(host, surface, url, {
+        requireIntent: true,
+        ...(reserved.confirm ? { requested: reserved.confirm } : {}),
+      })
+      if (!opened) refuse("openLink")
+    }),
 
-    async copyText(raw) {
-      const { params, confirm } = takeConfirm(raw, options.read)
+    copyText: action(async (params, reserved) => {
       const value = text(params.text)
       const label = clip(text(params.label).trim(), 60)
-      const ok = await allowOutward(host, surface, {
+      const ok = await outward(reserved, "copyText", {
         title: host.t("confirm.copy"),
         detail: value,
         confirmLabel: host.t("confirm.copyLabel"),
-        ...(confirm ? { requested: confirm } : {}),
       })
       if (!ok) refuse("copyText")
       try {
@@ -204,10 +313,9 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
         title: label ? host.t("action.copiedLabel", { label }) : host.t("action.copied"),
         variant: "success",
       })
-    },
+    }),
 
-    async showToast(raw) {
-      const { params, confirm } = takeConfirm(raw, options.read)
+    showToast: action(async (params, reserved) => {
       const title = clip(text(params.title).trim(), MAX_TITLE)
       if (!title) refuse("showToast: no title")
       const now = Date.now()
@@ -215,13 +323,15 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
       if (toastTimes.length >= TOAST_BURST) refuse("showToast: rate limited")
       toastTimes.push(now)
       const description = clip(text(params.description).trim(), MAX_MESSAGE)
-      if (confirm && !(await confirmRequested(confirm, host.t("confirm.toast"), title))) refuse("showToast")
+      if (reserved.confirm !== undefined) {
+        const detail = description ? `${title}\n\n${description}` : title
+        if (!(await confirmRequested(reserved, host.t("confirm.toast"), detail))) refuse("showToast")
+      }
       const variant = params.variant === "success" || params.variant === "error" ? params.variant : "default"
       host.toast({ title, ...(description ? { description } : {}), variant })
-    },
+    }),
 
-    async openCanvas(raw) {
-      const { params, confirm } = takeConfirm(raw, options.read)
+    openCanvas: action(async (params, reserved) => {
       const id = sanitizeId(params.canvas)
       if (!id) refuse("openCanvas: no canvas id")
       const open = surface.openCanvas
@@ -229,10 +339,12 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
       const now = Date.now()
       if (now - lastCanvas < OPEN_CANVAS_INTERVAL_MS) refuse("openCanvas: rate limited")
       lastCanvas = now
-      if (confirm && !(await confirmRequested(confirm, host.t("confirm.openCanvas", { canvas: id! })))) {
+      if (
+        reserved.confirm !== undefined &&
+        !(await confirmRequested(reserved, host.t("confirm.openCanvas", { canvas: id! })))
+      )
         refuse("openCanvas")
-      }
       open(id!)
-    },
+    }),
   }
 }

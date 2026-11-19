@@ -9,17 +9,20 @@ import {
   type Accessor,
   type JSX,
 } from "solid-js"
-import { standardDirectives } from "@json-render/directives"
 import { JSONUIProvider, Renderer } from "@json-render/solid"
 import type { CompiledSurface } from "../protocol/compile.ts"
+import { secretPaths } from "../protocol/normalize.ts"
 import type { LineError } from "../protocol/surface.ts"
 import { formatIssuesForAgent, type SurfaceIssue } from "../protocol/validate.ts"
 import type { SurfaceRuntime } from "../runtime/surfaces.ts"
-import { createHandlers } from "./actions.ts"
-import { ErrorCard, IssuesFooter, UnknownElement } from "./fallback.tsx"
+import { VALIDATION_FUNCTIONS } from "../protocol/pattern.ts"
+import { createHandlers, type ChainLink } from "./actions.ts"
+import { ChainBridge } from "./chain.ts"
+import { reserveToolbar } from "./components/shared.tsx"
+import { ErrorCard, IssuesFooter } from "./fallback.tsx"
 import { HostContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
 import { allowOutward } from "./outward.ts"
-import { getRegistry } from "./registry.tsx"
+import { getRendering } from "./registry.tsx"
 
 export interface SurfaceViewProps {
   readonly host: Host
@@ -100,6 +103,8 @@ function Frame(props: SurfaceViewProps) {
     props.info.kind === "inline" ? untrack(() => props.runtime().height) : undefined,
   )
   onMount(() => {
+    // In place of a code block: keep clear of its toolbar.
+    if (root && props.info.kind === "inline") reserveToolbar(root)
     if (!root || typeof ResizeObserver === "undefined") return
     const observer = new ResizeObserver((entries) => {
       const entry = entries[entries.length - 1]
@@ -169,11 +174,15 @@ function Render(props: {
   readonly canFix: Accessor<boolean>
 }) {
   const store = props.runtime.store
+  // What password Inputs are bound to is never persisted (the secret root never is either).
+  createComputed(() => store.setSecrets(secretPaths(props.compiled().spec)))
   // The agent's state is the store's base; the user's edits stay on top of it as the spec streams and changes.
   createComputed(() => store.setBase(props.compiled().spec?.state))
   // json-render reads its handlers once, so they are bound to this surface for the provider's lifetime.
-  const handlers = createHandlers(props.host, props.info, { read: (path) => store.get(path) })
-  const registry = getRegistry()
+  // onSuccess/onError handlers run through json-render's own execute, connected by ChainBridge inside the provider.
+  const link: ChainLink = {}
+  const handlers = createHandlers(props.host, props.info, { read: (path) => store.get(path), link })
+  const { registry, fallback, directives } = getRendering()
 
   return (
     <ErrorBoundary
@@ -189,13 +198,15 @@ function Render(props: {
         )
       }}
     >
-      <JSONUIProvider registry={registry} store={store} handlers={handlers} directives={[...standardDirectives]}>
-        <Renderer
-          spec={props.compiled().spec}
-          registry={registry}
-          loading={props.streaming()}
-          fallback={UnknownElement}
-        />
+      <JSONUIProvider
+        registry={registry}
+        store={store}
+        handlers={handlers}
+        directives={directives}
+        validationFunctions={VALIDATION_FUNCTIONS}
+      >
+        <ChainBridge link={link} />
+        <Renderer spec={props.compiled().spec} registry={registry} loading={props.streaming()} fallback={fallback} />
       </JSONUIProvider>
     </ErrorBoundary>
   )

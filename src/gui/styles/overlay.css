@@ -165,6 +165,31 @@
   overflow-wrap: anywhere;
 }
 
+/* Where an untrusted modal comes from: tinted like a warning, as it may imitate the app to ask for secrets. */
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) [data-slot="titles"] > [data-slot="untrusted"] {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gu-space-xs);
+  margin: var(--gu-space-xs) 0 0;
+  padding: var(--gu-space-xs) var(--gu-space-sm);
+  border-radius: var(--gu-radius-md);
+  background-color: var(--gu-warning-bg);
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  overflow-wrap: anywhere;
+}
+
+[data-genui]
+  :is([data-gu="dialog"], [data-gu="drawer"])
+  [data-slot="titles"]
+  > [data-slot="untrusted"]
+  > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+  color: var(--gu-warning-fg);
+}
+
 [data-genui]
   :is([data-gu="dialog"], [data-gu="drawer"])
   > [data-slot="surface"]

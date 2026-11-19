@@ -1,4 +1,15 @@
-import { createComputed, createMemo, Match, Show, Switch, untrack, type JSX } from "solid-js"
+import {
+  createComputed,
+  createMemo,
+  createSignal,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+  untrack,
+  type JSX,
+} from "solid-js"
 import type { MountedSession, Panel, PanelTab, SessionRef, UiMenuEntry } from "@opencode/plugin/gui"
 import { compileSpec } from "../protocol/compile.ts"
 import { writeSurfaceOverrides } from "../runtime/snapshot.ts"
@@ -62,6 +73,8 @@ export function canvasPanel(env: GuiEnv): Panel {
   return {
     id: "canvas",
     region: "side",
+    // The host computes every plugin's panel list in one memo, so this reads only cheap, equality-guarded selectors
+    // (booleans and the removed set), never the canvas states that change on every streaming update.
     list(input) {
       const entry = env.sessions.get(input.session)
       const { index } = entry
@@ -74,7 +87,7 @@ export function canvasPanel(env: GuiEnv): Panel {
           // Hidden until the index has loaded; struck through once the agent closed the canvas.
           const shown: TabShown = !ready
             ? "hidden"
-            : !index.canvas(canvas) && index.removed().has(canvas)
+            : !index.exists(canvas) && index.removed().has(canvas)
               ? "missing"
               : "shown"
           keep.add(`${tabId}\n${shown}`)
@@ -290,14 +303,24 @@ function CanvasView(props: {
               </div>
             </Match>
             <Match when={state()}>
-              <SurfaceView
-                host={host}
-                compiled={compiled}
-                runtime={runtime}
-                info={info}
+              <Drawing
                 streaming={streaming}
-                lineErrors={lineErrors}
-              />
+                notice={
+                  <div data-gu-chrome="notice" data-tone="quiet">
+                    <ui.Loader size="small" />
+                    <span>{host.t("canvas.updating")}</span>
+                  </div>
+                }
+              >
+                <SurfaceView
+                  host={host}
+                  compiled={compiled}
+                  runtime={runtime}
+                  info={info}
+                  streaming={streaming}
+                  lineErrors={lineErrors}
+                />
+              </Drawing>
             </Match>
             <Match when={removed()}>
               {notice({
@@ -310,6 +333,44 @@ function CanvasView(props: {
         </div>
       </div>
     </HostContext.Provider>
+  )
+}
+
+/** What counts as drawn when a canvas surface has no text yet: media, charts, icons and controls. */
+const DRAWN = "img, svg, canvas, video, input, textarea, select, button, progress, meter, [role='img']"
+
+/** Whether a surface shows anything yet: text, or something from DRAWN (an empty Card frame does not count). */
+const drawsSomething = (surface: Element) =>
+  (surface.textContent ?? "").trim() !== "" || surface.querySelector(DRAWN) !== null
+
+/**
+ * A canvas surface that may have nothing to show yet: while the agent streams, the root can exist before any of its
+ * children (an empty Stack, or a Card that is only a frame), and the surface would look blank. Until it draws something
+ * (see drawsSomething), the quiet notice stays over it.
+ */
+function Drawing(props: {
+  readonly streaming: () => boolean
+  readonly notice: JSX.Element
+  readonly children: JSX.Element
+}): JSX.Element {
+  const [blank, setBlank] = createSignal(true)
+  let wrapper: HTMLDivElement | undefined
+  onMount(() => {
+    const surface = wrapper?.firstElementChild
+    if (!surface || typeof MutationObserver === "undefined") return void setBlank(false)
+    const check = () => setBlank(!drawsSomething(surface))
+    const observer = new MutationObserver(check)
+    observer.observe(surface, { childList: true, subtree: true, characterData: true })
+    check()
+    onCleanup(() => observer.disconnect())
+  })
+  return (
+    <div data-slot="drawing">
+      <div data-slot="surface" ref={wrapper}>
+        {props.children}
+      </div>
+      <Show when={props.streaming() && blank()}>{props.notice}</Show>
+    </div>
   )
 }
 

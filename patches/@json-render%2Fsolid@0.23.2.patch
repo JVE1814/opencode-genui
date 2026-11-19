@@ -1,0 +1,353 @@
+diff --git a/dist/index.js b/dist/index.js
+index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c67fbd53af 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -715,9 +715,15 @@ function RepeatScopeProvider(props) {
+   return (0, import_web12.createComponent)(RepeatScopeContext.Provider, {
+     get value() {
+       return {
+-        item: props.item,
+-        index: props.index,
+-        basePath: props.basePath
++        get item() {
++          return props.item;
++        },
++        get index() {
++          return props.index;
++        },
++        get basePath() {
++          return props.basePath;
++        }
+       };
+     },
+     get children() {
+@@ -842,6 +848,23 @@ function useDevtoolsActive() {
+   (0, import_solid_js6.onCleanup)(unsub);
+   return active;
+ }
++// opencode-genui patch: props resolved one by one when resolving them together throws; a prop that throws is undefined.
++function resolvePropsGuarded(rawProps, ctx, type) {
++  try {
++    return (0, import_core6.resolveElementProps)(rawProps, ctx);
++  } catch {
++    const resolved = {};
++    for (const [key, value] of Object.entries(rawProps ?? {})) {
++      try {
++        resolved[key] = (0, import_core6.resolvePropValue)(value, ctx);
++      } catch (error) {
++        console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
++        resolved[key] = void 0;
++      }
++    }
++    return resolved;
++  }
++}
+ function ElementRenderer(props) {
+   const repeatScope = useRepeatScope();
+   const {
+@@ -875,7 +898,17 @@ function ElementRenderer(props) {
+       directives
+     };
+   });
+-  const isVisible = (0, import_solid_js6.createMemo)(() => props.element.visible === void 0 ? true : (0, import_core6.evaluateVisibility)(props.element.visible, fullCtx()));
++  // opencode-genui patch: a prop or condition that throws (an object with two directive keys, a $cond that is not a
++  // condition) resolves to undefined, or hides the element, instead of blanking the parent through its boundary.
++  const isVisible = (0, import_solid_js6.createMemo)(() => {
++    if (props.element.visible === void 0) return true;
++    try {
++      return (0, import_core6.evaluateVisibility)(props.element.visible, fullCtx());
++    } catch (error) {
++      console.warn(`[json-render] Could not evaluate "visible" of <${props.element.type}>:`, error);
++      return false;
++    }
++  });
+   const emit = async (eventName) => {
+     const onBindings = props.element.on;
+     const binding = onBindings?.[eventName];
+@@ -959,11 +992,15 @@ function ElementRenderer(props) {
+   });
+   const elementBindings = (0, import_solid_js6.createMemo)(() => {
+     const rawProps = props.element.props;
+-    return (0, import_core6.resolveBindings)(rawProps, fullCtx());
++    try {
++      return (0, import_core6.resolveBindings)(rawProps, fullCtx());
++    } catch {
++      return void 0;
++    }
+   });
+   const resolvedElement = (0, import_solid_js6.createMemo)(() => {
+     const rawProps = props.element.props;
+-    const resolvedProps = (0, import_core6.resolveElementProps)(rawProps, fullCtx());
++    const resolvedProps = resolvePropsGuarded(rawProps, fullCtx(), props.element.type);
+     return resolvedProps !== props.element.props ? {
+       ...props.element,
+       props: resolvedProps
+@@ -1111,6 +1148,60 @@ function ElementRendererContent(props) {
+     }
+   });
+ }
++// opencode-genui patch (patches/): repeat rows keep their identity across updates instead of being keyed by item
++// identity (upstream re-created a row, and its inputs, which lost focus, on every write to the item, since each write
++// replaces the item object), and the repeat scope reads its item, index and base path live. Each new item takes the id
++// of an unused previous row: the same item (a removal or reorder that kept the others), else the row with the same
++// `repeat.key` value (the agent re-sent the list), else the row at the same index (the item was edited in place, its
++// key field included), else a new id.
++function createRowIds() {
++  let previousItems = [];
++  let previousIds = [];
++  let next = 0;
++  return (list, repeat) => {
++    const items = Array.isArray(list) ? list : [];
++    const keyOf = (item) => repeat && repeat.key && typeof item === "object" && item !== null ? item[repeat.key] : void 0;
++    const ids = new Array(items.length);
++    const used = new Set();
++    const byItem = new Map();
++    previousItems.forEach((item, i) => {
++      const at = byItem.get(item);
++      if (at) at.push(i);
++      else byItem.set(item, [i]);
++    });
++    items.forEach((item, i) => {
++      const at = byItem.get(item);
++      const j = at?.find((index) => !used.has(index));
++      if (j !== void 0) {
++        ids[i] = previousIds[j];
++        used.add(j);
++      }
++    });
++    items.forEach((item, i) => {
++      if (ids[i] !== void 0) return;
++      const key = keyOf(item);
++      if (key === void 0 || key === null) return;
++      const j = previousItems.findIndex((old, index) => !used.has(index) && String(keyOf(old)) === String(key));
++      if (j !== -1) {
++        ids[i] = previousIds[j];
++        used.add(j);
++      }
++    });
++    items.forEach((_, i) => {
++      if (ids[i] !== void 0) return;
++      if (i < previousIds.length && !used.has(i)) {
++        ids[i] = previousIds[i];
++        used.add(i);
++      } else ids[i] = `r${next++}`;
++    });
++    previousItems = items;
++    previousIds = ids;
++    return ids;
++  };
++}
++function sameRowKeys(a, b) {
++  return a.length === b.length && a.every((key, i) => key === b[i]);
++}
+ function RepeatChildren(props) {
+   const stateStore = useStateStore();
+   const repeat = () => props.element.repeat;
+@@ -1123,17 +1214,19 @@ function RepeatChildren(props) {
+     return resolved;
+   };
+   const items = () => statePath() === void 0 ? [] : (0, import_core6.getByPath)(stateStore.state, statePath()) ?? [];
++  const rowIds = createRowIds();
++  const rowKeys = (0, import_solid_js6.createMemo)(() => rowIds(items(), repeat()), void 0, {
++    equals: sameRowKeys
++  });
+   return (0, import_web18.createComponent)(import_solid_js6.For, {
+     get each() {
+-      return items();
++      return rowKeys();
+     },
+-    children: (itemValue, index) => {
+-      const key = () => {
+-        const r = repeat();
+-        return r.key && typeof itemValue === "object" && itemValue !== null ? String(itemValue[r.key] ?? index()) : String(index());
+-      };
++    children: (_rowKey, index) => {
+       return (0, import_web18.createComponent)(RepeatScopeProvider, {
+-        item: itemValue,
++        get item() {
++          return items()[index()];
++        },
+         get index() {
+           return index();
+         },
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d21e607433 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -664,9 +664,15 @@ function RepeatScopeProvider(props) {
+   return _$createComponent5(RepeatScopeContext.Provider, {
+     get value() {
+       return {
+-        item: props.item,
+-        index: props.index,
+-        basePath: props.basePath
++        get item() {
++          return props.item;
++        },
++        get index() {
++          return props.index;
++        },
++        get basePath() {
++          return props.basePath;
++        }
+       };
+     },
+     get children() {
+@@ -689,7 +695,7 @@ import { insert as _$insert2 } from "solid-js/web";
+ import { memo as _$memo2 } from "solid-js/web";
+ import { createComponent as _$createComponent6 } from "solid-js/web";
+ import { createContext as createContext6, useContext as useContext6, createMemo as createMemo3, createEffect as createEffect3, createSignal as createSignal4, onCleanup as onCleanup2, ErrorBoundary, Show, For } from "solid-js";
+-import { resolveElementProps, resolveBindings, resolveActionParam, resolveRepeatItemStatePath, resolveRepeatStatePath, evaluateVisibility as evaluateVisibility2, getByPath as getByPath2, isDevtoolsActive, subscribeDevtoolsActive, createDirectiveRegistry } from "@json-render/core";
++import { resolveElementProps, resolvePropValue, resolveBindings, resolveActionParam, resolveRepeatItemStatePath, resolveRepeatStatePath, evaluateVisibility as evaluateVisibility2, getByPath as getByPath2, isDevtoolsActive, subscribeDevtoolsActive, createDirectiveRegistry } from "@json-render/core";
+ var _tmpl$2 = /* @__PURE__ */ _$template2(`<span style=display:contents>`);
+ var EMPTY_FUNCTIONS = {};
+ var FunctionsContext = createContext6(EMPTY_FUNCTIONS);
+@@ -706,6 +712,23 @@ function useDevtoolsActive() {
+   onCleanup2(unsub);
+   return active;
+ }
++// opencode-genui patch: props resolved one by one when resolving them together throws; a prop that throws is undefined.
++function resolvePropsGuarded(rawProps, ctx, type) {
++  try {
++    return resolveElementProps(rawProps, ctx);
++  } catch {
++    const resolved = {};
++    for (const [key, value] of Object.entries(rawProps ?? {})) {
++      try {
++        resolved[key] = resolvePropValue(value, ctx);
++      } catch (error) {
++        console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
++        resolved[key] = void 0;
++      }
++    }
++    return resolved;
++  }
++}
+ function ElementRenderer(props) {
+   const repeatScope = useRepeatScope();
+   const {
+@@ -739,7 +762,17 @@ function ElementRenderer(props) {
+       directives
+     };
+   });
+-  const isVisible = createMemo3(() => props.element.visible === void 0 ? true : evaluateVisibility2(props.element.visible, fullCtx()));
++  // opencode-genui patch: a prop or condition that throws (an object with two directive keys, a $cond that is not a
++  // condition) resolves to undefined, or hides the element, instead of blanking the parent through its boundary.
++  const isVisible = createMemo3(() => {
++    if (props.element.visible === void 0) return true;
++    try {
++      return evaluateVisibility2(props.element.visible, fullCtx());
++    } catch (error) {
++      console.warn(`[json-render] Could not evaluate "visible" of <${props.element.type}>:`, error);
++      return false;
++    }
++  });
+   const emit = async (eventName) => {
+     const onBindings = props.element.on;
+     const binding = onBindings?.[eventName];
+@@ -823,11 +856,15 @@ function ElementRenderer(props) {
+   });
+   const elementBindings = createMemo3(() => {
+     const rawProps = props.element.props;
+-    return resolveBindings(rawProps, fullCtx());
++    try {
++      return resolveBindings(rawProps, fullCtx());
++    } catch {
++      return void 0;
++    }
+   });
+   const resolvedElement = createMemo3(() => {
+     const rawProps = props.element.props;
+-    const resolvedProps = resolveElementProps(rawProps, fullCtx());
++    const resolvedProps = resolvePropsGuarded(rawProps, fullCtx(), props.element.type);
+     return resolvedProps !== props.element.props ? {
+       ...props.element,
+       props: resolvedProps
+@@ -975,6 +1012,60 @@ function ElementRendererContent(props) {
+     }
+   });
+ }
++// opencode-genui patch (patches/): repeat rows keep their identity across updates instead of being keyed by item
++// identity (upstream re-created a row, and its inputs, which lost focus, on every write to the item, since each write
++// replaces the item object), and the repeat scope reads its item, index and base path live. Each new item takes the id
++// of an unused previous row: the same item (a removal or reorder that kept the others), else the row with the same
++// `repeat.key` value (the agent re-sent the list), else the row at the same index (the item was edited in place, its
++// key field included), else a new id.
++function createRowIds() {
++  let previousItems = [];
++  let previousIds = [];
++  let next = 0;
++  return (list, repeat) => {
++    const items = Array.isArray(list) ? list : [];
++    const keyOf = (item) => repeat && repeat.key && typeof item === "object" && item !== null ? item[repeat.key] : void 0;
++    const ids = new Array(items.length);
++    const used = new Set();
++    const byItem = new Map();
++    previousItems.forEach((item, i) => {
++      const at = byItem.get(item);
++      if (at) at.push(i);
++      else byItem.set(item, [i]);
++    });
++    items.forEach((item, i) => {
++      const at = byItem.get(item);
++      const j = at?.find((index) => !used.has(index));
++      if (j !== void 0) {
++        ids[i] = previousIds[j];
++        used.add(j);
++      }
++    });
++    items.forEach((item, i) => {
++      if (ids[i] !== void 0) return;
++      const key = keyOf(item);
++      if (key === void 0 || key === null) return;
++      const j = previousItems.findIndex((old, index) => !used.has(index) && String(keyOf(old)) === String(key));
++      if (j !== -1) {
++        ids[i] = previousIds[j];
++        used.add(j);
++      }
++    });
++    items.forEach((_, i) => {
++      if (ids[i] !== void 0) return;
++      if (i < previousIds.length && !used.has(i)) {
++        ids[i] = previousIds[i];
++        used.add(i);
++      } else ids[i] = `r${next++}`;
++    });
++    previousItems = items;
++    previousIds = ids;
++    return ids;
++  };
++}
++function sameRowKeys(a, b) {
++  return a.length === b.length && a.every((key, i) => key === b[i]);
++}
+ function RepeatChildren(props) {
+   const stateStore = useStateStore();
+   const repeat = () => props.element.repeat;
+@@ -987,17 +1078,19 @@ function RepeatChildren(props) {
+     return resolved;
+   };
+   const items = () => statePath() === void 0 ? [] : getByPath2(stateStore.state, statePath()) ?? [];
++  const rowIds = createRowIds();
++  const rowKeys = createMemo3(() => rowIds(items(), repeat()), void 0, {
++    equals: sameRowKeys
++  });
+   return _$createComponent6(For, {
+     get each() {
+-      return items();
++      return rowKeys();
+     },
+-    children: (itemValue, index) => {
+-      const key = () => {
+-        const r = repeat();
+-        return r.key && typeof itemValue === "object" && itemValue !== null ? String(itemValue[r.key] ?? index()) : String(index());
+-      };
++    children: (_rowKey, index) => {
+       return _$createComponent6(RepeatScopeProvider, {
+-        item: itemValue,
++        get item() {
++          return items()[index()];
++        },
+         get index() {
+           return index();
+         },

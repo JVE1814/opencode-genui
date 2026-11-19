@@ -114,6 +114,21 @@ describe("surface overrides", () => {
     expect(readSurfaceOverrides(undefined, "x")).toEqual([])
   })
 
+  test("keeps the agent's value an edit changed, and drops malformed entries", () => {
+    const p = writeSurfaceOverrides(undefined, "s", [
+      ["/a", 2, { b: 1 }],
+      ["/c", 3, {}],
+      ["/d", 4],
+    ])
+    expect(readSurfaceOverrides(p, "s")).toEqual([
+      ["/a", 2, { b: 1 }],
+      ["/c", 3, {}],
+      ["/d", 4],
+    ])
+    const bad = { ...p, surfaces: { s: JSON.stringify({ t: 1, o: [["/a", 1, 5], ["/b"], [1, 2], ["/c", 1, {}, 0]] }) } }
+    expect(readSurfaceOverrides(bad, "s")).toEqual([])
+  })
+
   test("equal edits change nothing, even at a later time", () => {
     const p = writeSurfaceOverrides(undefined, "s", [["/a", 1]], 1000)
     expect(writeSurfaceOverrides(p, "s", [["/a", 1]], 2000)).toBe(p)

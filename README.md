@@ -56,7 +56,8 @@ Here's the deploy form:
 ````
 
 The block renders in place once it is complete (until then the app shows its source). The optional first line is a
-header: `id` keeps what you typed when the agent re-sends the block, `title` labels it.
+header: `id` keeps what you typed when the agent re-sends the block, `title` labels it. What you change stays on top of
+the agent's state until the agent writes a new value at the same place: the newest writer wins.
 
 ### Canvases: ` ```canvas `
 
@@ -121,19 +122,34 @@ so terminal-only sessions are not told to emit UI they cannot show.
 }
 ```
 
-Desktop settings (**Settings › genui**): how new canvases open (focus / add quietly / off), when outward actions ask
-first, and whether remote images load without a click.
+Desktop settings (**Settings › genui**): how new canvases open (open and show / add the tab quietly / don't open),
+when to ask before outward actions (always / only for tool output, the default / never), whether remote images load
+without a click, and **Clear stored UI state**.
 
 ## Security model
 
 Specs are written by a model and treated as data:
 
-- No raw HTML; text is rendered as text (Markdown through the app's own renderer).
-- Links only open http, https and mailto URLs; images only load http(s) and base64 `data:image` URLs, and remote images
-  wait for a click unless you allow them.
-- Actions that leave the UI (send a message, fill the composer, open a link, copy) need a real click, are rate limited,
-  and ask first when you choose so, when the spec asks for a confirmation, or when the block did not come from the
-  assistant's own reply (for example a ` ```spec ` block inside tool output or a previewed file).
+- **Text is text.** Markdown goes through the app's renderer with images turned into links, raw HTML shown as text and
+  quotes encoded, so nothing in it loads remote content or adds markup. Links open only http, https and mailto URLs;
+  images load only http(s) and base64 `data:image` URLs, and remote images wait for a click unless you allow them.
+- **Outward actions need your activation.** Sending a message, filling the composer, opening a link and copying run
+  only when you deliberately activate a control of that UI: pressing a Button or Link, picking from a DropdownMenu or
+  Table, Enter in an Input, or a choice in a Select, Radio, Checkbox, Switch, Toggle, ToggleGroup, ButtonGroup,
+  Pagination or Tabs. Never from `watch`, focus, blur, typing or slider movement, and never from an `onSuccess`/`onError`
+  handler read from state. One activation may run up to 3 of them (copy a code, then open a page); the next activation
+  of that UI needs a second's gap.
+- **Confirms show everything.** genui asks first when your setting says so, or when the spec asks. The dialog shows the
+  whole payload (the full message with its data, the URL, the copied text) with invisible characters spelled out and
+  text hidden in Unicode tag characters decoded.
+- **Blocks outside the agent's reply are untrusted.** A ` ```spec ` block in tool output or a previewed file is marked as
+  such and asks before every outward action (by default), keeping genui's own wording; the spec's text appears only
+  quoted. It gets state of its own (it cannot read or change the agent's UI with the same `id`), cannot open a Dialog or
+  Drawer by itself, and has no "Ask agent to fix". Trust is decided by the block's exact text.
+- **Passwords stay in memory.** What you type into a password Input is never written to stored UI state. Other edits are
+  stored per session (up to 50 surfaces) so they survive reloads, until **Clear stored UI state**.
+- **No freezes.** Validation patterns run on a linear-time matcher (no backreferences or lookarounds) with a shared work
+  budget, so a spec cannot hang the window.
 
 ## Development
 
@@ -142,7 +158,7 @@ bun install
 bun run dev          # rebuild dist/gui-experimental.cjs on change; the desktop app hot-reloads it
 bun run playground   # the plugin in a fake desktop host, with scripted conversations
 bun run test         # unit tests
-bun run test:e2e     # Playwright against the playground
+bun run test:e2e     # Playwright against the playground (PW_PORT=5180 to use a dev server on another port)
 bun run build        # skill + bundle + bundle checks
 ```
 
@@ -169,6 +185,12 @@ playground/        fake desktop host for development and end-to-end tests
 - With `instructions: "session"`, the hint reaches a brand-new session from its second step on; use `"always"` if the
   first reply must already know about UI.
 - Desktop only: the web app and the terminal UI show the blocks as code.
+- Generated UI keeps clear of the code block's toolbar by measuring it, which relies on the app's markup; so does the
+  rule that shortens a spec's source while it streams. Neither, nor flushing edits when the plugin reloads and
+  re-sending the session hint after a reconnect, has been verified in the desktop app itself (only in the playground
+  and in unit tests).
+- A code block nested in a Markdown list or quote stays with the app's renderer: its copy button may copy invisible
+  joiners, or `&#34;` for quotes.
 
 ## License
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { createTrackedStore, isJsonValue, MAX_OVERRIDES } from "../../src/runtime/state.ts"
+import { createTrackedStore, isJsonValue, isSecretPath, MAX_OVERRIDES } from "../../src/runtime/state.ts"
+import { UI_SECRET_ROOT } from "../../src/shared/constants.ts"
 
 function counter(subscribe: (listener: () => void) => () => void) {
   const calls = { count: 0 }
@@ -30,7 +31,7 @@ describe("createTrackedStore", () => {
     expect(snapshot).toEqual({ form: { name: "Grace", age: 36 }, other: { x: 1 } })
     expect(snapshot.other).toBe(base.other)
     expect(base.form.name).toBe("Ada")
-    expect(store.overrides()).toEqual([["/form/name", "Grace"]])
+    expect(store.overrides()).toEqual([["/form/name", "Grace", { b: "Ada" }]])
     expect(subscribers.count).toBe(1)
     expect(edits.count).toBe(1)
     expect(store.getSnapshot()).toBe(snapshot)
@@ -52,8 +53,8 @@ describe("createTrackedStore", () => {
     store.update({ "/a": 10, "/b": 2, "/c": 3 })
     expect(store.getSnapshot()).toEqual({ a: 10, b: 2, c: 3 })
     expect(store.overrides()).toEqual([
-      ["/a", 10],
-      ["/c", 3],
+      ["/a", 10, { b: 1 }],
+      ["/c", 3, {}],
     ])
     expect(subscribers.count).toBe(1)
   })
@@ -75,11 +76,12 @@ describe("createTrackedStore", () => {
     ])
   })
 
-  test("setBase keeps user edits on top and notifies only on a real change", () => {
+  test("setBase keeps user edits on top while the agent leaves their paths alone, and notifies only on a real change", () => {
     const store = createTrackedStore({ a: 1, b: 1 })
     store.set("/a", 5)
     const subscribers = counter(store.subscribe)
-    const base = { a: 2, b: 2 }
+    const edits = counter(store.onOverridesChange)
+    const base = { a: 1, b: 2 }
     store.setBase(base)
     expect(store.getSnapshot()).toEqual({ a: 5, b: 2 })
     expect(subscribers.count).toBe(1)
@@ -88,20 +90,266 @@ describe("createTrackedStore", () => {
     expect(subscribers.count).toBe(1)
 
     const before = store.getSnapshot()
-    store.setBase({ a: 2, b: 2 })
+    store.setBase({ a: 1, b: 2 })
     expect(store.getSnapshot()).toBe(before)
     expect(subscribers.count).toBe(1)
-
-    store.setBase(undefined)
-    expect(store.getSnapshot()).toEqual({ a: 5 })
-    expect(subscribers.count).toBe(2)
+    expect(edits.count).toBe(0)
+    expect(store.overrides()).toEqual([["/a", 5, { b: 1 }]])
   })
 
-  test("setBase does not touch override listeners", () => {
+  test("newest writer wins: an agent change at an edit's path drops the edit and tells override listeners", () => {
+    const store = createTrackedStore({ a: 1, b: 1 })
+    store.set("/a", 5)
+    const edits = counter(store.onOverridesChange)
+    store.setBase({ a: 2, b: 1 })
+    expect(store.getSnapshot()).toEqual({ a: 2, b: 1 })
+    expect(store.overrides()).toEqual([])
+    expect(edits.count).toBe(1)
+
+    // The user edits again over the new value; it stays until the agent writes there once more.
+    store.set("/a", 6)
+    store.setBase({ a: 2, b: 3 })
+    expect(store.getSnapshot()).toEqual({ a: 6, b: 3 })
+    store.setBase(undefined)
+    expect(store.getSnapshot()).toEqual({})
+  })
+
+  test("an agent change under an edit's path, or a replaced parent, drops it; a parent replaced with the same value does not", () => {
+    const store = createTrackedStore({
+      rows: [
+        ["#1", "done"],
+        ["#2", "running"],
+      ],
+      form: { name: "Ada", age: 1 },
+    })
+    // A dismissed row (removeState records the whole array) and a typed name.
+    store.set("/rows", [["#2", "running"]])
+    store.set("/form/name", "Grace")
+    store.setBase({
+      rows: [
+        ["#1", "done"],
+        ["#2", "running"],
+      ],
+      form: { name: "Ada", age: 2 },
+    })
+    expect(store.getSnapshot()).toEqual({ rows: [["#2", "running"]], form: { name: "Grace", age: 2 } })
+
+    // The agent marks #2 done and adds #3: its rows win over the user's older edit of the list.
+    const rows = [
+      ["#1", "done"],
+      ["#2", "done"],
+      ["#3", "running"],
+    ]
+    store.setBase({ rows, form: { name: "Ada", age: 2 } })
+    expect(store.get("/rows")).toEqual(rows)
+    expect(store.get("/form/name")).toBe("Grace")
+    expect(store.overrides().map(([path]) => path)).toEqual(["/form/name"])
+
+    store.setBase({ rows })
+    expect(store.getSnapshot()).toEqual({ rows })
+  })
+
+  test("auto-bound input values: a re-sent spec with the same literal keeps what the user typed, a new literal wins", () => {
+    const spec = (svc: string, region: string) => ({ __genui: { svc, region } })
+    const store = createTrackedStore(spec("api", "us-east-1"))
+    store.set("/__genui/svc", "billing")
+    store.setBase(spec("api", "us-east-1"))
+    expect(store.getSnapshot()).toEqual(spec("billing", "us-east-1"))
+    store.setBase(spec("api", "eu-west-1"))
+    expect(store.getSnapshot()).toEqual(spec("billing", "eu-west-1"))
+    store.setBase(spec("payments", "eu-west-1"))
+    expect(store.getSnapshot()).toEqual(spec("payments", "eu-west-1"))
+  })
+
+  test("edits made before the first setBase take that base as what they changed", () => {
+    const store = createTrackedStore()
+    store.set("/a", 5)
+    const edits = counter(store.onOverridesChange)
+    store.setBase({ a: 1 })
+    expect(store.getSnapshot()).toEqual({ a: 5 })
+    expect(edits.count).toBe(0)
+    store.setBase({ a: 2 })
+    expect(store.getSnapshot()).toEqual({ a: 2 })
+  })
+
+  test("setBase without a change of edited paths does not touch override listeners", () => {
     const store = createTrackedStore()
     const edits = counter(store.onOverridesChange)
     store.setBase({ a: 1 })
-    expect(edits.count).toBe(0)
+    store.set("/b", 1)
+    store.setBase({ a: 2 })
+    expect(edits.count).toBe(1)
+  })
+
+  test("persisted edits record what they changed; one the agent changed since is dropped on load or at the first setBase", () => {
+    const store = createTrackedStore({ a: 1, b: 2 })
+    store.set("/a", 5)
+    store.set("/c", 7)
+    const saved = store.overrides()
+    expect(saved).toEqual([
+      ["/a", 5, { b: 1 }],
+      ["/c", 7, {}],
+    ])
+    const roundTrip = JSON.parse(JSON.stringify(saved)) as unknown[][]
+
+    // Same agent state: both come back.
+    const same = createTrackedStore({ a: 1, b: 9 })
+    same.loadOverrides(roundTrip)
+    expect(same.getSnapshot()).toEqual({ a: 5, b: 9, c: 7 })
+
+    // The agent wrote /a while this window was away: its value wins.
+    const changed = createTrackedStore({ a: 3 })
+    changed.loadOverrides(roundTrip)
+    expect(changed.getSnapshot()).toEqual({ a: 3, c: 7 })
+    expect(changed.overrides().map(([path]) => path)).toEqual(["/c"])
+
+    // Loaded before the surface rendered: judged at the first setBase.
+    const early = createTrackedStore()
+    early.loadOverrides(roundTrip)
+    const edits = counter(early.onOverridesChange)
+    early.setBase({ a: 3 })
+    expect(early.getSnapshot()).toEqual({ a: 3, c: 7 })
+    expect(edits.count).toBe(1)
+
+    // Entries from an older version (no third member) take the current state as their base.
+    const legacy = createTrackedStore({ a: 3 })
+    legacy.loadOverrides([["/a", 5]])
+    expect(legacy.getSnapshot()).toEqual({ a: 5 })
+    legacy.setBase({ a: 4 })
+    expect(legacy.getSnapshot()).toEqual({ a: 4 })
+  })
+
+  test("edits under the secret root apply but are never persisted or loaded", () => {
+    const store = createTrackedStore({ [UI_SECRET_ROOT]: { pw: "" } })
+    store.set(`/${UI_SECRET_ROOT}/pw`, "hunter2")
+    store.update({ [`${UI_SECRET_ROOT}/token`]: "sk-live", "/name": "Ada" })
+    expect(store.get(`/${UI_SECRET_ROOT}/pw`)).toBe("hunter2")
+    expect(store.get(`/${UI_SECRET_ROOT}/token`)).toBe("sk-live")
+    expect(JSON.stringify(store.overrides())).not.toContain("hunter2")
+    expect(JSON.stringify(store.overrides())).not.toContain("sk-live")
+    expect(store.overrides().map(([path]) => path)).toEqual(["/name"])
+    // A secret root lookalike is an ordinary path.
+    store.set(`/${UI_SECRET_ROOT}x`, "kept")
+    expect(store.overrides().map(([path]) => path)).toEqual(["/name", `/${UI_SECRET_ROOT}x`])
+
+    const loaded = createTrackedStore({})
+    loaded.loadOverrides([
+      [`/${UI_SECRET_ROOT}/pw`, "from-disk"],
+      [`/${UI_SECRET_ROOT}`, { pw: "x" }],
+      ["/name", "Ada"],
+    ])
+    expect(loaded.getSnapshot()).toEqual({ name: "Ada" })
+    expect(isSecretPath(`/${UI_SECRET_ROOT}`)).toBe(true)
+    expect(isSecretPath(`/${UI_SECRET_ROOT}/a/b`)).toBe(true)
+    expect(isSecretPath(`/__genui/pw`)).toBe(false)
+  })
+
+  test("paths declared secret (where password Inputs write) are never persisted, nor the secrets under a parent edit", () => {
+    const store = createTrackedStore({ form: { user: "", pw: "" }, dbs: [{ name: "a", pw: "" }] })
+    const edits = counter(store.onOverridesChange)
+    store.set("/form/user", "ada")
+    store.set("/form/pw", "hunter2")
+    store.set("/dbs/0/pw", "s3cret")
+    expect(store.overrides().map(([path]) => path)).toEqual(["/form/user", "/form/pw", "/dbs/0/pw"])
+    const before = edits.count
+    // The surface declares what its password Inputs are bound to; the stored copy follows.
+    store.setSecrets(["/form/pw", "/dbs/*/pw"])
+    expect(edits.count).toBe(before + 1)
+    expect(store.overrides().map(([path]) => path)).toEqual(["/form/user"])
+    expect(store.get("/form/pw")).toBe("hunter2")
+    // Declaring the same paths again is a no-op.
+    store.setSecrets(["/form/pw", "/dbs/*/pw"])
+    expect(edits.count).toBe(before + 1)
+
+    // A parent edit (removeState records the whole array) is stored without the secrets in it.
+    store.set("/dbs", [
+      { name: "a", pw: "s3cret" },
+      { name: "b", pw: "other" },
+    ])
+    const stored = JSON.stringify(store.overrides())
+    expect(stored).not.toContain("s3cret")
+    expect(stored).not.toContain("other")
+    expect(store.overrides().at(-1)).toEqual(["/dbs", [{ name: "a" }, { name: "b" }], { b: [{ name: "a", pw: "" }] }])
+
+    // Any depth: `**`.
+    const deep = createTrackedStore({ groups: [{ items: [{ key: "" }] }] })
+    deep.setSecrets(["/**/key"])
+    deep.set("/groups/0/items/0/key", "k")
+    deep.set("/groups", [{ items: [{ key: "k", label: "x" }] }])
+    expect(deep.overrides()).toEqual([["/groups", [{ items: [{ label: "x" }] }], { b: [{ items: [{ key: "" }] }] }]])
+
+    // Stored entries at secret paths (from an older version) are not loaded.
+    const loaded = createTrackedStore({ form: { pw: "" } })
+    loaded.setSecrets(["/form/pw"])
+    loaded.loadOverrides([
+      ["/form/pw", "from-disk"],
+      ["/form/user", "ada"],
+    ])
+    expect(loaded.getSnapshot()).toEqual({ form: { pw: "", user: "ada" } })
+  })
+
+  test("loading stored edits keeps the edits that are never stored (a password typed before the load)", () => {
+    const store = createTrackedStore({ [UI_SECRET_ROOT]: { pw: "" }, form: { pw: "" } })
+    store.setSecrets(["/form/pw"])
+    store.set(`/${UI_SECRET_ROOT}/pw`, "hunter2")
+    store.set("/form/pw", "s3cret")
+    expect(store.overrides()).toEqual([])
+    store.loadOverrides([["/name", "Ada", {}]])
+    expect(store.get(`/${UI_SECRET_ROOT}/pw`)).toBe("hunter2")
+    expect(store.get("/form/pw")).toBe("s3cret")
+    expect(store.get("/name")).toBe("Ada")
+  })
+
+  test("an edit made on top of one the agent overwrote goes with it, instead of landing on other data", () => {
+    // The user dismisses #1 (removeState records the whole array), then flags what is now the first row.
+    const rows = createTrackedStore({
+      rows: [
+        ["#1", "done", ""],
+        ["#2", "running", ""],
+      ],
+    })
+    rows.set("/rows", [["#2", "running", ""]])
+    rows.set("/rows/0/2", "FLAGGED")
+    expect(rows.get("/rows")).toEqual([["#2", "running", "FLAGGED"]])
+    // The agent updates #2: both edits go, rather than the flag moving onto #1.
+    rows.setBase({
+      rows: [
+        ["#1", "done", ""],
+        ["#2", "done", ""],
+      ],
+    })
+    expect(rows.get("/rows")).toEqual([
+      ["#1", "done", ""],
+      ["#2", "done", ""],
+    ])
+    expect(rows.overrides()).toEqual([])
+
+    // pushState of a new todo, its title typed, then the agent toggles another todo: no partial ghost row.
+    const todos = createTrackedStore({
+      todos: [
+        { title: "a", done: false },
+        { title: "b", done: false },
+      ],
+    })
+    todos.set("/todos", [...(todos.get("/todos") as unknown[]), { title: "", done: false }])
+    todos.set("/todos/2/title", "my new todo")
+    todos.setBase({
+      todos: [
+        { title: "a", done: true },
+        { title: "b", done: false },
+      ],
+    })
+    expect(todos.get("/todos")).toEqual([
+      { title: "a", done: true },
+      { title: "b", done: false },
+    ])
+
+    // Unrelated later edits stay.
+    const both = createTrackedStore({ rows: [1, 2], name: "" })
+    both.set("/rows", [2])
+    both.set("/name", "Ada")
+    both.setBase({ rows: [1, 3], name: "" })
+    expect(both.getSnapshot()).toEqual({ rows: [1, 3], name: "Ada" })
   })
 
   test("loadOverrides restores edits without override notifications", () => {
@@ -119,7 +367,7 @@ describe("createTrackedStore", () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined()
     expect(subscribers.count).toBe(1)
     expect(edits.count).toBe(0)
-    expect(store.overrides()).toEqual([
+    expect(store.overrides().map(([path, value]) => [path, value])).toEqual([
       ["/a", 2],
       ["/list/0", 9],
       ["/bad", 3],

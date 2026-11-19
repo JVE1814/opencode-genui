@@ -1,7 +1,28 @@
 import { validateSpec, type Spec, type SpecIssue } from "@json-render/core"
-import { getCatalog, type GenuiCatalog } from "../catalog/index.ts"
-import { CANVAS_LANGUAGE, INLINE_LANGUAGE } from "../shared/constants.ts"
-import { BOUND_PROPS, BUILTIN_ACTIONS, isExpression, isRecord, UI_STATE_ROOT, uiStatePath } from "./normalize.ts"
+import { standardDirectives } from "@json-render/directives"
+import {
+  CONFIRM_PARAM,
+  describeActivations,
+  getCatalog,
+  IGNORED_CHAIN,
+  isActivation,
+  ON_ERROR_PARAM,
+  ON_SUCCESS_PARAM,
+  OUTWARD_ACTIONS,
+  type ActionName,
+  type GenuiCatalog,
+} from "../catalog/index.ts"
+import { CANVAS_LANGUAGE, INLINE_LANGUAGE, UI_SECRET_ROOT } from "../shared/constants.ts"
+import {
+  BOUND_PROPS,
+  BUILTIN_ACTIONS,
+  isExpression,
+  isRecord,
+  secretStatePath,
+  UI_STATE_ROOT,
+  uiStatePath,
+} from "./normalize.ts"
+import { IGNORED_CHECK, patternProblem, SAFE_CHECKS } from "./pattern.ts"
 import type { LineError, SurfaceKind } from "./surface.ts"
 
 export interface SurfaceIssue {
@@ -136,16 +157,23 @@ function describePropIssue(issue: ZodIssueLike, props: Record<string, unknown>):
   }
 }
 
-// Bound inputs read `{ "$bindState": "/__genui/<key>" }` after normalization; validate the seeded literal instead, so a
-// wrong literal is still reported.
+// Bound inputs read `{ "$bindState": "/__genui/<key>" }` (or `/__genui_secret/<key>`) after normalization; validate the
+// seeded literal instead, so a wrong literal is still reported.
 function propsForValidation(key: string, type: string, props: Record<string, unknown>, state: unknown) {
   const prop = Object.hasOwn(BOUND_PROPS, type) ? BOUND_PROPS[type]! : undefined
   if (!prop) return props
   const value = props[prop]
-  if (!isRecord(value) || Object.keys(value).length !== 1 || value.$bindState !== uiStatePath(key)) return props
-  const ui = isRecord(state) ? state[UI_STATE_ROOT] : undefined
+  if (!isRecord(value) || Object.keys(value).length !== 1) return props
+  const root =
+    value.$bindState === uiStatePath(key)
+      ? UI_STATE_ROOT
+      : value.$bindState === secretStatePath(key)
+        ? UI_SECRET_ROOT
+        : undefined
+  if (!root) return props
+  const seeds = isRecord(state) ? state[root] : undefined
   const { [prop]: _bound, ...rest } = props
-  return isRecord(ui) && Object.hasOwn(ui, key) ? { ...rest, [prop]: ui[key] } : rest
+  return isRecord(seeds) && Object.hasOwn(seeds, key) ? { ...rest, [prop]: seeds[key] } : rest
 }
 
 function checkProps(
@@ -181,9 +209,20 @@ function checkProps(
   }
 }
 
+/** Why an outward action or a confirm in a passive binding never runs; part of the validator's message. */
+export const ACTIVATION_RULE = `outward actions (${[...OUTWARD_ACTIONS].join(", ")}) and confirms run only when the user activates a control: ${describeActivations()}.`
+
+const MAX_CHAIN_DEPTH = 8
+
+/**
+ * Action bindings of an element's `on` and `watch` maps, with their onSuccess/onError chains (as written, or moved into
+ * reserved params by the normalizer): unknown actions, bindings that are not bindings, and outward actions or confirms
+ * where no activation can happen (watch, on.focus, on.blur, ...), which never run.
+ */
 function checkBindings(key: string, element: Record<string, unknown>, known: ReadonlySet<string>): SurfaceIssue[] {
   const issues: SurfaceIssue[] = []
-  const check = (binding: unknown, where: string) => {
+  const type = typeof element.type === "string" ? element.type : ""
+  const check = (binding: unknown, where: string, passive: "watch" | "event" | undefined, depth: number) => {
     if (!isRecord(binding) || typeof binding.action !== "string") {
       issues.push({
         severity: "warning",
@@ -193,22 +232,49 @@ function checkBindings(key: string, element: Record<string, unknown>, known: Rea
       })
       return
     }
-    if (!known.has(binding.action))
+    const action = binding.action
+    const params = isRecord(binding.params) ? binding.params : {}
+    if (!known.has(action))
       issues.push({
         severity: "warning",
         code: "unknown_action",
-        message: `unknown action "${truncate(binding.action, 60)}" in ${where}`,
+        message: `unknown action "${truncate(action, 60)}" in ${where}`,
         elementKey: key,
       })
-    for (const handler of ["onSuccess", "onError"] as const) {
-      const next = binding[handler]
-      if (isRecord(next) && typeof next.action === "string" && !known.has(next.action))
+    else if (passive && OUTWARD_ACTIONS.has(action as ActionName))
+      issues.push({
+        severity: "warning",
+        code: `outward_action_in_${passive}`,
+        message: `${action} in ${where} never runs: ${ACTIVATION_RULE}`,
+        elementKey: key,
+      })
+    else if (
+      passive &&
+      !BUILTIN_ACTIONS.has(action) &&
+      ((binding.confirm !== undefined && binding.confirm !== null && binding.confirm !== false) ||
+        (params[CONFIRM_PARAM] !== undefined && params[CONFIRM_PARAM] !== null && params[CONFIRM_PARAM] !== false))
+    )
+      issues.push({
+        severity: "warning",
+        code: `confirm_in_${passive}`,
+        message: `${action} in ${where} asks for a confirm, so it never runs: ${ACTIVATION_RULE}`,
+        elementKey: key,
+      })
+    if (depth >= MAX_CHAIN_DEPTH) return
+    for (const [field, param] of [
+      ["onSuccess", ON_SUCCESS_PARAM],
+      ["onError", ON_ERROR_PARAM],
+    ] as const) {
+      const next = binding[field] ?? params[param]
+      if (!isRecord(next)) continue
+      if (next[IGNORED_CHAIN] === true || isExpression(next) || isExpression(next.params) || isExpression(next.set))
         issues.push({
           severity: "warning",
-          code: "unknown_action",
-          message: `unknown action "${truncate(next.action, 60)}" in ${where}.${handler}`,
+          code: "dynamic_chain",
+          message: `${where}.${field} is ignored: write it out as { "action": "...", "params": {...} } or { "set": {...} }, not as an expression or from state`,
           elementKey: key,
         })
+      else if (typeof next.action === "string") check(next, `${where}.${field}`, passive, depth + 1)
     }
   }
   for (const field of ["on", "watch"] as const) {
@@ -216,10 +282,83 @@ function checkBindings(key: string, element: Record<string, unknown>, known: Rea
     if (!isRecord(map)) continue
     for (const [name, value] of Object.entries(map)) {
       const where = field === "on" ? `on.${name}` : `watch["${name}"]`
-      if (Array.isArray(value)) value.forEach((binding, index) => check(binding, `${where}[${index}]`))
-      else check(value, where)
+      const passive = field === "watch" ? "watch" : isActivation(type, name) ? undefined : "event"
+      if (Array.isArray(value)) value.forEach((binding, index) => check(binding, `${where}[${index}]`, passive, 0))
+      else check(value, where, passive, 0)
     }
   }
+  return issues
+}
+
+/**
+ * Validation checks genui does not run: lists or entries written as expressions (the normalizer replaces them with a
+ * check that always passes) and patterns the safe matcher cannot run (src/protocol/pattern.ts).
+ */
+function checkChecks(key: string, props: Record<string, unknown>): SurfaceIssue[] {
+  const checks = props.checks
+  const ignored = (where: string): SurfaceIssue => ({
+    severity: "warning",
+    code: "dynamic_check",
+    message: `${where} is ignored: write each check out as { "type": "...", "message": "..." }, not as an expression or from state`,
+    elementKey: key,
+  })
+  if (isExpression(checks)) return [ignored("checks")]
+  if (!Array.isArray(checks)) return []
+  return checks.flatMap((check: unknown, index): SurfaceIssue[] => {
+    if (!isRecord(check)) return []
+    if (isExpression(check) || isExpression(check.type) || check.type === IGNORED_CHECK)
+      return [ignored(`checks[${index}]`)]
+    if (check.type !== "pattern" && check.type !== SAFE_CHECKS.pattern) return []
+    const pattern = isRecord(check.args) ? check.args.pattern : undefined
+    const problem = typeof pattern === "string" ? patternProblem(pattern) : undefined
+    return problem
+      ? [
+          {
+            severity: "warning",
+            code: "unsupported_pattern",
+            message: `the pattern of checks[${index}] is ignored: ${problem}`,
+            elementKey: key,
+          },
+        ]
+      : []
+  })
+}
+
+const DIRECTIVE_NAMES = new Set(standardDirectives.map((directive) => directive.name))
+const MAX_EXPRESSION_DEPTH = 16
+
+/**
+ * Prop expressions json-render cannot evaluate: an object with two directive keys (`$format` and `$concat`), or a
+ * `$cond` whose condition is not a condition (a path string such as "/isAdmin" instead of `{ "$state": "/isAdmin" }`).
+ * The renderer shows such a prop as empty; this says why.
+ */
+function checkExpressions(key: string, props: Record<string, unknown>): SurfaceIssue[] {
+  const issues: SurfaceIssue[] = []
+  const visit = (value: unknown, where: string, depth: number) => {
+    if (depth > MAX_EXPRESSION_DEPTH || typeof value !== "object" || value === null) return
+    if (Array.isArray(value)) return value.forEach((item, index) => visit(item, `${where}[${index}]`, depth + 1))
+    const record = value as Record<string, unknown>
+    const directives = Object.keys(record).filter((name) => DIRECTIVE_NAMES.has(name))
+    if (directives.length > 1)
+      issues.push({
+        severity: "warning",
+        code: "invalid_expression",
+        message: `"${where}" has several directives (${directives.join(", ")}) in one object, so it shows nothing: nest them instead`,
+        elementKey: key,
+      })
+    if ("$cond" in record) {
+      const condition = record.$cond
+      if (typeof condition !== "boolean" && (typeof condition !== "object" || condition === null))
+        issues.push({
+          severity: "warning",
+          code: "invalid_expression",
+          message: `"${where}" has a $cond that is not a condition, so it shows nothing: write { "$state": "/path" } (with eq, neq, gt, ... if needed), not ${preview(condition)}`,
+          elementKey: key,
+        })
+    }
+    for (const [name, member] of Object.entries(record)) visit(member, `${where}.${name}`, depth + 1)
+  }
+  for (const [name, value] of Object.entries(props)) visit(value, name, 0)
   return issues
 }
 
@@ -286,7 +425,10 @@ function checkWithJsonRender(spec: Spec, elements: Record<string, unknown>): Sur
   const userState = isRecord(spec.state) ? spec.state : undefined
   // The normalizer may create `state` only to seed inputs; that must not make json-render start checking repeat paths
   // against a state the agent never wrote.
-  const state = userState && Object.keys(userState).every((key) => key === UI_STATE_ROOT) ? undefined : userState
+  const state =
+    userState && Object.keys(userState).every((key) => key === UI_STATE_ROOT || key === UI_SECRET_ROOT)
+      ? undefined
+      : userState
   const safeElements = Object.fromEntries(
     Object.entries(elements).flatMap(([key, element]) => (isRecord(element) ? [[key, forJsonRender(element)]] : [])),
   )
@@ -362,6 +504,8 @@ export function validateSurface(
       const props = isRecord(element.props) ? element.props : {}
       const issue = checkProps(key, type, props, spec.state, components[type]?.props)
       if (issue) issues.push(issue)
+      issues.push(...checkChecks(key, props))
+      issues.push(...checkExpressions(key, props))
     }
     if (element.repeat !== undefined && !validRepeat(element.repeat))
       issues.push({

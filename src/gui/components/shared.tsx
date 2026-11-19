@@ -1,4 +1,4 @@
-import { createEffect, createSignal, type Accessor } from "solid-js"
+import { createEffect, createSignal, onCleanup, type Accessor } from "solid-js"
 import type { ValidationConfig } from "@json-render/core"
 import { useStateStore, useValidation, type BaseComponentProps, type ComponentFn } from "@json-render/solid"
 import type { GenuiCatalog } from "../../catalog/index.ts"
@@ -9,6 +9,11 @@ import type { ComponentName } from "../../catalog/components.ts"
  *
  * - Signature: `const X: GenuiComponent<"X"> = (ctx) => ...`. Read `ctx.props.*` inside JSX or memos, never destructure
  *   `ctx` or `ctx.props` (they are getters and update as the agent streams or state changes).
+ * - `ctx.children` is the exception: it is the same rendered list for the element's lifetime (src/gui/element.ts reads
+ *   json-render's children getter once, untracked, because each read of that getter re-creates every child), so read
+ *   it anywhere. Never render it in two places at once; slotted components split it with `children()`.
+ * - The element renderer remounts a component when the element's `type` changes, so a component never needs to
+ *   handle another type's props.
  * - Props are model-written and may be missing or the wrong type even when the schema says otherwise: guard with the
  *   helpers below (`str`, `num`, `list`, `bool`) and render something sensible.
  * - The root element carries `data-gu="<kebab-name>"`; parts carry `data-slot="..."`; variants are data attributes.
@@ -112,6 +117,78 @@ export function useChecks(ctx: BaseComponentProps<Record<string, unknown>>, prop
       if (enabled() && validateOn() === on) validation.validate(path(), config())
     },
   }
+}
+
+/**
+ * Marks a sideways-scrolling element with `data-overflow-start` / `data-overflow-end` while content is hidden past
+ * that edge, so its CSS can fade the edge (the app hides scrollbars, so nothing else shows there is more). Follows
+ * scrolling, resizes and content changes (rows or tabs streaming in). Use as a `ref`.
+ */
+export function trackOverflow(element: HTMLElement): void {
+  let frame = 0
+  const measure = () => {
+    frame = 0
+    const max = element.scrollWidth - element.clientWidth
+    // scrollLeft runs from 0 to -max in right-to-left layouts.
+    const position = Math.abs(element.scrollLeft)
+    element.toggleAttribute("data-overflow-start", max > 1 && position > 1)
+    element.toggleAttribute("data-overflow-end", max > 1 && position < max - 1)
+  }
+  const schedule = () => {
+    if (frame) return
+    if (typeof requestAnimationFrame === "function") frame = requestAnimationFrame(measure)
+    else measure()
+  }
+  element.addEventListener("scroll", schedule, { passive: true })
+  const resize = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : undefined
+  resize?.observe(element)
+  const mutation = typeof MutationObserver === "function" ? new MutationObserver(schedule) : undefined
+  mutation?.observe(element, { childList: true, subtree: true, characterData: true })
+  schedule()
+  onCleanup(() => {
+    element.removeEventListener("scroll", schedule)
+    resize?.disconnect()
+    mutation?.disconnect()
+    if (frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame)
+  })
+}
+
+/**
+ * Keeps the end gutter of a surface shown in place of the app's code block as wide as that block's toolbar (Copy, and
+ * any other plugin's CodeBlockAction buttons, over the top end corner), so the toolbar never covers the UI. Sets
+ * `--_toolbar` on the element; the CSS falls back to room for one button when the toolbar cannot be found. The
+ * toolbar is the app's markup, not a contract: without it nothing changes. Use as a `ref`.
+ */
+export function reserveToolbar(element: HTMLElement): void {
+  let toolbar: Element | undefined
+  let widest = 0
+  const resize =
+    typeof ResizeObserver === "function"
+      ? new ResizeObserver(() => {
+          // The toolbar shows on hover; never shrink, so hovering does not move the UI.
+          const width = Math.ceil(toolbar?.getBoundingClientRect().width ?? 0)
+          if (width <= widest) return
+          widest = width
+          element.style.setProperty("--_toolbar", `${width + 8}px`)
+        })
+      : undefined
+  const find = () => {
+    if (toolbar) return true
+    const block = element.closest('[data-component="markdown-code"]')
+    toolbar = block?.querySelector(':scope > [data-slot="markdown-code-toolbar"]') ?? undefined
+    if (toolbar) resize?.observe(toolbar)
+    return !!toolbar
+  }
+  // The block's toolbar may be added after its content mounts.
+  let frame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(() => void find()) : 0
+  if (find() && frame && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(frame)
+    frame = 0
+  }
+  onCleanup(() => {
+    resize?.disconnect()
+    if (frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame)
+  })
 }
 
 /** A stable id for labels and aria attributes within one surface. */

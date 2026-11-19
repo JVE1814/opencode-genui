@@ -1,10 +1,19 @@
-import { createMemo, createSignal, onCleanup, Show } from "solid-js"
+import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
 import { Dynamic } from "solid-js/web"
 import type { ComponentName } from "../../catalog/components.ts"
 import { isIconName } from "../../catalog/icons.ts"
 import { safeUrl } from "../../protocol/url.ts"
 import { useHost, useSurface, type Host } from "../host.ts"
 import { openLink } from "../outward.ts"
+import {
+  JOINER,
+  neutralizeMarkdown,
+  QUOTE_ENTITY,
+  restoreQuotes,
+  splitMarkdown,
+  stripJoiners,
+  type MarkdownPart,
+} from "./markdown.ts"
 import { list, oneOf, str, type GenuiComponent } from "./shared.tsx"
 
 // Content components: Heading, Text, Markdown, Code, Badge, Alert, Keybind, Icon. Styles: src/gui/styles/content.css.
@@ -16,13 +25,18 @@ const TONES = ["neutral", "info", "success", "warning", "danger"] as const
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
- * Model-written Markdown through the app's renderer (`ui.Markdown`), shared by Markdown and Accordion. Links in it go
- * through the surface's link policy (http, https and mailto only, the outward gate, a confirm on untrusted surfaces)
- * instead of the renderer's own handling: a capturing listener on the wrapper sees the click before the renderer does.
+ * Model-written Markdown through the app's renderer (`ui.Markdown`), shared by Markdown, Accordion and Popover.
+ *
+ * - Images become links, raw HTML shows as text and quotes cannot end an attribute (src/gui/components/markdown.ts), so
+ *   nothing loads remote content without a click; top-level fenced code blocks render with `ui.Code`.
+ * - Links go through the surface's link policy (http, https and mailto only, the outward gate, a confirm on untrusted
+ *   surfaces) instead of the renderer's own handling: a capturing listener on the wrapper sees the click first.
+ * - Copying a selection drops the invisible joiners the neutralizing added.
  */
 export function MarkdownText(props: { readonly text: string }) {
   const host = useHost()
   const surface = useSurface()
+  const parts = createMemo(() => splitMarkdown(props.text))
 
   const intercept = (event: MouseEvent) => {
     if (event.defaultPrevented) return
@@ -40,15 +54,54 @@ export function MarkdownText(props: { readonly text: string }) {
     if (url) void openLink(host, surface, url)
   }
 
+  // marked shows the quote entities neutralizeMarkdown added as written in code (and after a backslash): the rendered
+  // text reads `"` again. Only text nodes change, so this cannot add markup.
+  const restore = (root: Node) => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node as Text
+      if (text.data.includes(QUOTE_ENTITY)) text.data = restoreQuotes(text.data)
+    }
+  }
+
+  const copy = (event: ClipboardEvent) => {
+    const selected = globalThis.getSelection?.()?.toString() ?? ""
+    if (!selected.includes(JOINER) || !event.clipboardData) return
+    event.clipboardData.setData("text/plain", stripJoiners(selected))
+    event.preventDefault()
+  }
+
   return (
     <div
       data-gu="markdown"
       ref={(element) => {
         element.addEventListener("click", intercept, true)
         element.addEventListener("auxclick", intercept, true)
+        element.addEventListener("copy", copy)
+        if (typeof MutationObserver === "undefined") return
+        const observer = new MutationObserver(() => restore(element))
+        observer.observe(element, { childList: true, subtree: true, characterData: true })
+        onCleanup(() => observer.disconnect())
+        queueMicrotask(() => restore(element))
       }}
     >
-      <host.ui.Markdown text={props.text} />
+      <Index each={parts()}>
+        {(part) => (
+          <Show
+            when={part().kind === "code" ? (part() as Extract<MarkdownPart, { kind: "code" }>) : undefined}
+            fallback={
+              <host.ui.Markdown
+                text={neutralizeMarkdown(
+                  (part() as Extract<MarkdownPart, { kind: "markdown" }>).text ?? "",
+                  host.t("c.markdown.image"),
+                )}
+              />
+            }
+          >
+            {(code) => <host.ui.Code content={code().code} language={code().language} />}
+          </Show>
+        )}
+      </Index>
     </div>
   )
 }
@@ -151,18 +204,27 @@ const Code: GenuiComponent<"Code"> = (ctx) => {
 // Badge, Alert
 // ---------------------------------------------------------------------------------------------------------------------
 
-const Badge: GenuiComponent<"Badge"> = (ctx) => (
-  <span
-    data-gu="badge"
-    data-variant={oneOf(
-      ctx.props.variant,
-      ["default", "secondary", "outline", "success", "warning", "danger", "info"] as const,
-      "default",
-    )}
-  >
-    <span data-slot="text">{str(ctx.props.text)}</span>
-  </span>
-)
+/** A tag. Nothing renders while its text is empty (a `$state` text not streamed in yet), not an empty pill. */
+// Whether text draws anything: not only whitespace and invisible format characters (zero-width spaces and joiners).
+const visibleText = (text: string) => text.replace(/[\s\p{Cf}]/gu, "") !== ""
+
+const Badge: GenuiComponent<"Badge"> = (ctx) => {
+  const text = () => str(ctx.props.text)
+  return (
+    <Show when={visibleText(text())}>
+      <span
+        data-gu="badge"
+        data-variant={oneOf(
+          ctx.props.variant,
+          ["default", "secondary", "outline", "success", "warning", "danger", "info"] as const,
+          "default",
+        )}
+      >
+        <span data-slot="text">{text()}</span>
+      </span>
+    </Show>
+  )
+}
 
 const ALERT_ICONS = {
   info: "info",

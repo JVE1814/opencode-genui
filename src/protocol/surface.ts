@@ -39,7 +39,15 @@ export interface ParsedBlock {
   readonly errors: readonly LineError[]
   /** Whether a patch sets `/root`, which makes a canvas block start a new generation. */
   readonly hasRoot: boolean
-  /** A hash of the normalized body, for identity and change detection. */
+  /**
+   * The normalized body: its lines trimmed, without blank lines. Two copies of a block (the agent's reply and the code
+   * block the app renders) have the same text; trust compares it exactly.
+   */
+  readonly text: string
+  /**
+   * A hash of the normalized body, for change detection and display ids. Not collision resistant: never decide trust,
+   * or which state a block shares, by it (see contentId in src/protocol/digest.ts).
+   */
   readonly hash: string
 }
 
@@ -97,7 +105,10 @@ export function specToPatches(spec: Spec): Patch[] {
 const isSpecDocument = (value: unknown): value is Spec =>
   isRecord(value) && typeof value.root === "string" && isRecord(value.elements)
 
-/** FNV-1a over UTF-16 code units, as 8 hex digits. Not cryptographic; used for identity and change detection. */
+/**
+ * FNV-1a over UTF-16 code units, as 8 hex digits. Not cryptographic (a colliding text takes milliseconds to craft):
+ * used for ids and change detection, never for trust.
+ */
 export function hashText(text: string): string {
   let hash = 0x811c9dc5
   for (let index = 0; index < text.length; index++) {
@@ -184,6 +195,7 @@ export function parseBlock(body: string, options: { partial?: boolean } = {}): P
     patches,
     errors,
     hasRoot: patches.some((patch) => (patch.op === "add" || patch.op === "replace") && patch.path === "/root"),
+    text: normalized,
     hash: hashText(normalized),
   }
 }

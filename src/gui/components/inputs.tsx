@@ -1,6 +1,7 @@
 import { createEffect, createMemo, For, Show, type Accessor, type JSX } from "solid-js"
 import { normalizeOptions, type Option } from "../../catalog/components.ts"
-import { useHost } from "../host.ts"
+import { useHost, useSurface } from "../host.ts"
+import { withIntent } from "../outward.ts"
 import { bool, list, num, oneOf, str, uid, useBound, useChecks, type GenuiComponent } from "./shared.tsx"
 
 // Form fields: Input, Textarea, Select, Checkbox, Radio, Switch, Slider. Buttons and choice controls are in
@@ -15,6 +16,9 @@ const INPUT_TYPES = ["text", "email", "password", "number", "search", "url"] as 
 /**
  * Fires a component event and resolves once its actions have run. The renderer's `emit` is async although it is typed
  * void; a failing action is logged here so it never becomes an unhandled rejection.
+ *
+ * This grants no outward intent: use it for events the user does not mean as an activation (focus, blur, a slider's
+ * movement). Activations go through `useActivation`.
  */
 export function fire(ctx: { emit: (event: string) => void }, event: string): Promise<void> {
   const report = (error: unknown) => {
@@ -29,6 +33,25 @@ export function fire(ctx: { emit: (event: string) => void }, event: string): Pro
     report(error)
     return Promise.resolve()
   }
+}
+
+/**
+ * For a control the user activates on purpose: a press, a pick from a menu or list, Enter in a field, a choice on a
+ * choice control (the events in ACTIVATION_EVENTS, src/catalog/actions.ts). Call it while the component is created (it
+ * reads the surface). The function it returns fires an event with an outward intent granted to this surface (see
+ * `withIntent` in src/gui/outward.ts), so the actions that event runs may leave the surface: send a message, fill the
+ * composer, open a link, copy. `first`, when given, runs inside the same intent before the event's actions (a Link's
+ * own href), and a false result skips them.
+ */
+export function useActivation(ctx: {
+  emit: (event: string) => void
+}): (event: string, first?: () => Promise<boolean>) => Promise<void> {
+  const surface = useSurface()
+  return (event, first) =>
+    withIntent(surface, async () => {
+      if (first && !(await first())) return
+      await fire(ctx, event)
+    })
 }
 
 /**
@@ -129,6 +152,7 @@ function validateEdit(checks: ReturnType<typeof useChecks>) {
 // email or number types, which the catalog's Input needs.
 const Input: GenuiComponent<"Input"> = (ctx) => {
   const id = uid("input")
+  const activate = useActivation(ctx)
   const [value, setValue] = useBound<string | number>(ctx, "value", "", asText)
   const checks = useChecks(ctx, "value")
   const type = () => oneOf(ctx.props.type, INPUT_TYPES, "text")
@@ -186,7 +210,7 @@ const Input: GenuiComponent<"Input"> = (ctx) => {
           onKeyDown={(event) => {
             if (event.key !== "Enter" || event.isComposing) return
             event.preventDefault()
-            void fire(ctx, "submit")
+            void activate("submit")
           }}
           onFocus={() => void fire(ctx, "focus")}
           onBlur={() => {
@@ -267,6 +291,7 @@ const Select: GenuiComponent<"Select"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
   const id = uid("select")
+  const activate = useActivation(ctx)
   const options = useOptions(() => ctx.props.options)
   const [value, setValue] = useBound<string>(ctx, "value", "", asOptionValue)
   const checks = useChecks(ctx, "value")
@@ -295,7 +320,7 @@ const Select: GenuiComponent<"Select"> = (ctx) => {
             // The select has no blur of its own (its list takes focus), so "blur" validation runs on change too.
             checks.validate("change")
             checks.validate("blur")
-            void fire(ctx, "change")
+            void activate("change")
           }}
         />
       </div>
@@ -318,6 +343,7 @@ const CheckIcon = () => (
 // A native checkbox, visually hidden, behind the app's compact checkbox control. The host has no checkbox component.
 const Checkbox: GenuiComponent<"Checkbox"> = (ctx) => {
   const id = uid("checkbox")
+  const activate = useActivation(ctx)
   const [checked, setChecked] = useBound<boolean>(ctx, "checked", false, asBoolean)
   const checks = useChecks(ctx, "checked")
   const label = () => str(ctx.props.label)
@@ -345,7 +371,7 @@ const Checkbox: GenuiComponent<"Checkbox"> = (ctx) => {
           onChange={(event) => {
             setChecked(event.currentTarget.checked)
             validateEdit(checks)
-            void fire(ctx, "change")
+            void activate("change")
           }}
           onBlur={() => checks.validate("blur")}
         />
@@ -378,6 +404,7 @@ const Checkbox: GenuiComponent<"Checkbox"> = (ctx) => {
 // own id: two surfaces may use the same `name`, and radios with one name in a document form a single group.
 const Radio: GenuiComponent<"Radio"> = (ctx) => {
   const id = uid("radio")
+  const activate = useActivation(ctx)
   const options = useOptions(() => ctx.props.options)
   const [value, setValue] = useBound<string>(ctx, "value", "", asOptionValue)
   const checks = useChecks(ctx, "value")
@@ -427,7 +454,7 @@ const Radio: GenuiComponent<"Radio"> = (ctx) => {
                     if (!event.currentTarget.checked) return
                     setValue(option.value)
                     validateEdit(checks)
-                    void fire(ctx, "change")
+                    void activate("change")
                   }}
                 />
                 <label data-slot="box" for={optionId()}>
@@ -458,6 +485,7 @@ const Radio: GenuiComponent<"Radio"> = (ctx) => {
 const Switch: GenuiComponent<"Switch"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
+  const activate = useActivation(ctx)
   const [checked, setChecked] = useBound<boolean>(ctx, "checked", false, asBoolean)
   const label = () => str(ctx.props.label)
   const description = () => str(ctx.props.description)
@@ -466,7 +494,7 @@ const Switch: GenuiComponent<"Switch"> = (ctx) => {
   const change = (next: boolean) => {
     if (disabled() || next === checked()) return
     setChecked(next)
-    void fire(ctx, "change")
+    void activate("change")
   }
 
   return (
@@ -560,6 +588,7 @@ const Slider: GenuiComponent<"Slider"> = (ctx) => {
           disabled={disabled()}
           aria-valuetext={text()}
           onInput={(event) => setValue(Number(event.currentTarget.value))}
+          // Moving a slider is not an activation: its actions run without an outward intent.
           onChange={() => void fire(ctx, "change")}
         />
       </div>

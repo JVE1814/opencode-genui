@@ -1,5 +1,8 @@
-/** Longest message a surface may send, in characters; longer data is truncated with a note. */
+/** Longest message a surface may send, in characters; a longer text or data is truncated (data with a note). */
 export const MAX_SENT_MESSAGE = 16_000
+
+/** Longest text a message with data keeps, so the data always has room. */
+const MAX_TEXT_WITH_DATA = 4_000
 
 /**
  * The user message a `sendPrompt` action sends: the action's text, then its data (if any) as a fenced JSON block.
@@ -23,7 +26,8 @@ export function formatSentMessage(input: { readonly text: string; readonly data?
   } catch {
     json = '"(data could not be serialized)"'
   }
-  const room = MAX_SENT_MESSAGE - text.length - 16
+  const lead = text.slice(0, MAX_TEXT_WITH_DATA)
+  const room = MAX_SENT_MESSAGE - lead.length - 16
   if (json.length > room) json = `${json.slice(0, Math.max(0, room - 40))}\n... (truncated)`
-  return `${text}\n\n\`\`\`json\n${json}\n\`\`\``
+  return `${lead}\n\n\`\`\`json\n${json}\n\`\`\``
 }

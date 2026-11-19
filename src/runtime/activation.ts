@@ -78,6 +78,49 @@ export function ensureInstructions(
   return result
 }
 
+/** The parts of a `SessionRef` activation reads. */
+export interface ActivationSession {
+  readonly key: string
+  readonly id: string
+  readonly pending: boolean
+  readonly server: {
+    readonly client: unknown
+    /** The event connection is up; undefined (an older host) counts as connected. */
+    readonly connected?: boolean
+    readonly data: { readonly session: { get(id: string): unknown } }
+  }
+}
+
+/** A session to activate, with the client of its server at that moment. */
+export interface ActivationTarget {
+  readonly key: string
+  readonly sessionID: string
+  readonly client: InstructionsClient
+}
+
+/**
+ * The session activation should run for: a created, top-level session (a subagent's session gets nothing, its parent
+ * already has the hint) on a connected server, with that server's current client. Undefined while there is none, or
+ * while the session's info has not arrived. Read it reactively: a reconnect, or a restarted server's new client, gives
+ * a new target (see `sameActivation`), so a failed put is retried, and `ensureInstructions` keeps it to one request per
+ * client and session.
+ */
+export function activationTarget(session: ActivationSession | undefined): ActivationTarget | undefined {
+  if (!session || session.pending || session.server.connected === false) return undefined
+  let info: { readonly parentID?: unknown } | undefined
+  try {
+    info = session.server.data.session.get(session.id) as { readonly parentID?: unknown } | undefined
+  } catch {
+    // A data store without session info (an older host): treat it as a top-level session.
+    info = {}
+  }
+  if (!info || info.parentID) return undefined
+  return { key: session.key, sessionID: session.id, client: session.server.client as InstructionsClient }
+}
+
+/** Whether two targets are the same run: the same session through the same client. */
+export const sameActivation = (a: ActivationTarget, b: ActivationTarget) => a.key === b.key && a.client === b.client
+
 /** Removes the session's instruction entry `key`, if it has one. Resolves false when that failed. Never throws. */
 export async function removeInstructions(client: InstructionsClient, sessionID: string, key: string): Promise<boolean> {
   memo.get(client)?.delete(memoKey(sessionID, key))

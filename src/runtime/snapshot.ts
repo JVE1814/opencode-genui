@@ -1,5 +1,6 @@
 import type { Spec } from "@json-render/core"
 import type { BlockRef, CanvasSnapshot } from "../protocol/fold.ts"
+import type { OverrideEntry } from "./state.ts"
 
 /**
  * The per-session value the GUI persists (a `Store.session`). Entries are JSON strings, so the store's schema stays a
@@ -153,20 +154,24 @@ export function writeCanvasSnapshot(
 
 interface SurfaceEntry {
   readonly t: number
-  readonly o: Array<[string, unknown]>
+  readonly o: OverrideEntry[]
+}
+
+function toOverride(entry: unknown): OverrideEntry[] {
+  if (!Array.isArray(entry) || typeof entry[0] !== "string") return []
+  if (entry.length === 2) return [[entry[0], entry[1]]]
+  if (entry.length === 3 && isRecord(entry[2])) return [[entry[0], entry[1], entry[2]]]
+  return []
 }
 
 function toSurfaceEntry(value: unknown): SurfaceEntry | undefined {
   if (!isRecord(value) || !Array.isArray(value.o)) return
-  const o = value.o.flatMap(
-    (entry): Array<[string, unknown]> =>
-      Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string" ? [[entry[0], entry[1]]] : [],
-  )
+  const o = value.o.flatMap(toOverride)
   return { t: typeof value.t === "number" && Number.isFinite(value.t) ? value.t : 0, o }
 }
 
 /** The user's persisted state edits for a surface, ready for `TrackedStore.loadOverrides`. */
-export function readSurfaceOverrides(p: PersistedSession | undefined, surfaceId: string): Array<[string, unknown]> {
+export function readSurfaceOverrides(p: PersistedSession | undefined, surfaceId: string): OverrideEntry[] {
   return toSurfaceEntry(parse(ownString(p?.surfaces, surfaceId)))?.o ?? []
 }
 
@@ -177,7 +182,7 @@ export function readSurfaceOverrides(p: PersistedSession | undefined, surfaceId:
 export function writeSurfaceOverrides(
   p: PersistedSession | undefined,
   surfaceId: string,
-  entries: ReadonlyArray<readonly [string, unknown]>,
+  entries: readonly OverrideEntry[],
   now: number = Date.now(),
 ): PersistedSession {
   const current = p ?? EMPTY_PERSISTED

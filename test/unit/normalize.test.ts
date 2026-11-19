@@ -1,14 +1,25 @@
 import { describe, expect, test } from "bun:test"
 import type { Spec } from "@json-render/core"
-import { CONFIRM_PARAM } from "../../src/catalog/actions.ts"
+import {
+  CONFIRM_PARAM,
+  IGNORED_CHAIN,
+  ON_ERROR_PARAM,
+  ON_SUCCESS_PARAM,
+  PASSIVE_PARAM,
+} from "../../src/catalog/actions.ts"
 import {
   BOUND_PROPS,
   escapePointer,
   isExpression,
+  normalizeChained,
+  secretPaths,
   normalizeSpec,
+  secretStatePath,
+  UI_SECRET_ROOT,
   UI_STATE_ROOT,
   uiStatePath,
 } from "../../src/protocol/normalize.ts"
+import { IGNORED_CHECK, SAFE_CHECKS } from "../../src/protocol/pattern.ts"
 
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
@@ -145,7 +156,7 @@ describe("normalizeSpec: autoFixSpec", () => {
       children: [],
       visible: { $state: "/show" },
       on: { press: { action: "setState", params: { statePath: "/x", value: 1 } } },
-      watch: { "/x": { action: "showToast", params: { title: "changed" } } },
+      watch: { "/x": { action: "showToast", params: { title: "changed", [PASSIVE_PARAM]: 'watch["/x"]' } } },
     })
     expect(el(output, "list").repeat).toEqual({ statePath: "/items" })
     expect(el(output, "list").props).toEqual({})
@@ -231,7 +242,7 @@ describe("normalizeSpec: element shape", () => {
 describe("normalizeSpec: confirm rewrite", () => {
   const confirm = { title: "Deploy?", message: "This deploys to production." }
 
-  test("moves confirm into params for custom actions, keeping onSuccess/onError", () => {
+  test("moves confirm, onSuccess and onError into reserved params for custom actions", () => {
     const output = normalizeSpec(
       spec({
         go: {
@@ -251,9 +262,12 @@ describe("normalizeSpec: confirm rewrite", () => {
     )
     expect(el(output, "go").on.press).toEqual({
       action: "sendPrompt",
-      params: { text: "deploy", [CONFIRM_PARAM]: confirm },
-      onSuccess: { set: { "/done": true } },
-      onError: { action: "showToast", params: { title: "failed" } },
+      params: {
+        text: "deploy",
+        [CONFIRM_PARAM]: confirm,
+        [ON_SUCCESS_PARAM]: { set: { "/done": true } },
+        [ON_ERROR_PARAM]: { action: "showToast", params: { title: "failed" } },
+      },
     })
   })
 
@@ -288,7 +302,7 @@ describe("normalizeSpec: confirm rewrite", () => {
     ])
     expect(el(output, "go").watch["/a"]).toEqual({
       action: "insertPrompt",
-      params: { text: "x", [CONFIRM_PARAM]: confirm },
+      params: { text: "x", [CONFIRM_PARAM]: confirm, [PASSIVE_PARAM]: 'watch["/a"]' },
     })
   })
 
@@ -513,5 +527,350 @@ describe("normalizeSpec: input auto-binding", () => {
     const changed = normalizeSpec(spec({ field: { ...field, props: { label: "L", value: "w" } } }, { state }))
     expect(changed.state).not.toBe(first.state)
     expect(changed.state).toEqual({ form: {}, __genui: { field: "w" } })
+  })
+})
+
+describe("normalizeSpec: action chains", () => {
+  const confirm = { title: "Notify?", message: "Sends a toast" }
+
+  test("recurses into onSuccess/onError chains: their confirm moves too, built-ins drop it", () => {
+    const output = normalizeSpec(
+      spec({
+        copy: {
+          type: "Button",
+          props: { label: "Copy" },
+          on: {
+            press: {
+              action: "copyText",
+              params: { text: "abc" },
+              onSuccess: {
+                action: "showToast",
+                params: { title: "Copied" },
+                confirm,
+                onError: { action: "setState", params: { statePath: "/x", value: 1 }, confirm },
+              },
+            },
+          },
+        },
+      }),
+    )
+    expect(el(output, "copy").on.press).toEqual({
+      action: "copyText",
+      params: {
+        text: "abc",
+        [ON_SUCCESS_PARAM]: {
+          action: "showToast",
+          params: {
+            title: "Copied",
+            [CONFIRM_PARAM]: confirm,
+            [ON_ERROR_PARAM]: { action: "setState", params: { statePath: "/x", value: 1 } },
+          },
+        },
+      },
+    })
+  })
+
+  test("drops navigate and junk handlers; keeps set handlers; normalizes chain params the model wrote itself", () => {
+    const output = normalizeSpec(
+      spec({
+        a: {
+          type: "Button",
+          props: { label: "A" },
+          on: {
+            press: {
+              action: "openLink",
+              params: { url: "https://example.com", [ON_ERROR_PARAM]: { action: "showToast", confirm: true } },
+              onSuccess: { navigate: "/home" },
+            },
+          },
+        },
+        b: {
+          type: "Button",
+          props: { label: "B" },
+          on: { press: { action: "sendPrompt", params: { text: "x" }, onSuccess: { set: { "/sent": true }, x: 1 } } },
+        },
+      }),
+    )
+    expect(el(output, "a").on.press).toEqual({
+      action: "openLink",
+      params: {
+        url: "https://example.com",
+        [ON_ERROR_PARAM]: { action: "showToast", params: { [CONFIRM_PARAM]: true } },
+      },
+    })
+    expect(el(output, "b").on.press.params[ON_SUCCESS_PARAM]).toEqual({ set: { "/sent": true } })
+  })
+
+  test("chains deeper than the limit are dropped", () => {
+    let handler: Loose = { action: "showToast", params: { title: "deep" } }
+    for (let depth = 0; depth < 20; depth++)
+      handler = { action: "showToast", params: { title: "t" }, onSuccess: handler }
+    const output = normalizeSpec(spec({ b: { type: "Button", props: { label: "B" }, on: { press: handler } } }))
+    let depth = 0
+    let current: Loose | undefined = el(output, "b").on.press
+    while (current) {
+      depth++
+      current = current.params?.[ON_SUCCESS_PARAM]
+    }
+    expect(depth).toBeLessThanOrEqual(9)
+    expect(depth).toBeGreaterThan(1)
+  })
+
+  test("a handler written as an expression (on itself, its params or its set) is ignored, at any depth", () => {
+    const send = { action: "sendPrompt", params: { text: "x" } }
+    const output = normalizeSpec(
+      spec({
+        q: {
+          type: "Input",
+          props: { label: "Q" },
+          watch: {
+            "/q": [
+              {
+                action: "showToast",
+                params: { title: "a" },
+                onSuccess: { action: "sendPrompt", params: { $state: "/e" } },
+              },
+              { action: "showToast", params: { title: "b" }, onError: { action: "showToast", $state: "/hang" } },
+              { action: "showToast", params: { title: "c" }, onSuccess: { set: { $state: "/s" } } },
+              {
+                action: "showToast",
+                params: { title: "d" },
+                onSuccess: { $cond: { $state: "/f" }, $then: send, $else: send },
+              },
+              {
+                ...send,
+                onSuccess: { ...send, onSuccess: { action: "copyText", params: { $format: "date", value: 1 } } },
+              },
+            ],
+          },
+        },
+      }),
+    )
+    const watch = el(output, "q").watch["/q"]
+    const ignored = { [IGNORED_CHAIN]: true }
+    expect(watch[0].params[ON_SUCCESS_PARAM]).toEqual(ignored)
+    expect(watch[1].params[ON_ERROR_PARAM]).toEqual(ignored)
+    expect(watch[2].params[ON_SUCCESS_PARAM]).toEqual(ignored)
+    expect(watch[3].params[ON_SUCCESS_PARAM]).toEqual(ignored)
+    expect(watch[4].params[ON_SUCCESS_PARAM].params[ON_SUCCESS_PARAM]).toEqual(ignored)
+    // Normalizing again keeps the marker (idempotent).
+    expect(normalizeSpec(output)).toBe(output)
+    expect(el(normalizeSpec(structuredClone(output)), "q").watch["/q"]).toEqual(watch)
+  })
+
+  test("normalizeChained rewrites a resolved handler again, with the parent's passive tag", () => {
+    expect(
+      normalizeChained(
+        {
+          action: "sendPrompt",
+          params: { text: "x" },
+          confirm: { title: "Sure?" },
+          onError: { set: { "/s": 1 } },
+          onSuccess: { action: "showToast", $state: "/hang" },
+        },
+        'watch["/q"]',
+      ),
+    ).toEqual({
+      action: "sendPrompt",
+      params: {
+        text: "x",
+        [CONFIRM_PARAM]: { title: "Sure?" },
+        [ON_ERROR_PARAM]: { set: { "/s": 1 } },
+        [ON_SUCCESS_PARAM]: { [IGNORED_CHAIN]: true },
+        [PASSIVE_PARAM]: 'watch["/q"]',
+      },
+    })
+    // Built-ins: json-render's own confirm never shows, so it is dropped.
+    expect(
+      normalizeChained({ action: "setState", params: { statePath: "/a", value: 1 }, confirm: true }, undefined),
+    ).toEqual({ action: "setState", params: { statePath: "/a", value: 1 } })
+    expect(normalizeChained({ set: { "/a": 1 }, confirm: true }, undefined)).toEqual({ set: { "/a": 1 } })
+    for (const junk of [
+      undefined,
+      "x",
+      { [IGNORED_CHAIN]: true },
+      { $state: "/h" },
+      { action: "x", params: { $state: "/p" } },
+      { navigate: "/" },
+    ])
+      expect(normalizeChained(junk, undefined)).toBeUndefined()
+  })
+
+  test('a top-level { "$item": f } param of a custom action resolves to the value ($bindItem); built-ins keep it', () => {
+    const output = normalizeSpec(
+      spec({
+        list: { type: "Stack", props: {}, repeat: { statePath: "/suggestions" }, children: ["use"] },
+        use: {
+          type: "Button",
+          props: { label: { $item: "text" } },
+          on: {
+            press: [
+              { action: "insertPrompt", params: { text: { $item: "text" } } },
+              { action: "sendPrompt", params: { text: "Use", data: { $item: "" } } },
+              { action: "removeState", params: { statePath: { $item: "" }, index: { $index: true } } },
+            ],
+          },
+        },
+      }),
+    )
+    expect(el(output, "use").on.press).toEqual([
+      { action: "insertPrompt", params: { text: { $bindItem: "text" } } },
+      { action: "sendPrompt", params: { text: "Use", data: { $bindItem: "" } } },
+      { action: "removeState", params: { statePath: { $item: "" }, index: { $index: true } } },
+    ])
+  })
+})
+
+describe("normalizeSpec: bindings without an activation", () => {
+  test("tags custom actions in watch, and in events that are not activations; activations stay untagged", () => {
+    const send = { action: "sendPrompt", params: { text: "x" } }
+    const output = normalizeSpec(
+      spec({
+        field: {
+          type: "Input",
+          props: { label: "Q" },
+          on: {
+            submit: send,
+            focus: send,
+            blur: [{ action: "setState", params: { statePath: "/b", value: 1 } }, send],
+          },
+          watch: { "/q": { ...send, onSuccess: { action: "copyText", params: { text: "y" } } } },
+        },
+        slider: { type: "Slider", props: {}, on: { change: send } },
+        choice: { type: "Select", props: { label: "S", options: ["a"] }, on: { change: send } },
+        go: { type: "Button", props: { label: "Go" }, on: { press: send, change: send } },
+      }),
+    )
+    const field = el(output, "field")
+    expect(field.on.submit).toBe(send)
+    expect(field.on.focus.params[PASSIVE_PARAM]).toBe("on.focus")
+    // Built-ins are never tagged; only custom actions have a handler that reads the tag.
+    expect(field.on.blur[0]).toEqual({ action: "setState", params: { statePath: "/b", value: 1 } })
+    expect(field.on.blur[1].params[PASSIVE_PARAM]).toBe("on.blur")
+    expect(field.watch["/q"].params).toEqual({
+      text: "x",
+      [PASSIVE_PARAM]: 'watch["/q"]',
+      [ON_SUCCESS_PARAM]: { action: "copyText", params: { text: "y", [PASSIVE_PARAM]: 'watch["/q"]' } },
+    })
+    expect(el(output, "slider").on.change.params[PASSIVE_PARAM]).toBe("on.change")
+    expect(el(output, "choice").on.change).toBe(send)
+    expect(el(output, "go").on.press).toBe(send)
+    expect(el(output, "go").on.change.params[PASSIVE_PARAM]).toBe("on.change")
+  })
+})
+
+describe("normalizeSpec: validation checks", () => {
+  test("pattern and email become the safe checks; others are kept; nothing to change keeps identity", () => {
+    const keep = deepFreeze({ type: "Input", props: { label: "K", checks: [{ type: "required", message: "R" }] } })
+    const output = normalizeSpec(
+      spec({
+        keep,
+        field: {
+          type: "Input",
+          props: {
+            label: "Key",
+            checks: [
+              { type: "required", message: "Required" },
+              { type: "pattern", args: { pattern: "^(a+)+$" }, message: "Bad" },
+              { type: "email", message: "Email" },
+            ],
+          },
+        },
+      }),
+    )
+    expect(el(output, "field").props.checks).toEqual([
+      { type: "required", message: "Required" },
+      { type: SAFE_CHECKS.pattern, args: { pattern: "^(a+)+$" }, message: "Bad" },
+      { type: SAFE_CHECKS.email, message: "Email" },
+    ])
+    // Bound to /__genui/keep, but its checks are the very same array.
+    expect(el(output, "keep").props.checks).toBe(keep.props.checks)
+  })
+
+  test("checks written as expressions are replaced by an ignored check", () => {
+    const output = normalizeSpec(
+      spec({
+        list: { type: "Input", props: { label: "L", checks: { $state: "/rules" } } },
+        items: {
+          type: "Input",
+          props: {
+            label: "I",
+            checks: [
+              {
+                $cond: { $state: "/strict" },
+                $then: { type: "pattern", args: { pattern: "x" }, message: "m" },
+                $else: {},
+              },
+              { type: { $state: "/type" }, args: { pattern: "x" }, message: "m" },
+              { type: "minLength", args: { min: { $state: "/min" } }, message: "m" },
+            ],
+          },
+        },
+      }),
+    )
+    expect(el(output, "list").props.checks).toEqual([{ type: IGNORED_CHECK, message: "" }])
+    expect(el(output, "items").props.checks).toEqual([
+      { type: IGNORED_CHECK, message: "" },
+      { type: IGNORED_CHECK, message: "" },
+      { type: "minLength", args: { min: { $state: "/min" } }, message: "m" },
+    ])
+  })
+})
+
+describe("normalizeSpec: password inputs", () => {
+  test("a password Input is bound under the secret root and seeded there", () => {
+    const output = normalizeSpec(
+      spec({
+        pw: { type: "Input", props: { label: "Password", type: "password", value: "x" } },
+        name: { type: "Input", props: { label: "Name", value: "Ada" } },
+        dynamic: { type: "Input", props: { label: "Key", type: { $state: "/kind" } } },
+      }),
+    )
+    expect(el(output, "pw").props.value).toEqual({ $bindState: secretStatePath("pw") })
+    expect(secretStatePath("pw")).toBe(`/${UI_SECRET_ROOT}/pw`)
+    expect(el(output, "name").props.value).toEqual({ $bindState: uiStatePath("name") })
+    // A type known only at render time may be "password": it is kept secret too.
+    expect(el(output, "dynamic").props.value).toEqual({ $bindState: secretStatePath("dynamic") })
+    expect(output.state).toEqual({ [UI_STATE_ROOT]: { name: "Ada" }, [UI_SECRET_ROOT]: { pw: "x" } })
+  })
+
+  test("an explicitly bound password Input is left alone", () => {
+    const output = normalizeSpec(
+      spec({ pw: { type: "Input", props: { label: "P", type: "password", value: { $bindState: "/form/pw" } } } }),
+    )
+    expect(el(output, "pw").props.value).toEqual({ $bindState: "/form/pw" })
+  })
+
+  test("secretPaths lists where password Inputs write besides the secret root, so it is never persisted", () => {
+    const output = normalizeSpec(
+      spec(
+        {
+          pw: { type: "Input", props: { label: "P", type: "password", value: { $bindState: "/form/pw" } } },
+          name: { type: "Input", props: { label: "N", value: { $bindState: "/form/name" } } },
+          auto: { type: "Input", props: { label: "A", type: "password" } },
+          dbs: { type: "Stack", props: {}, repeat: { statePath: "/dbs" }, children: ["dbpw", "hosts"] },
+          dbpw: { type: "Input", props: { label: "DB", type: "password", value: { $bindItem: "pw" } } },
+          hosts: { type: "Stack", props: {}, repeat: { statePath: { $item: "hosts" } }, children: ["hostkey"] },
+          hostkey: { type: "Input", props: { label: "Key", type: { $state: "/t" }, value: { $bindItem: "key" } } },
+          orphan: { type: "Input", props: { label: "O", type: "password", value: { $bindItem: "token" } } },
+        },
+        { state: { dbs: [] } },
+      ),
+    )
+    expect(secretPaths(output)).toEqual(["/**/token", "/dbs/*/hosts/*/key", "/dbs/*/pw", "/form/pw"])
+    expect(secretPaths(output)).toBe(secretPaths(output))
+    expect(secretPaths(spec({ name: { type: "Input", props: { label: "N" } } }))).toEqual([])
+    expect(secretPaths(null)).toEqual([])
+  })
+
+  test("seeding both roots keeps the state's identity while seeds do not change", () => {
+    const state = deepFreeze({ form: {} })
+    const elements = {
+      pw: { type: "Input", props: { label: "P", type: "password", value: "s" } },
+      name: { type: "Input", props: { label: "N", value: "n" } },
+    }
+    const first = normalizeSpec(spec(elements, { state }))
+    const second = normalizeSpec(spec({ ...elements, t: { type: "Text", props: { text: "x" } } }, { state }))
+    expect(second.state).toBe(first.state)
   })
 })

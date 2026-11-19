@@ -6,7 +6,7 @@
  *   never the app's own classes. Selectors stay at low specificity with :where() where a component may be nested.
  * - Colors, fonts, radii and shadows come ONLY from the --gu-* aliases below, which map to the app's design tokens
  *   (@opencode/ui, theme-aware: they follow the user's theme and light/dark mode). Do not reference --v2-* or literal
- *   colors in component files; add an alias here instead (test/unit/tokens.test.ts checks every token exists).
+ *   colors in component files; add an alias here instead (test/unit/styles.test.ts checks every alias is defined and every token exists).
  * - Fallbacks are CSS system colors, which also follow light/dark, so the UI stays legible if a token is renamed.
  * - No font-family literals: use var(--gu-font-sans) / var(--gu-font-mono).
  */
@@ -76,6 +76,12 @@
   --gu-shadow-button: var(--v2-elevation-button-neutral, inset 0 0 0 1px GrayText);
   --gu-shadow-switch-off: var(--v2-elevation-switch-off, none);
   --gu-shadow-switch-on: var(--v2-elevation-switch-on, none);
+  --gu-shadow-elements: var(--v2-elevation-elements, none);
+
+  /* Knobs (the switch thumb): a grey fill under the app's depth gradient */
+  --gu-thumb: var(--v2-grey-200, ButtonFace);
+  --gu-depth-top: var(--v2-overlay-gradient-depth-overlay-depth-top, transparent);
+  --gu-depth-bot: var(--v2-overlay-gradient-depth-overlay-depth-bot, transparent);
 
   /* Categorical palette for charts and avatars (theme primitives) */
   --gu-cat-1: var(--v2-blue-600, AccentColor);
