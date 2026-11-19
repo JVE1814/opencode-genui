@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Skill is up to date
+        run: bun scripts/build-skill.ts --check
+
+      - name: Build and check the desktop bundle
+        run: bun run build
+
+      # OpenCode installs plugins with scripts disabled, so the committed bundle is what users run.
+      - name: Committed bundle matches the source
+        run: git diff --exit-code -- dist/gui-experimental.cjs skills/genui/SKILL.md
+
+      - name: Install Chromium
+        run: bunx playwright install --with-deps chromium
+
+      - name: End-to-end tests (playground harness)
+        run: bun run test:e2e
