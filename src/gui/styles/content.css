@@ -1,0 +1,351 @@
+/*
+ * Content components (src/gui/components/content.tsx): Heading, Text, Markdown, Code, Badge, Alert, Keybind, Icon.
+ * Typography follows the app's scale (utilities.css text-13/14/16/20, the settings screen's 13px rows); Badge is the
+ * app's tag in its standard appearance (badge.css). Slot selectors use the child combinator so they never reach a
+ * nested component's slots. Custom properties named --_* are private to the component that sets them.
+ */
+
+/* ── Heading ────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="heading"] {
+  margin: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-base);
+  font-weight: var(--gu-weight-medium);
+  line-height: var(--gu-leading-base);
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+[data-genui] [data-gu="heading"][data-level="h1"] {
+  font-size: var(--gu-size-xl);
+  line-height: var(--gu-leading-prose);
+}
+
+[data-genui] [data-gu="heading"][data-level="h2"] {
+  font-size: var(--gu-size-lg);
+  line-height: var(--gu-leading-prose);
+}
+
+/* h4 is a quiet section label, as the timeline's Markdown draws it: smaller and muted. */
+[data-genui] [data-gu="heading"][data-level="h4"] {
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+/* ── Text ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="text"] {
+  margin: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-base);
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-prose);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="text"][data-variant="lead"] {
+  font-size: var(--gu-size-lg);
+}
+
+[data-genui] [data-gu="text"][data-variant="muted"] {
+  color: var(--gu-text-muted);
+}
+
+[data-genui] [data-gu="text"][data-variant="caption"] {
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu="text"][data-weight="medium"] {
+  font-weight: var(--gu-weight-medium);
+}
+
+[data-genui] [data-gu="text"][data-align="center"] {
+  text-align: center;
+}
+
+[data-genui] [data-gu="text"][data-align="end"] {
+  text-align: end;
+}
+
+/* The timeline's inline code: mono, medium, a 4px box on a faint fill that wraps with the text. */
+[data-genui] [data-gu="text"][data-variant="code"] > [data-slot="code"] {
+  padding: 0 4px;
+  border-radius: var(--gu-radius-sm);
+  background-color: var(--gu-layer-2);
+  color: var(--gu-text);
+  font-family: var(--gu-font-mono);
+  font-size: var(--gu-size-sm);
+  font-weight: var(--gu-weight-medium);
+  white-space: pre-wrap;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* ── Markdown ───────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="markdown"] {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* ── Code ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="code"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-xs);
+  min-width: 0;
+  margin: 0;
+}
+
+[data-genui] [data-gu="code"] > [data-slot="header"] {
+  display: flex;
+  align-items: center;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  min-height: var(--gu-control-sm);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu="code"] > [data-slot="header"] > [data-slot="title"] {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gu-text);
+  font-weight: var(--gu-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="code"] > [data-slot="header"] > [data-slot="language"] {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--gu-text-muted);
+  font-family: var(--gu-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="code"] > [data-slot="header"] > [data-slot="actions"] {
+  display: inline-flex;
+  flex: none;
+  margin-inline-start: auto;
+}
+
+[data-genui] [data-gu="code"] > [data-slot="body"] {
+  min-width: 0;
+}
+
+/* ui.Code is the timeline's Markdown code block, whose <pre> carries the message flow's 12px/24px margins. Here the
+   block is the whole component, so they go. */
+[data-genui] [data-gu="code"] > [data-slot="body"] pre {
+  margin: 0;
+}
+
+/* With our header, its copy button replaces the block's own hover copy button (host markup, matched by its data
+   attribute; if the app renames it, the only effect is a second copy button). */
+[data-genui] [data-gu="code"][data-header] > [data-slot="body"] [data-slot="markdown-copy-button"] {
+  display: none;
+}
+
+/* ── Badge ──────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* The app's tag, standard appearance: 18px, 6px padding, 2px corners, 13px medium, a hairline border. */
+[data-genui] [data-gu="badge"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gu-space-xs);
+  width: fit-content;
+  max-width: 100%;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--gu-radius-xs);
+  background-color: var(--gu-layer-2);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border);
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  font-weight: var(--gu-weight-medium);
+  line-height: var(--gu-leading-compact);
+  white-space: nowrap;
+  vertical-align: middle;
+  user-select: none;
+}
+
+[data-genui] [data-gu="badge"] > [data-slot="text"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-genui] [data-gu="badge"][data-variant="secondary"] {
+  background-color: var(--gu-layer-3);
+  box-shadow: none;
+  color: var(--gu-text-muted);
+}
+
+[data-genui] [data-gu="badge"][data-variant="outline"] {
+  background: none;
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-strong);
+  color: var(--gu-text-muted);
+}
+
+[data-genui] [data-gu="badge"][data-variant="info"] {
+  background-color: var(--gu-info-bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-info-border);
+  color: var(--gu-info-fg);
+}
+
+[data-genui] [data-gu="badge"][data-variant="success"] {
+  background-color: var(--gu-success-bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-success-border);
+  color: var(--gu-success-fg);
+}
+
+[data-genui] [data-gu="badge"][data-variant="warning"] {
+  background-color: var(--gu-warning-bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-warning-border);
+  color: var(--gu-warning-fg);
+}
+
+[data-genui] [data-gu="badge"][data-variant="danger"] {
+  background-color: var(--gu-danger-bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-danger-border);
+  color: var(--gu-danger-fg);
+}
+
+/* ── Alert ──────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* A status callout on the state colors: the tinted background and hairline of the danger tag, an 8px frame like the
+   settings list, the state icon and title in the state's foreground and the message in body text. */
+[data-genui] [data-gu="alert"] {
+  --_bg: var(--gu-info-bg);
+  --_fg: var(--gu-info-fg);
+  --_border: var(--gu-info-border);
+
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  padding: 10px var(--gu-space-md);
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--_bg);
+  box-shadow: inset 0 0 0 0.5px var(--_border);
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-base);
+}
+
+[data-genui] [data-gu="alert"][data-type="success"] {
+  --_bg: var(--gu-success-bg);
+  --_fg: var(--gu-success-fg);
+  --_border: var(--gu-success-border);
+}
+
+[data-genui] [data-gu="alert"][data-type="warning"] {
+  --_bg: var(--gu-warning-bg);
+  --_fg: var(--gu-warning-fg);
+  --_border: var(--gu-warning-border);
+}
+
+[data-genui] [data-gu="alert"][data-type="error"] {
+  --_bg: var(--gu-danger-bg);
+  --_fg: var(--gu-danger-fg);
+  --_border: var(--gu-danger-border);
+}
+
+[data-genui] [data-gu="alert"] > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: var(--gu-leading-base);
+  color: var(--_fg);
+}
+
+[data-genui] [data-gu="alert"] > [data-slot="content"] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="alert"] > [data-slot="content"] > [data-slot="title"] {
+  margin: 0;
+  color: var(--_fg);
+  font-weight: var(--gu-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="alert"] > [data-slot="content"] > [data-slot="message"] {
+  margin: 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="alert"] > [data-slot="content"] > [data-slot="actions"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  margin-block-start: 6px;
+}
+
+[data-genui] [data-gu="alert"] > [data-slot="content"] > [data-slot="actions"]:empty {
+  display: none;
+}
+
+/* ── Keybind ────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="keybind"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  width: fit-content;
+  font: inherit;
+  vertical-align: middle;
+}
+
+[data-genui] [data-gu="keybind"] > [data-slot="keys"] {
+  display: inline-flex;
+}
+
+/* ── Icon ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* The icon draws in currentColor: without a tone it takes the surrounding text color. */
+[data-genui] [data-gu="icon"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  vertical-align: middle;
+}
+
+[data-genui] [data-gu="icon"][data-tone="neutral"] {
+  color: var(--gu-icon-muted);
+}
+
+[data-genui] [data-gu="icon"][data-tone="info"] {
+  color: var(--gu-info-fg);
+}
+
+[data-genui] [data-gu="icon"][data-tone="success"] {
+  color: var(--gu-success-fg);
+}
+
+[data-genui] [data-gu="icon"][data-tone="warning"] {
+  color: var(--gu-warning-fg);
+}
+
+[data-genui] [data-gu="icon"][data-tone="danger"] {
+  color: var(--gu-danger-fg);
+}

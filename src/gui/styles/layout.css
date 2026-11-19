@@ -1,0 +1,584 @@
+/*
+ * Layout components (src/gui/components/layout.tsx): Stack, Grid, Card, Separator, Tabs, Accordion, Collapsible.
+ * Measurements follow @opencode/ui: the settings list (card frame), tabs-v2 "normal" (tabs), accordion.css and
+ * collapsible.css. Slot selectors use the child combinator so they never reach a nested component's slots.
+ * Custom properties named --_* are private to the component that sets them.
+ */
+
+/* ── Stack ──────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="stack"] {
+  --_gap: var(--gu-space-md);
+
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: var(--_gap);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="stack"][data-direction="horizontal"] {
+  flex-direction: row;
+}
+
+[data-genui] [data-gu="stack"][data-wrap] {
+  flex-wrap: wrap;
+}
+
+[data-genui] [data-gu="stack"] > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+[data-genui] [data-gu="stack"][data-align="start"] {
+  align-items: flex-start;
+}
+
+[data-genui] [data-gu="stack"][data-align="center"] {
+  align-items: center;
+}
+
+[data-genui] [data-gu="stack"][data-align="end"] {
+  align-items: flex-end;
+}
+
+[data-genui] [data-gu="stack"][data-align="stretch"] {
+  align-items: stretch;
+}
+
+[data-genui] [data-gu="stack"][data-align="baseline"] {
+  align-items: baseline;
+}
+
+[data-genui] [data-gu="stack"][data-justify="center"] {
+  justify-content: center;
+}
+
+[data-genui] [data-gu="stack"][data-justify="end"] {
+  justify-content: flex-end;
+}
+
+[data-genui] [data-gu="stack"][data-justify="between"] {
+  justify-content: space-between;
+}
+
+[data-genui] [data-gu="stack"][data-justify="around"] {
+  justify-content: space-around;
+}
+
+/* ── Grid ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * At most --_cols columns, each at least --_min wide: in a narrow surface (a sidebar canvas) the grid drops columns
+ * instead of squeezing them. 128px keeps two columns in the narrowest canvas (300px less its padding); grids of
+ * four or more columns hold small tiles and go down to 96px. The track minimum is the larger of --_min and an even
+ * share of the row, so exactly --_cols tracks fit when there is room; 0.5px of slack keeps rounding from dropping
+ * the last one.
+ */
+[data-genui] [data-gu="grid"] {
+  --_gap: var(--gu-space-md);
+  --_cols: 2;
+  --_min: 128px;
+
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(100%, max(var(--_min), (100% - (var(--_cols) - 1) * var(--_gap)) / var(--_cols) - 0.5px)), 1fr)
+  );
+  gap: var(--_gap);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="grid"] > * {
+  min-width: 0;
+}
+
+[data-genui] [data-gu="grid"][data-columns="1"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+[data-genui] [data-gu="grid"][data-columns="3"] {
+  --_cols: 3;
+}
+
+[data-genui] [data-gu="grid"][data-columns="4"] {
+  --_cols: 4;
+  --_min: 96px;
+}
+
+[data-genui] [data-gu="grid"][data-columns="5"] {
+  --_cols: 5;
+  --_min: 96px;
+}
+
+[data-genui] [data-gu="grid"][data-columns="6"] {
+  --_cols: 6;
+  --_min: 96px;
+}
+
+/* Gap tokens, shared by Stack and Grid */
+
+[data-genui] :is([data-gu="stack"], [data-gu="grid"])[data-gap="none"] {
+  --_gap: var(--gu-space-none);
+}
+
+[data-genui] :is([data-gu="stack"], [data-gu="grid"])[data-gap="xs"] {
+  --_gap: var(--gu-space-xs);
+}
+
+[data-genui] :is([data-gu="stack"], [data-gu="grid"])[data-gap="sm"] {
+  --_gap: var(--gu-space-sm);
+}
+
+[data-genui] :is([data-gu="stack"], [data-gu="grid"])[data-gap="md"] {
+  --_gap: var(--gu-space-md);
+}
+
+[data-genui] :is([data-gu="stack"], [data-gu="grid"])[data-gap="lg"] {
+  --_gap: var(--gu-space-lg);
+}
+
+[data-genui] :is([data-gu="stack"], [data-gu="grid"])[data-gap="xl"] {
+  --_gap: var(--gu-space-xl);
+}
+
+/* ── Card ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* The settings list's frame (a raised layer with a hairline), the app's way of grouping related content. A tone adds
+   the 2px accent line of the app's card.css at the inline start, and a status icon before the title. */
+[data-genui] [data-gu="card"] {
+  --_pad: var(--gu-space-lg);
+  --_accent: var(--gu-icon);
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+  padding: var(--_pad);
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+  color: var(--gu-text);
+}
+
+[data-genui] [data-gu="card"][data-padding="sm"] {
+  --_pad: var(--gu-space-md);
+}
+
+[data-genui] [data-gu="card"][data-padding="none"] {
+  gap: 0;
+  padding: 0;
+  overflow: clip;
+}
+
+[data-genui] [data-gu="card"][data-padding="none"] > [data-slot="header"] {
+  padding: var(--gu-space-md);
+}
+
+[data-genui] [data-gu="card"][data-padding="none"] > [data-slot="header"] + [data-slot="body"]:not(:empty) {
+  border-block-start: 0.5px solid var(--gu-border-muted);
+}
+
+@container genui (max-width: 420px) {
+  [data-genui] [data-gu="card"][data-padding="md"] {
+    --_pad: var(--gu-space-md);
+  }
+}
+
+[data-genui] [data-gu="card"]:not([data-tone="neutral"])::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block: var(--gu-space-sm);
+  width: 2px;
+  border-radius: var(--gu-radius-xs);
+  background-color: var(--_accent);
+  pointer-events: none;
+}
+
+[data-genui] [data-gu="card"][data-tone="info"] {
+  --_accent: var(--gu-info-fg);
+}
+
+[data-genui] [data-gu="card"][data-tone="success"] {
+  --_accent: var(--gu-success-fg);
+}
+
+[data-genui] [data-gu="card"][data-tone="warning"] {
+  --_accent: var(--gu-warning-fg);
+}
+
+[data-genui] [data-gu="card"][data-tone="danger"] {
+  --_accent: var(--gu-danger-fg);
+}
+
+[data-genui] [data-gu="card"] > [data-slot="header"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-xs);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="card"] > [data-slot="header"] > [data-slot="title"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-base);
+  font-weight: var(--gu-weight-medium);
+  line-height: var(--gu-leading-base);
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="card"] > [data-slot="header"] > [data-slot="title"] > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: var(--gu-leading-base);
+  color: var(--_accent);
+}
+
+[data-genui] [data-gu="card"] > [data-slot="header"] > [data-slot="description"] {
+  margin: 0;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-base);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="card"] > [data-slot="body"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="card"] > [data-slot="body"]:empty {
+  display: none;
+}
+
+/* ── Separator ──────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="separator"] {
+  flex: none;
+  align-self: stretch;
+  margin: 0;
+  border: 0;
+  border-block-start: 0.5px solid var(--gu-border);
+}
+
+[data-genui] [data-gu="separator"][data-orientation="vertical"] {
+  width: 0;
+  min-height: var(--gu-leading-compact);
+  border-block-start: 0;
+  border-inline-start: 0.5px solid var(--gu-border);
+}
+
+[data-genui] [data-gu="separator"][data-labelled] {
+  display: flex;
+  align-items: center;
+  gap: var(--gu-space-sm);
+  border-block-start: 0;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu="separator"][data-labelled]::before,
+[data-genui] [data-gu="separator"][data-labelled]::after {
+  content: "";
+  flex: 1 1 0;
+  min-width: var(--gu-space-lg);
+  border-block-start: 0.5px solid var(--gu-border);
+}
+
+[data-genui] [data-gu="separator"] > [data-slot="label"] {
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+/* ── Tabs ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* The app's tabs-v2 "normal" strip: 32px, 13px triggers with 6px padding and gap, muted until hovered or selected,
+   the selection marked by a faint underline on the strip's hairline. */
+[data-genui] [data-gu="tabs"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"] {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  height: var(--gu-control-lg);
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  box-shadow: inset 0 -1px 0 var(--gu-border);
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"]::-webkit-scrollbar {
+  display: none;
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"] > [data-slot="tab"] {
+  appearance: none;
+  display: flex;
+  flex: none;
+  align-items: center;
+  max-width: 240px;
+  margin: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--gu-text-muted);
+  font: inherit;
+  font-size: var(--gu-size-sm);
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-compact);
+  white-space: nowrap;
+  user-select: none;
+  transition:
+    color var(--gu-duration) var(--gu-ease),
+    box-shadow var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"] > [data-slot="tab"] > [data-slot="label"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"] > [data-slot="tab"]:hover:not([aria-selected="true"]) {
+  color: var(--gu-text);
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="list"] > [data-slot="tab"][aria-selected="true"] {
+  color: var(--gu-text);
+  box-shadow: inset 0 -1px 0 var(--gu-text-faint);
+}
+
+/* The strip scrolls, so the ring is drawn inside the trigger where it cannot be clipped. */
+[data-genui] [data-gu="tabs"] > [data-slot="list"] > [data-slot="tab"]:focus-visible {
+  outline-offset: -2px;
+  border-radius: var(--gu-radius-sm);
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="panels"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="panels"]:empty {
+  display: none;
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="panels"] > [data-slot="panel"] {
+  min-width: 0;
+  border-radius: var(--gu-radius-sm);
+}
+
+[data-genui] [data-gu="tabs"] > [data-slot="panels"] > [data-slot="panel"]:is([hidden], :empty) {
+  display: none;
+}
+
+/* ── Accordion ──────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* accordion.css: one bordered list with 8px corners, 32px triggers (13px, 8px 12px), the hover overlay, and open
+   bodies on layer 1 below a hairline. */
+[data-genui] [data-gu="accordion"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="accordion"] > [data-slot="items"] {
+  min-width: 0;
+  border: 1px solid var(--gu-border);
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-bg);
+  overflow: clip;
+}
+
+[data-genui] [data-gu="accordion"] > [data-slot="items"] > [data-slot="item"] + [data-slot="item"] {
+  border-block-start: 1px solid var(--gu-border);
+}
+
+[data-genui] [data-gu="accordion"] > [data-slot="items"] > [data-slot="item"] > [data-slot="trigger"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gu-space-sm);
+  min-height: var(--gu-control-lg);
+  padding: 6px 12px;
+  list-style: none;
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-compact);
+  user-select: none;
+  cursor: default;
+  transition: background-color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui]
+  [data-gu="accordion"]
+  > [data-slot="items"]
+  > [data-slot="item"]
+  > [data-slot="trigger"]::-webkit-details-marker {
+  display: none;
+}
+
+@media (hover: hover) {
+  [data-genui] [data-gu="accordion"] > [data-slot="items"] > [data-slot="item"] > [data-slot="trigger"]:hover {
+    background-color: var(--gu-hover);
+  }
+}
+
+/* The list clips its corners, so the ring is drawn inside the trigger. */
+[data-genui] [data-gu="accordion"] > [data-slot="items"] > [data-slot="item"] > [data-slot="trigger"]:focus-visible {
+  outline-offset: -2px;
+}
+
+[data-genui]
+  [data-gu="accordion"]
+  > [data-slot="items"]
+  > [data-slot="item"]
+  > [data-slot="trigger"]
+  > [data-slot="title"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+[data-genui]
+  [data-gu="accordion"]
+  > [data-slot="items"]
+  > [data-slot="item"]
+  > [data-slot="trigger"]
+  > [data-slot="chevron"] {
+  display: inline-flex;
+  flex: none;
+  color: var(--gu-icon-muted);
+  transition: transform var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui]
+  [data-gu="accordion"]
+  > [data-slot="items"]
+  > [data-slot="item"][open]
+  > [data-slot="trigger"]
+  > [data-slot="chevron"] {
+  transform: rotate(180deg);
+}
+
+[data-genui] [data-gu="accordion"] > [data-slot="items"] > [data-slot="item"] > [data-slot="content"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+  padding: var(--gu-space-md);
+  border-block-start: 1px solid var(--gu-border);
+  background-color: var(--gu-layer-1);
+}
+
+[data-genui] [data-gu="accordion"] > [data-slot="items"] > [data-slot="item"] > [data-slot="content"]:empty {
+  display: none;
+}
+
+[data-genui] [data-gu="accordion"] > [data-slot="extra"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+}
+
+/* ── Collapsible ────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* collapsible.css as the timeline's tool rows use it: a borderless 13px medium header with the filled triangle,
+   faint and turned to point at the title while closed. The triangle stays visible here, as in the tool error card,
+   since generated UI has no other hint that the header opens. */
+/* <details> takes flex layout only in recent engines, so it stays a block and the body keeps its own spacing. */
+[data-genui] [data-gu="collapsible"] {
+  display: block;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="collapsible"] > [data-slot="trigger"] {
+  display: flex;
+  align-items: center;
+  gap: var(--gu-space-xs);
+  width: fit-content;
+  max-width: 100%;
+  min-height: var(--gu-control);
+  list-style: none;
+  border-radius: var(--gu-radius-sm);
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  font-weight: var(--gu-weight-medium);
+  line-height: var(--gu-leading-compact);
+  user-select: none;
+  cursor: default;
+}
+
+[data-genui] [data-gu="collapsible"] > [data-slot="trigger"]::-webkit-details-marker {
+  display: none;
+}
+
+[data-genui] [data-gu="collapsible"] > [data-slot="trigger"] > [data-slot="title"] {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="collapsible"] > [data-slot="trigger"] > [data-slot="arrow"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--gu-leading-compact);
+  height: var(--gu-leading-compact);
+  color: var(--gu-icon-faint);
+  transform: rotate(-90deg);
+  transition:
+    transform var(--gu-duration) var(--gu-ease),
+    color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu="collapsible"]:dir(rtl) > [data-slot="trigger"] > [data-slot="arrow"] {
+  transform: rotate(90deg);
+}
+
+[data-genui] [data-gu="collapsible"][open] > [data-slot="trigger"] > [data-slot="arrow"] {
+  transform: rotate(0deg);
+}
+
+@media (hover: hover) {
+  [data-genui] [data-gu="collapsible"] > [data-slot="trigger"]:hover > [data-slot="arrow"] {
+    color: var(--gu-icon-muted);
+  }
+}
+
+[data-genui] [data-gu="collapsible"] > [data-slot="content"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+  padding-block-start: var(--gu-space-xs);
+}
+
+[data-genui] [data-gu="collapsible"] > [data-slot="content"]:empty {
+  display: none;
+}

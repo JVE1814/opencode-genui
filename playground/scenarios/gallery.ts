@@ -1,0 +1,275 @@
+import { block, element, root, state } from "./build.ts"
+import type { Scenario } from "./types.ts"
+
+// One inline block per component group, with every component of the catalog (src/catalog/components.ts), for visual
+// checks in light and dark mode.
+
+const layout = block("spec", { id: "gallery-layout", title: "Layout" }, [
+  root("main"),
+  element("main", "Stack", { gap: "lg" }, ["heading", "grid", "tabs", "accordion", "collapsible", "sep"]),
+  element("heading", "Heading", { text: "Layout", level: "h2" }),
+  element("grid", "Grid", { columns: 3, gap: "sm" }, ["c1", "c2", "c3"]),
+  element("c1", "Card", { title: "Card", description: "Default" }, ["c1t"]),
+  element("c1t", "Text", { text: "A bordered container.", variant: "muted" }),
+  element("c2", "Card", { title: "Success", tone: "success" }, ["c2t"]),
+  element("c2t", "Text", { text: "Tone success." }),
+  element("c3", "Card", { title: "Warning", tone: "warning", padding: "sm" }, ["c3t"]),
+  element("c3t", "Text", { text: "Tone warning, small padding." }),
+  element(
+    "tabs",
+    "Tabs",
+    {
+      tabs: [
+        { label: "Overview", value: "overview" },
+        { label: "Logs", value: "logs" },
+      ],
+      defaultValue: "overview",
+    },
+    ["tab1", "tab2"],
+  ),
+  element("tab1", "Text", { text: "The overview panel." }),
+  element("tab2", "Code", { code: "12:01:03 build ok\n12:01:09 deploy ok", language: "text" }),
+  element("accordion", "Accordion", {
+    items: [
+      { title: "What changed?", content: "Two **migrations** and a new endpoint." },
+      { title: "Rollback plan", content: "Redeploy `4f2c9e0`." },
+    ],
+    defaultOpen: [0],
+  }),
+  element("collapsible", "Collapsible", { title: "Details", defaultOpen: false }, ["details"]),
+  element("details", "Text", { text: "Hidden until opened.", variant: "caption" }),
+  element("sep", "Separator", { label: "end of layout" }),
+])
+
+const content = block("spec", { id: "gallery-content", title: "Content" }, [
+  root("main"),
+  element("main", "Stack", { gap: "md" }, [
+    "heading",
+    "lead",
+    "markdown",
+    "code",
+    "badges",
+    "alerts",
+    "table",
+    "progress",
+    "stats",
+    "misc",
+    "chart",
+    "donut",
+    "skeleton",
+  ]),
+  element("heading", "Heading", { text: "Content", level: "h2" }),
+  element("lead", "Text", { text: "Lead text introduces a section.", variant: "lead" }),
+  element("markdown", "Markdown", {
+    content: "Markdown with **bold**, `code`, a [link](https://opencode.ai) and a list:\n\n- one\n- two",
+  }),
+  element("code", "Code", { code: 'export const answer = 42\nconsole.log("hi")', language: "ts", title: "answer.ts" }),
+  element("badges", "Stack", { direction: "horizontal", gap: "xs", wrap: true }, [
+    "b1",
+    "b2",
+    "b3",
+    "b4",
+    "b5",
+    "b6",
+    "b7",
+  ]),
+  element("b1", "Badge", { text: "default" }),
+  element("b2", "Badge", { text: "secondary", variant: "secondary" }),
+  element("b3", "Badge", { text: "outline", variant: "outline" }),
+  element("b4", "Badge", { text: "success", variant: "success" }),
+  element("b5", "Badge", { text: "warning", variant: "warning" }),
+  element("b6", "Badge", { text: "danger", variant: "danger" }),
+  element("b7", "Badge", { text: "info", variant: "info" }),
+  element("alerts", "Stack", { gap: "sm" }, ["a1", "a2", "a3", "a4"]),
+  element("a1", "Alert", { title: "Info", message: "Something to know.", type: "info" }),
+  element("a2", "Alert", { title: "Success", message: "It worked.", type: "success" }),
+  element("a3", "Alert", { title: "Warning", message: "Careful.", type: "warning" }),
+  element("a4", "Alert", { title: "Error", message: "It failed.", type: "error" }),
+  element("table", "Table", {
+    columns: [
+      { key: "name", label: "Service" },
+      { key: "status", label: "Status" },
+      { key: "p95", label: "p95", align: "end" },
+    ],
+    rows: { $state: "/services" },
+    caption: "Services",
+  }),
+  state("/services", [
+    { name: "api", status: "healthy", p95: "182 ms" },
+    { name: "worker", status: "degraded", p95: "1.2 s" },
+    { name: "web", status: "healthy", p95: "96 ms" },
+  ]),
+  element("progress", "Progress", { label: "Disk", value: 72, showValue: true, tone: "warning" }),
+  element("stats", "Grid", { columns: 3, gap: "sm" }, ["s1", "s2", "s3"]),
+  element("s1", "Stat", { label: "Requests", value: "1.2M", change: "+8%", trend: "up", icon: "status" }),
+  element("s2", "Stat", { label: "Errors", value: 31, change: "-12%", trend: "down" }),
+  element("s3", "Stat", { label: "Uptime", value: "99.98%", description: "30 days" }),
+  element("misc", "Stack", { direction: "horizontal", gap: "md", align: "center", wrap: true }, [
+    "icon",
+    "keybind",
+    "avatar",
+    "avatar2",
+    "spinner",
+  ]),
+  element("icon", "Icon", { name: "check", tone: "success" }),
+  element("keybind", "Keybind", { keys: ["Ctrl", "K"] }),
+  element("avatar", "Avatar", { name: "Ada Lovelace" }),
+  element("avatar2", "Avatar", { name: "Grace Hopper", size: "large" }),
+  element("spinner", "Spinner", { label: "Loading" }),
+  element("chart", "Chart", {
+    type: "bar",
+    title: "Builds per day",
+    labels: ["Mon", "Tue", "Wed", "Thu", "Fri"],
+    series: [
+      { name: "Passed", values: [12, 18, 9, 14, 20] },
+      { name: "Failed", values: [2, 1, 4, 0, 3] },
+    ],
+  }),
+  element("donut", "Chart", {
+    type: "donut",
+    title: "Traffic",
+    labels: ["api", "web", "worker"],
+    series: [{ name: "Share", values: [55, 30, 15] }],
+  }),
+  element("skeleton", "Skeleton", { lines: 3 }),
+])
+
+const inputs = block("spec", { id: "gallery-inputs", title: "Inputs" }, [
+  root("main"),
+  element("main", "Card", { title: "Inputs" }, ["form"]),
+  element("form", "Stack", { gap: "md" }, [
+    "input",
+    "textarea",
+    "select",
+    "checkbox",
+    "radio",
+    "switch",
+    "slider",
+    "toggles",
+    "group",
+    "buttons",
+    "dropdown",
+    "pagination",
+    "link",
+  ]),
+  element("input", "Input", {
+    label: "Email",
+    type: "email",
+    placeholder: "you@example.com",
+    value: { $bindState: "/f/email" },
+  }),
+  element("textarea", "Textarea", { label: "Notes", rows: 3, value: { $bindState: "/f/notes" } }),
+  element("select", "Select", {
+    label: "Region",
+    options: ["us-east-1", "eu-west-1"],
+    value: { $bindState: "/f/region" },
+  }),
+  element("checkbox", "Checkbox", { label: "I agree", checked: { $bindState: "/f/agree" } }),
+  element("radio", "Radio", {
+    label: "Plan",
+    options: ["Free", "Pro", "Team"],
+    orientation: "horizontal",
+    value: { $bindState: "/f/plan" },
+  }),
+  element("switch", "Switch", { label: "Notifications", checked: { $bindState: "/f/notify" } }),
+  element("slider", "Slider", { label: "Budget", min: 0, max: 100, unit: "%", value: { $bindState: "/f/budget" } }),
+  element("toggles", "Stack", { direction: "horizontal", gap: "sm" }, ["toggle", "tgroup"]),
+  element("toggle", "Toggle", { label: "Bold", icon: "check", pressed: { $bindState: "/f/bold" } }),
+  element("tgroup", "ToggleGroup", {
+    items: [
+      { label: "Left", value: "left" },
+      { label: "Center", value: "center" },
+      { label: "Right", value: "right" },
+    ],
+    value: { $bindState: "/f/align" },
+  }),
+  element("group", "ButtonGroup", {
+    buttons: [
+      { label: "Day", value: "day" },
+      { label: "Week", value: "week" },
+      { label: "Month", value: "month" },
+    ],
+    selected: { $bindState: "/f/period" },
+  }),
+  element("buttons", "Stack", { direction: "horizontal", gap: "sm", wrap: true }, ["p", "s", "g", "d"]),
+  element("p", "Button", { label: "Primary", variant: "primary" }),
+  element("s", "Button", { label: "Secondary", variant: "secondary", icon: "copy" }),
+  element("g", "Button", { label: "Ghost", variant: "ghost" }),
+  element("d", "Button", { label: "Danger", variant: "danger" }),
+  element("dropdown", "DropdownMenu", {
+    label: "Actions",
+    items: [
+      { label: "Rename", value: "rename" },
+      { label: "Archive", value: "archive" },
+    ],
+    value: { $bindState: "/f/action" },
+  }),
+  element("pagination", "Pagination", { totalPages: 5, page: { $bindState: "/f/page" } }),
+  element("link", "Link", { label: "Open the docs", href: "https://opencode.ai/docs" }),
+  state("/f", {
+    email: "",
+    notes: "",
+    region: "us-east-1",
+    agree: false,
+    plan: "Pro",
+    notify: true,
+    budget: 40,
+    bold: false,
+    align: "left",
+    period: "week",
+    action: "",
+    page: 1,
+  }),
+])
+
+const overlays = block("spec", { id: "gallery-overlays", title: "Overlays" }, [
+  root("main"),
+  element("main", "Stack", { gap: "md" }, ["heading", "row", "carousel", "image", "dialog", "drawer"]),
+  element("heading", "Heading", { text: "Overlays", level: "h2" }),
+  element("row", "Stack", { direction: "horizontal", gap: "sm", align: "center" }, [
+    "open",
+    "drawerOpen",
+    "tip",
+    "pop",
+  ]),
+  element("open", "Button", { label: "Open dialog" }, [], {
+    on: { press: { action: "setState", params: { statePath: "/dialog", value: true } } },
+  }),
+  element("drawerOpen", "Button", { label: "Open drawer", variant: "ghost" }, [], {
+    on: { press: { action: "setState", params: { statePath: "/drawer", value: true } } },
+  }),
+  element("tip", "Tooltip", { content: "More about this", text: "Hover me" }),
+  element("pop", "Popover", { trigger: "Details", content: "A small panel with **Markdown**." }),
+  element("carousel", "Carousel", {
+    items: [
+      { title: "Step 1", description: "Build" },
+      { title: "Step 2", description: "Migrate" },
+      { title: "Step 3", description: "Switch traffic" },
+    ],
+  }),
+  element("image", "Image", {
+    src: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjAiIGhlaWdodD0iNjAiPjxyZWN0IHdpZHRoPSIxMjAiIGhlaWdodD0iNjAiIGZpbGw9IiM4ODgiLz48L3N2Zz4=",
+    alt: "A gray placeholder",
+    width: 120,
+    height: 60,
+    caption: "A data: image",
+  }),
+  element("dialog", "Dialog", { title: "Confirm", description: "A modal dialog.", openPath: "/dialog" }, ["dtext"]),
+  element("dtext", "Text", { text: "Dialog content." }),
+  element("drawer", "Drawer", { title: "Drawer", openPath: "/drawer" }, ["drtext"]),
+  element("drtext", "Text", { text: "Drawer content." }),
+  state("/dialog", false),
+  state("/drawer", false),
+])
+
+export const galleryScenario: Scenario = {
+  name: "gallery",
+  title: "Component gallery",
+  description: "Every component of the catalog, in four inline blocks, for visual checks in light and dark mode.",
+  steps: [
+    { user: "Show me every component you can render." },
+    {
+      assistant: `Here they are, by group.\n\n${layout}\n\n${content}\n\n${inputs}\n\n${overlays}`,
+    },
+  ],
+}

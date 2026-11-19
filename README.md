@@ -77,7 +77,7 @@ header: `id` keeps what you typed when the agent re-sends the block, `title` lab
 
 ### Components
 
-41 components with native implementations: layout (Stack, Grid, Card, Separator, Tabs, Accordion, Collapsible),
+42 components with native implementations: layout (Stack, Grid, Card, Separator, Tabs, Accordion, Collapsible),
 content (Heading, Text, Markdown, Code, Badge, Alert, Table, Progress, Skeleton, Spinner, Stat, Icon, Keybind, Image,
 Avatar, Chart), input (Input, Textarea, Select, Checkbox, Radio, Switch, Slider, Button, Link, Toggle, ToggleGroup,
 ButtonGroup, DropdownMenu, Pagination) and overlays (Dialog, Drawer, Tooltip, Popover, Carousel). All of json-render's
@@ -86,14 +86,14 @@ spec features work: state, `$state` / `$bindState` / `$item` / `$cond` / `$templ
 
 ### Actions
 
-| Action | What it does |
-| --- | --- |
+| Action                       | What it does                                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
 | `sendPrompt { text, data? }` | Sends a message to the agent as you: the text, then the data as a fenced JSON block. |
-| `insertPrompt { text }` | Puts text in your message box, unsent. |
-| `openLink { url }` | Opens an http(s) or mailto link in your browser. |
-| `copyText { text }` | Copies to the clipboard. |
-| `showToast { title }` | Shows a notification. |
-| `openCanvas { canvas }` | Focuses a canvas tab. |
+| `insertPrompt { text }`      | Puts text in your message box, unsent.                                               |
+| `openLink { url }`           | Opens an http(s) or mailto link in your browser.                                     |
+| `copyText { text }`          | Copies to the clipboard.                                                             |
+| `showToast { title }`        | Shows a notification.                                                                |
+| `openCanvas { canvas }`      | Focuses a canvas tab.                                                                |
 
 ### How the agent learns it
 

@@ -125,6 +125,9 @@ export function applyPatch<T>(doc: T, patch: Patch): T {
       if (!from) return doc
       const value = getAt(doc, from)
       if (value === undefined) return doc
+      // RFC 6902: moving a value to where it is changes nothing, and moving it into its own child is an error.
+      if (patch.op === "move" && from.length <= tokens.length && from.every((token, index) => token === tokens[index]))
+        return doc
       const base = patch.op === "move" ? removeAt(doc, from) : doc
       return setAt(base, tokens, value, true) as T
     }

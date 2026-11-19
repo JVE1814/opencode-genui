@@ -118,6 +118,7 @@ export function parseBlock(body: string, options: { partial?: boolean } = {}): P
   const errors: LineError[] = []
   let header: SurfaceHeader = {}
   let headerSeen = false
+  let headerLine = -1
   let lastContent = -1
   lines.forEach((line, index) => {
     if (line) lastContent = index
@@ -145,20 +146,31 @@ export function parseBlock(body: string, options: { partial?: boolean } = {}): P
     if (isRecord(value) && !("op" in value) && !headerSeen && patches.length === 0) {
       header = toHeader(value)
       headerSeen = true
+      headerLine = index
       return
     }
     errors.push({ line: index + 1, text: line.slice(0, 200), message: "Not a JSON patch" })
   })
 
-  // A whole spec spread over several lines fails line by line; try the body as one document.
+  // A whole spec spread over several lines fails line by line; try the body as one document, or what follows the
+  // header line when there is one.
   if (patches.length === 0 && errors.length > 0) {
-    const start = body.indexOf("{")
-    if (start >= 0) {
+    const afterHeader =
+      headerLine >= 0
+        ? body
+            .split("\n")
+            .slice(0, headerLine + 1)
+            .join("\n").length + 1
+        : undefined
+    const starts = new Set([body.indexOf("{"), afterHeader === undefined ? -1 : body.indexOf("{", afterHeader)])
+    for (const start of starts) {
+      if (start < 0) continue
       try {
         const value: unknown = JSON.parse(body.slice(start))
         if (isSpecDocument(value)) {
           patches.push(...specToPatches(value))
           errors.length = 0
+          break
         }
       } catch {
         // Keep the line errors.

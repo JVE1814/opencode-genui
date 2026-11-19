@@ -1,0 +1,977 @@
+/*
+ * genui input components (src/gui/components/inputs.tsx, choices.tsx).
+ *
+ * Measurements follow @opencode/ui: forms/text-input, forms/textarea, forms/checkbox (compact), forms/radio,
+ * forms/select, navigation/segmented-control, actions/button and actions/icon-button. Colors only through the --gu-*
+ * aliases of base.css. A few aliases are proposed for base.css and used with a fallback to the nearest existing one:
+ * --gu-icon-contrast (marks on the accent fill), --gu-contrast-hover (hover over the accent fill) and --gu-sheen (the
+ * light-to-clear depth gradient on accent fills).
+ */
+
+/* ── Field messages ─────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* The error element stays in the DOM for its live region; empty, it leaves the flex flow so it adds no gap. */
+[data-genui]
+  :where([data-gu="input"], [data-gu="textarea"], [data-gu="select"], [data-gu="checkbox"], [data-gu="radio"])
+  > [data-gu-error]:empty {
+  position: absolute;
+}
+
+[data-genui]
+  :where([data-gu="input"], [data-gu="textarea"], [data-gu="select"], [data-gu="checkbox"], [data-gu="radio"])
+  > :where([data-gu-description], [data-gu-error]) {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+[data-genui]
+  :where([data-gu="input"], [data-gu="textarea"], [data-gu="select"], [data-gu="radio"], [data-gu="slider"])
+  [data-gu-label] {
+  overflow-wrap: anywhere;
+}
+
+/* ── Input and Textarea (forms/text-input, forms/textarea) ──────────────────────────────────────────────────────── */
+
+[data-genui] :where([data-gu="input"], [data-gu="textarea"]) > [data-slot="control"] {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: var(--gu-radius-md);
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  background: var(--gu-bg);
+  box-shadow: var(--gu-shadow-input);
+  transition:
+    background 85ms ease-out,
+    outline-color 85ms ease-out,
+    box-shadow 85ms ease-out;
+}
+
+[data-genui] [data-gu="input"] > [data-slot="control"] {
+  height: var(--gu-control);
+}
+
+[data-genui] [data-gu="textarea"] > [data-slot="control"] {
+  padding: 0 2px 2px 0;
+}
+
+@media (hover: hover) {
+  [data-genui]
+    :where([data-gu="input"], [data-gu="textarea"])
+    > [data-slot="control"]:hover:not([data-disabled], [data-invalid]):not(:focus-within) {
+    box-shadow:
+      inset 0 0 0 100vmax var(--gu-hover),
+      var(--gu-shadow-input);
+  }
+}
+
+[data-genui]
+  :where([data-gu="input"], [data-gu="textarea"])
+  > [data-slot="control"]:focus-within:not([data-disabled], [data-invalid]) {
+  outline-color: var(--gu-focus);
+  box-shadow: none;
+}
+
+[data-genui]
+  :where([data-gu="input"], [data-gu="textarea"])
+  > [data-slot="control"][data-invalid]:not([data-disabled]) {
+  outline-color: var(--gu-danger-fg);
+  box-shadow: none;
+}
+
+[data-genui] :where([data-gu="input"], [data-gu="textarea"]) > [data-slot="control"][data-disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+[data-genui] :where([data-gu="input"], [data-gu="textarea"]) [data-slot="input"] {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  outline: none;
+  color: var(--gu-text);
+  font-family: inherit;
+  font-size: var(--gu-size-sm);
+  font-style: normal;
+  font-weight: var(--gu-weight-regular);
+  letter-spacing: -0.04px;
+}
+
+/* The control draws the focus state (outline-color above), as the app's fields do. */
+[data-genui] :where([data-gu="input"], [data-gu="textarea"]) [data-slot="input"]:focus-visible {
+  outline: none;
+}
+
+[data-genui] :where([data-gu="input"], [data-gu="textarea"]) [data-slot="input"]::placeholder {
+  color: var(--gu-text-faint);
+  opacity: 1;
+  user-select: none;
+}
+
+[data-genui] :where([data-gu="input"], [data-gu="textarea"]) [data-slot="input"]:disabled {
+  cursor: not-allowed;
+}
+
+[data-genui]
+  :where([data-gu="input"], [data-gu="textarea"])
+  > [data-slot="control"][data-invalid]:not([data-disabled])
+  [data-slot="input"] {
+  color: var(--gu-danger-fg);
+  caret-color: var(--gu-danger-fg);
+}
+
+[data-genui]
+  :where([data-gu="input"], [data-gu="textarea"])
+  > [data-slot="control"][data-invalid]:not([data-disabled])
+  [data-slot="input"]::placeholder {
+  color: var(--gu-danger-fg);
+}
+
+[data-genui] [data-gu="input"] [data-slot="input"] {
+  height: 100%;
+  padding: 0 8px;
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu="input"] [data-slot="input"][type="number"] {
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+[data-genui] [data-gu="input"] [data-slot="input"]::-webkit-inner-spin-button,
+[data-genui] [data-gu="input"] [data-slot="input"]::-webkit-outer-spin-button,
+[data-genui] [data-gu="input"] [data-slot="input"]::-webkit-search-cancel-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+[data-genui] [data-gu="textarea"] [data-slot="input"] {
+  padding: 8px;
+  line-height: 1.35;
+  resize: vertical;
+}
+
+[data-genui] [data-gu="textarea"] [data-slot="input"]:disabled {
+  resize: none;
+}
+
+/* ── Select (ui.Select; forms/select) ───────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="select"] > [data-slot="control"] {
+  display: block;
+  min-width: 0;
+}
+
+/*
+ * ui.Select renders the select's compact "inline" appearance (settings rows: no frame, fit-content). In a form the app
+ * uses its "base" appearance, the framed field, so the trigger (ui.Select's `class`, see SELECT_TRIGGER_CLASS) gets
+ * select-v2's base metrics and states here, at a specificity above the inline rules. Without the host markup this
+ * relies on (data-expanded, the value-text slot) it degrades to the inline look.
+ */
+[data-genui] [data-gu="select"] > [data-slot="control"] .genui-select-trigger {
+  align-self: stretch;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--gu-control);
+  padding-block: 0;
+  padding-inline: 8px;
+  gap: 8px;
+  border-radius: var(--gu-radius-md);
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  background: var(--gu-bg);
+  box-shadow: var(--gu-shadow-input);
+  transition:
+    background 85ms ease-out,
+    outline-color 85ms ease-out,
+    box-shadow 85ms ease-out;
+}
+
+[data-genui] [data-gu="select"] > [data-slot="control"] .genui-select-trigger [data-slot="select-v2-value-text"] {
+  padding: 0;
+  font-weight: var(--gu-weight-regular);
+}
+
+@media (hover: hover) {
+  [data-genui]
+    [data-gu="select"]
+    > [data-slot="control"]
+    .genui-select-trigger:hover:not([data-disabled], [data-invalid], [data-expanded]):not(:focus-within) {
+    background: var(--gu-bg);
+    box-shadow:
+      inset 0 0 0 100vmax var(--gu-hover),
+      var(--gu-shadow-input);
+  }
+}
+
+[data-genui]
+  [data-gu="select"]
+  > [data-slot="control"]
+  .genui-select-trigger:active:not([data-disabled], [data-invalid]) {
+  background: var(--gu-bg);
+}
+
+[data-genui]
+  [data-gu="select"]
+  > [data-slot="control"]
+  .genui-select-trigger[data-expanded]:not([data-disabled], [data-invalid]) {
+  outline-color: transparent;
+  background: var(--gu-bg);
+  box-shadow:
+    inset 0 0 0 100vmax var(--gu-hover),
+    var(--gu-shadow-input);
+}
+
+[data-genui]
+  [data-gu="select"]
+  > [data-slot="control"]
+  .genui-select-trigger:focus-within:not([data-disabled], [data-invalid]):not([data-expanded]) {
+  outline-color: var(--gu-focus);
+  box-shadow: none;
+}
+
+[data-genui] [data-gu="select"] > [data-slot="control"] .genui-select-trigger[data-invalid]:not([data-disabled]) {
+  outline-color: var(--gu-danger-fg);
+  box-shadow: none;
+}
+
+/* ── Checkbox and Radio (forms/checkbox compact, forms/radio) ───────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="checkbox"] {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+[data-genui] :where([data-gu="checkbox"] > [data-slot="row"], [data-gu="radio"] [data-slot="item"]) {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The native input is kept for keyboard and assistive tech, and drawn by the control beside it. */
+[data-genui] :where([data-gu="checkbox"], [data-gu="radio"]) [data-slot="input"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 20px tall so the 16px control centers on the label's first 20px line. */
+[data-genui] :where([data-gu="checkbox"], [data-gu="radio"]) [data-slot="box"] {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 20px;
+  cursor: default;
+}
+
+[data-genui] :where([data-gu="checkbox"], [data-gu="radio"]) [data-slot="control"] {
+  box-sizing: border-box;
+  position: absolute;
+  top: 2px;
+  inset-inline-start: 0;
+  width: 16px;
+  height: 16px;
+  background: var(--gu-bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-strong);
+}
+
+[data-genui] :where([data-gu="checkbox"] [data-slot="text"], [data-gu="switch"] > [data-slot="text"]) {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+[data-genui]
+  :where(
+    [data-gu="checkbox"] [data-slot="text"] > [data-slot="label"],
+    [data-gu="radio"] [data-slot="item"] > [data-slot="label"],
+    [data-gu="switch"] > [data-slot="text"] > [data-slot="label"]
+  ) {
+  min-width: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  font-style: normal;
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-base);
+  letter-spacing: -0.04px;
+  overflow-wrap: anywhere;
+  user-select: none;
+  cursor: default;
+}
+
+[data-genui]
+  :where(
+    [data-gu="checkbox"] [data-slot="text"] > [data-slot="description"],
+    [data-gu="switch"] > [data-slot="text"] > [data-slot="description"]
+  ) {
+  min-width: 0;
+  color: var(--gu-text-muted);
+  font-size: 11px;
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-tight);
+  letter-spacing: 0.05px;
+  overflow-wrap: anywhere;
+  user-select: none;
+}
+
+/* Checkbox */
+
+[data-genui] [data-gu="checkbox"] [data-slot="control"] {
+  border-radius: var(--gu-radius-sm);
+  color: var(--gu-icon-contrast, var(--gu-text-contrast));
+  transition:
+    background 85ms ease-out,
+    box-shadow 85ms ease-out;
+}
+
+[data-genui] [data-gu="checkbox"] [data-slot="check"] {
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+
+[data-genui] [data-gu="checkbox"][data-checked] [data-slot="check"] {
+  display: block;
+}
+
+@media (hover: hover) {
+  [data-genui]
+    [data-gu="checkbox"]:not([data-disabled], [data-invalid], [data-checked])
+    > [data-slot="row"]:hover
+    [data-slot="control"] {
+    box-shadow:
+      inset 0 0 0 0.5px var(--gu-border-strong),
+      inset 0 0 0 100vmax var(--gu-hover);
+  }
+
+  [data-genui] [data-gu="checkbox"][data-checked]:not([data-disabled]) > [data-slot="row"]:hover [data-slot="control"] {
+    box-shadow:
+      inset 0 0 0 0.5px var(--gu-border-strong),
+      inset 0 0 0 100vmax var(--gu-contrast-hover, transparent);
+  }
+}
+
+[data-genui] [data-gu="checkbox"][data-checked] [data-slot="control"] {
+  background: linear-gradient(180deg, var(--gu-sheen, transparent) 0%, transparent 100%), var(--gu-bg-accent);
+}
+
+[data-genui] [data-gu="checkbox"][data-invalid]:not([data-checked]) [data-slot="control"] {
+  background: var(--gu-danger-bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-danger-fg);
+}
+
+[data-genui] [data-gu="checkbox"] [data-slot="input"]:focus-visible ~ [data-slot="box"] [data-slot="control"] {
+  outline: 2px solid var(--gu-focus);
+  outline-offset: 2px;
+}
+
+[data-genui] [data-gu="checkbox"][data-disabled] > [data-slot="row"] {
+  opacity: 0.5;
+}
+
+[data-genui] [data-gu="checkbox"][data-disabled] :where([data-slot="box"], [data-slot="label"]) {
+  cursor: not-allowed;
+}
+
+/* Radio */
+
+[data-genui] [data-gu="radio"] > [data-slot="items"] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="radio"][data-orientation="horizontal"] > [data-slot="items"] {
+  flex-direction: row;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 8px;
+}
+
+[data-genui] [data-gu="radio"] [data-slot="control"] {
+  border-radius: 9999px;
+  transition:
+    background 170ms ease-out,
+    opacity 170ms ease-out;
+}
+
+[data-genui] [data-gu="radio"] [data-slot="indicator"] {
+  position: absolute;
+  top: 5px;
+  inset-inline-start: 5px;
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--gu-icon-contrast, var(--gu-text-contrast));
+}
+
+[data-genui] [data-gu="radio"] [data-slot="item"][data-checked] [data-slot="indicator"] {
+  display: block;
+}
+
+@media (hover: hover) {
+  [data-genui]
+    [data-gu="radio"]:not([data-disabled], [data-invalid])
+    [data-slot="item"]:not([data-checked]):hover
+    [data-slot="control"] {
+    background: linear-gradient(0deg, var(--gu-hover), var(--gu-hover)), var(--gu-bg);
+  }
+
+  [data-genui] [data-gu="radio"]:not([data-disabled]) [data-slot="item"][data-checked]:hover [data-slot="control"] {
+    background:
+      linear-gradient(0deg, var(--gu-contrast-hover, transparent), var(--gu-contrast-hover, transparent)),
+      linear-gradient(180deg, var(--gu-sheen, transparent) 0%, transparent 100%), var(--gu-bg-accent);
+  }
+}
+
+[data-genui] [data-gu="radio"] [data-slot="item"][data-checked] [data-slot="control"] {
+  background: linear-gradient(180deg, var(--gu-sheen, transparent) 0%, transparent 100%), var(--gu-bg-accent);
+}
+
+[data-genui] [data-gu="radio"][data-invalid] [data-slot="item"]:not([data-checked]) [data-slot="control"] {
+  background: var(--gu-danger-bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-danger-border);
+}
+
+[data-genui] [data-gu="radio"] [data-slot="input"]:focus-visible ~ [data-slot="box"] [data-slot="control"] {
+  outline: 2px solid var(--gu-focus);
+  outline-offset: 1px;
+}
+
+[data-genui] [data-gu="radio"] [data-slot="item"] > [data-slot="label"] {
+  font-variant-numeric: tabular-nums;
+}
+
+[data-genui] [data-gu="radio"][data-disabled] [data-slot="control"] {
+  opacity: 0.5;
+}
+
+[data-genui] [data-gu="radio"][data-disabled] [data-slot="item"] > [data-slot="label"] {
+  color: var(--gu-text-muted);
+}
+
+[data-genui] [data-gu="radio"][data-disabled] :where([data-slot="box"], [data-slot="label"]) {
+  cursor: not-allowed;
+}
+
+/* ── Switch (ui.Switch in a settings-row layout) ────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="switch"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="switch"] > [data-slot="text"] {
+  flex: 1 1 auto;
+}
+
+[data-genui] [data-gu="switch"] > [data-slot="control"] {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+[data-genui] [data-gu="switch"][data-disabled] > [data-slot="text"] {
+  opacity: 0.5;
+}
+
+[data-genui] [data-gu="switch"][data-disabled] > [data-slot="text"] > [data-slot="label"] {
+  cursor: not-allowed;
+}
+
+/* ── Slider (native range over a drawn track) ───────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="slider"] {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="slider"] > [data-slot="header"] {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="slider"] > [data-slot="header"] > [data-slot="value"] {
+  margin-inline-start: auto;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-compact);
+  letter-spacing: -0.04px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="slider"] > [data-slot="track-area"] {
+  position: relative;
+  height: 20px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="track"] {
+  position: absolute;
+  inset-inline: 0;
+  top: 8px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--gu-layer-4);
+  box-shadow: var(--gu-shadow-switch-off);
+  pointer-events: none;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="fill"] {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  max-width: 100%;
+  border-radius: inherit;
+  background: var(--gu-bg-accent);
+  box-shadow: var(--gu-shadow-switch-on);
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]:focus-visible {
+  outline: none;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]:disabled {
+  cursor: not-allowed;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]::-webkit-slider-runnable-track {
+  height: 20px;
+  border: 0;
+  background: transparent;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]::-moz-range-track {
+  height: 20px;
+  border: 0;
+  background: transparent;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border: 0;
+  border-radius: var(--gu-radius-sm);
+  background-color: var(--gu-icon-contrast, var(--gu-text-contrast));
+  box-shadow: var(--gu-shadow-button);
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: var(--gu-radius-sm);
+  background-color: var(--gu-icon-contrast, var(--gu-text-contrast));
+  box-shadow: var(--gu-shadow-button);
+}
+
+@media (hover: hover) {
+  [data-genui] [data-gu="slider"] [data-slot="input"]:hover:not(:disabled)::-webkit-slider-thumb {
+    background-image: linear-gradient(0deg, var(--gu-hover), var(--gu-hover));
+  }
+
+  [data-genui] [data-gu="slider"] [data-slot="input"]:hover:not(:disabled)::-moz-range-thumb {
+    background-image: linear-gradient(0deg, var(--gu-hover), var(--gu-hover));
+  }
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]:active:not(:disabled)::-webkit-slider-thumb {
+  background-image: linear-gradient(0deg, var(--gu-pressed), var(--gu-pressed));
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]:active:not(:disabled)::-moz-range-thumb {
+  background-image: linear-gradient(0deg, var(--gu-pressed), var(--gu-pressed));
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--gu-focus);
+  outline-offset: 2px;
+}
+
+[data-genui] [data-gu="slider"] [data-slot="input"]:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--gu-focus);
+  outline-offset: 2px;
+}
+
+[data-genui] [data-gu="slider"][data-disabled] > [data-slot="track-area"] {
+  opacity: 0.5;
+}
+
+/* ── Button (ui.Button) and DropdownMenu (ui.Menu) ──────────────────────────────────────────────────────────────── */
+
+/* Intrinsic width wherever it sits (a stretching column, a grid cell); long labels truncate instead of overflowing. */
+[data-genui] :where([data-gu="button"], [data-gu="dropdown-menu"]) {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+[data-genui] [data-gu="button"] > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="button"] [data-slot="label"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Link ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="link"] {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: var(--gu-radius-xs);
+  background: none;
+  color: var(--gu-text-accent);
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu="link"]:hover:not([data-blocked]) {
+  color: var(--gu-text-accent-hover);
+  text-decoration: underline;
+}
+
+[data-genui] [data-gu="link"][data-blocked] {
+  color: var(--gu-text-muted);
+  cursor: not-allowed;
+}
+
+/* ── Toggle (actions/button, ghost-muted; pressed as the expanded state) ────────────────────────────────────────── */
+
+[data-genui] [data-gu="toggle"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--gu-control);
+  padding: 0 11px;
+  margin: 0;
+  border: 0;
+  border-radius: var(--gu-radius-md);
+  background-color: transparent;
+  color: var(--gu-text-muted);
+  font-family: inherit;
+  font-size: var(--gu-size-sm);
+  font-style: normal;
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-base);
+  letter-spacing: -0.04px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: middle;
+  user-select: none;
+  cursor: pointer;
+  transition:
+    background-color var(--gu-duration) var(--gu-ease),
+    color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu="toggle"] > svg {
+  flex: none;
+  color: var(--gu-icon-muted);
+}
+
+@media (hover: hover) {
+  [data-genui] [data-gu="toggle"]:hover:not(:disabled, [data-pressed]) {
+    background-color: var(--gu-hover);
+  }
+}
+
+[data-genui] [data-gu="toggle"]:active:not(:disabled),
+[data-genui] [data-gu="toggle"][data-pressed]:not(:disabled) {
+  background-color: var(--gu-pressed);
+}
+
+[data-genui] [data-gu="toggle"][data-pressed] {
+  color: var(--gu-text);
+}
+
+[data-genui] [data-gu="toggle"][data-pressed] > svg {
+  color: var(--gu-icon);
+}
+
+[data-genui] [data-gu="toggle"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── ToggleGroup and ButtonGroup (navigation/segmented-control) ─────────────────────────────────────────────────── */
+
+[data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) {
+  position: relative;
+  isolation: isolate;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--gu-control);
+  padding: 0;
+  border: none;
+  border-radius: var(--gu-radius-md);
+  background: var(--gu-layer-1);
+  box-shadow: 0 0 0 0.5px var(--gu-border);
+  user-select: none;
+}
+
+/* Nothing to show until the items stream in. */
+[data-genui] :is([data-gu="toggle-group"], [data-gu="button-group"])[data-empty] {
+  display: none;
+}
+
+[data-genui] [data-gu="toggle-group"] {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+/* Equal segments, each as wide as the widest label, as the app's segmented control lays them out. */
+[data-genui] [data-gu="button-group"] {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  align-items: center;
+}
+
+[data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) > [data-slot="item"] {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  height: var(--gu-control);
+  padding: 0 12px;
+  margin: 0;
+  border: none;
+  border-radius: var(--gu-radius-md);
+  background: transparent;
+  box-shadow: none;
+  color: var(--gu-text-muted);
+  font-family: inherit;
+  font-size: var(--gu-size-sm);
+  font-style: normal;
+  font-weight: var(--gu-weight-regular);
+  line-height: 1;
+  letter-spacing: -0.04px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+[data-genui] [data-gu="toggle-group"] > [data-slot="item"] {
+  flex: 0 1 auto;
+}
+
+[data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) > [data-slot="item"] > svg {
+  flex: none;
+}
+
+[data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) > [data-slot="item"] > [data-slot="label"] {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui]
+  :where([data-gu="toggle-group"], [data-gu="button-group"])
+  > [data-slot="item"]:hover:not(:disabled, [data-pressed]) {
+  color: var(--gu-text);
+}
+
+[data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) > [data-slot="item"][data-pressed] {
+  color: var(--gu-text);
+  background: var(--gu-bg);
+  box-shadow: 0 0 0 0.5px var(--gu-border-strong);
+}
+
+[data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) > [data-slot="item"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+[data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) > [data-slot="item"]:focus-visible {
+  z-index: 2;
+  outline: 2px solid var(--gu-focus);
+  outline-offset: 1px;
+}
+
+/* ── Pagination (ui.IconButton for previous/next; page buttons sized as icon buttons) ───────────────────────────── */
+
+[data-genui] [data-gu="pagination"] {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* Only very long page numbers wrap, between previous and next. */
+[data-genui] [data-gu="pagination"] > [data-slot="pages"] {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+[data-genui] [data-gu="pagination"] [data-slot="entry"] {
+  display: flex;
+}
+
+[data-genui] [data-gu="pagination"] :where([data-slot="page"], [data-slot="ellipsis"]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-base);
+  letter-spacing: -0.04px;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-genui] [data-gu="pagination"] [data-slot="page"] {
+  padding: 0 6px;
+  margin: 0;
+  border: 0;
+  border-radius: var(--gu-radius-md);
+  background-color: transparent;
+  color: var(--gu-text-muted);
+  font-family: inherit;
+  font-weight: var(--gu-weight-regular);
+  user-select: none;
+  cursor: pointer;
+  transition:
+    background-color var(--gu-duration) var(--gu-ease),
+    color var(--gu-duration) var(--gu-ease);
+}
+
+@media (hover: hover) {
+  [data-genui] [data-gu="pagination"] [data-slot="page"]:hover:not([aria-current]) {
+    background-color: var(--gu-hover);
+    color: var(--gu-text);
+  }
+}
+
+[data-genui] [data-gu="pagination"] [data-slot="page"]:active:not([aria-current]) {
+  background-color: var(--gu-pressed);
+  color: var(--gu-text);
+}
+
+/* The current page as a neutral button (actions/button, neutral). */
+[data-genui] [data-gu="pagination"] [data-slot="page"][aria-current] {
+  background-color: var(--gu-bg-button);
+  box-shadow: var(--gu-shadow-button);
+  color: var(--gu-text);
+  font-weight: var(--gu-weight-medium);
+  cursor: default;
+}
+
+[data-genui] [data-gu="pagination"] [data-slot="ellipsis"] {
+  color: var(--gu-text-faint);
+  user-select: none;
+}
+
+/* ── Narrow surfaces (sidebar canvas) ───────────────────────────────────────────────────────────────────────────── */
+
+@container genui (max-width: 420px) {
+  /* A segmented choice spans the column, so its segments get the width they can. */
+  [data-genui] [data-gu="button-group"] {
+    width: 100%;
+  }
+
+  [data-genui] [data-gu="pagination"] {
+    column-gap: 2px;
+  }
+
+  [data-genui] [data-gu="pagination"] > [data-slot="pages"] {
+    column-gap: 0;
+  }
+
+  [data-genui] [data-gu="radio"][data-orientation="horizontal"] > [data-slot="items"] {
+    column-gap: 12px;
+  }
+}

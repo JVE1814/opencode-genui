@@ -1,5 +1,6 @@
-import { createSignal, type Accessor } from "solid-js"
-import { useFieldValidation, useStateStore, type BaseComponentProps, type ComponentFn } from "@json-render/solid"
+import { createEffect, createSignal, type Accessor } from "solid-js"
+import type { ValidationConfig } from "@json-render/core"
+import { useStateStore, useValidation, type BaseComponentProps, type ComponentFn } from "@json-render/solid"
 import type { GenuiCatalog } from "../../catalog/index.ts"
 import type { ComponentName } from "../../catalog/components.ts"
 
@@ -84,18 +85,31 @@ export function useBound<T>(
 /**
  * Validation for a bound form field: the `checks` prop, run on `validateOn` (blur by default). Returns the first error
  * message, and `validate` to call from the component's change/blur handlers.
+ *
+ * Reactive on purpose: in a streaming canvas a field can mount before its `checks` (or its binding) arrive, so the field
+ * is (re)registered with the current config whenever it changes, and `validate` always uses the current config.
  */
 export function useChecks(ctx: BaseComponentProps<Record<string, unknown>>, prop: string) {
-  const path = ctx.bindings?.[prop] ?? ""
+  const validation = useValidation()
+  const path = () => ctx.bindings?.[prop] ?? ""
   const checks = () => list<{ type: string; message: string; args?: Record<string, unknown> }>(ctx.props.checks)
   const validateOn = () => oneOf(ctx.props.validateOn, ["change", "blur", "submit"] as const, "blur")
-  const enabled = () => !!path && checks().length > 0
-  const field = useFieldValidation(path, enabled() ? { checks: checks(), validateOn: validateOn() } : undefined)
+  const enabled = () => !!path() && checks().length > 0
+  const config = (): ValidationConfig => ({ checks: checks(), validateOn: validateOn() })
+
+  // Registered fields are what the built-in `validateForm` action checks.
+  createEffect(() => {
+    if (enabled()) validation.registerField(path(), config())
+  })
 
   return {
-    error: (): string | undefined => (enabled() ? field.errors()[0] : undefined),
+    error: (): string | undefined => {
+      if (!enabled()) return undefined
+      const state = validation.fieldStates[path()]
+      return state?.result?.errors[0]
+    },
     validate: (on: "change" | "blur") => {
-      if (enabled() && validateOn() === on) field.validate()
+      if (enabled() && validateOn() === on) validation.validate(path(), config())
     },
   }
 }

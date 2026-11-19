@@ -1,0 +1,618 @@
+/*
+ * Data components (src/gui/components/data.tsx): Table, Progress, Skeleton, Spinner, Stat, Image, Avatar.
+ * Measurements follow @opencode/ui and the session UI: the timeline's Markdown table (a raised body inside a muted
+ * frame that holds the header), components/progress.css, data-display/avatar (avatar-v2), and the card frame of the
+ * layout components for Stat. Slot selectors use the child combinator so they never reach a nested component's slots.
+ * Custom properties named --_* are private to the component that sets them.
+ */
+
+/* ── Table ──────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* The frame scrolls sideways when the columns do not fit (a sidebar canvas). */
+[data-genui] [data-gu="table"] {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 2px;
+  border-radius: var(--gu-radius-md);
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+}
+
+[data-genui] [data-gu="table"] > table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--gu-weight-regular);
+  line-height: var(--gu-leading-compact);
+  letter-spacing: -0.04px;
+}
+
+[data-genui] [data-gu="table"] > table > tbody {
+  border-radius: var(--gu-radius-sm);
+  background-color: var(--gu-bg);
+  box-shadow: var(--gu-shadow-raised);
+}
+
+[data-genui] [data-gu="table"] > table > :is(thead, tbody) > tr > :is(th, td) {
+  text-align: start;
+  vertical-align: top;
+}
+
+[data-genui] [data-gu="table"] > table > thead > tr > th {
+  padding: 8px 12px;
+  color: var(--gu-text-muted);
+  font-weight: var(--gu-weight-medium);
+  white-space: nowrap;
+}
+
+/* break-word, not anywhere: long words may scroll the frame, but never squeeze a column to one character. */
+[data-genui] [data-gu="table"] > table > tbody > tr > td {
+  padding: 10px 12px;
+  overflow-wrap: break-word;
+  transition: background-color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu="table"] > table > :is(thead, tbody) > tr > [data-align="center"] {
+  text-align: center;
+}
+
+[data-genui] [data-gu="table"] > table > :is(thead, tbody) > tr > [data-align="end"] {
+  text-align: end;
+}
+
+[data-genui] [data-gu="table"] > table > tbody > tr > td[data-numeric] {
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="table"] > table > tbody > tr:not(:last-child) > td {
+  border-bottom: 0.5px solid var(--gu-border-muted);
+}
+
+[data-genui] [data-gu="table"] > table > tbody > tr:first-child > td:first-child {
+  border-start-start-radius: var(--gu-radius-sm);
+}
+
+[data-genui] [data-gu="table"] > table > tbody > tr:first-child > td:last-child {
+  border-start-end-radius: var(--gu-radius-sm);
+}
+
+[data-genui] [data-gu="table"] > table > tbody > tr:last-child > td:first-child {
+  border-end-start-radius: var(--gu-radius-sm);
+}
+
+[data-genui] [data-gu="table"] > table > tbody > tr:last-child > td:last-child {
+  border-end-end-radius: var(--gu-radius-sm);
+}
+
+[data-genui] [data-gu="table"] > table > caption {
+  caption-side: bottom;
+  padding: 8px 12px 6px;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  text-align: start;
+}
+
+[data-genui] [data-gu="table"] > table > tbody > tr[data-slot="empty"] > td {
+  height: 40px;
+  color: var(--gu-text-muted);
+  text-align: center;
+}
+
+/* Selectable rows: the app's list rows, a hover wash and a pressed wash with an accent edge for the selection. */
+[data-genui] [data-gu="table"][data-selectable] > table > tbody > tr:not([data-slot="empty"]) {
+  cursor: pointer;
+}
+
+[data-genui] [data-gu="table"][data-selectable] > table > tbody > tr:not([data-slot="empty"]):hover > td {
+  background-color: var(--gu-hover);
+}
+
+[data-genui] [data-gu="table"][data-selectable] > table > tbody > tr[data-selected] > td {
+  background-color: var(--gu-pressed);
+}
+
+[data-genui] [data-gu="table"][data-selectable] > table > tbody > tr[data-selected] > td:first-child {
+  box-shadow: inset 2px 0 0 var(--gu-bg-accent);
+}
+
+[data-genui] [data-gu="table"][data-selectable] > table > tbody > tr[data-selected] > td:first-child:dir(rtl) {
+  box-shadow: inset -2px 0 0 var(--gu-bg-accent);
+}
+
+/* Inside the frame, so a ring offset outward would be clipped by the scroller. */
+[data-genui] [data-gu="table"] > table > tbody > tr:focus-visible {
+  outline: 2px solid var(--gu-focus);
+  outline-offset: -2px;
+}
+
+/* ── Progress ───────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="progress"] {
+  --_fill-color: var(--gu-icon);
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-xs);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="progress"][data-tone="info"] {
+  --_fill-color: var(--gu-info-fg);
+}
+
+[data-genui] [data-gu="progress"][data-tone="success"] {
+  --_fill-color: var(--gu-success-fg);
+}
+
+[data-genui] [data-gu="progress"][data-tone="warning"] {
+  --_fill-color: var(--gu-warning-fg);
+}
+
+[data-genui] [data-gu="progress"][data-tone="danger"] {
+  --_fill-color: var(--gu-danger-fg);
+}
+
+[data-genui] [data-gu="progress"] > [data-slot="header"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-prose);
+}
+
+[data-genui] [data-gu="progress"] > [data-slot="header"] > [data-slot="label"] {
+  min-width: 0;
+  color: var(--gu-text);
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="progress"] > [data-slot="header"] > [data-slot="value"] {
+  flex: none;
+  color: var(--gu-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-genui] [data-gu="progress"] > [data-slot="track"] {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid var(--gu-border);
+  border-radius: 999px;
+  background-color: var(--gu-layer-1);
+}
+
+[data-genui] [data-gu="progress"] > [data-slot="track"] > [data-slot="fill"] {
+  width: var(--_fill, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background-color: var(--_fill-color);
+  transition: width 200ms ease;
+}
+
+[data-genui] [data-gu="progress"][data-indeterminate] > [data-slot="track"] > [data-slot="fill"] {
+  width: 35%;
+  animation: genui-progress-sweep 1.3s ease-in-out infinite;
+}
+
+@keyframes genui-progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(300%);
+  }
+}
+
+/* ── Skeleton ───────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="skeleton"] {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: var(--_w, 100%);
+  max-width: 100%;
+}
+
+[data-genui] [data-gu="skeleton"] > [data-slot="bar"] {
+  position: relative;
+  display: block;
+  height: var(--_h, 16px);
+  overflow: hidden;
+  border-radius: var(--gu-radius-sm);
+  background-color: var(--gu-layer-2);
+}
+
+/* Text-like lines on the 20px rhythm of body text; the last of several is shorter, as a paragraph ends. */
+[data-genui] [data-gu="skeleton"][data-lines] > [data-slot="bar"] {
+  height: 10px;
+  border-radius: var(--gu-radius-xs);
+}
+
+[data-genui] [data-gu="skeleton"][data-lines] > [data-slot="bar"]:last-child:not(:nth-child(2)) {
+  width: 60%;
+}
+
+/* The sweep rests off the start edge, so with motion reduced (no animation) nothing shows. */
+[data-genui] [data-gu="skeleton"] > [data-slot="bar"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(90deg, transparent, var(--gu-pressed), transparent);
+  transform: translateX(-100%);
+  animation: genui-skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes genui-skeleton-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-genui] [data-gu="skeleton"] > [data-slot="bar"]::after {
+    animation: none;
+  }
+}
+
+:root[data-motion="reduce"] [data-genui] [data-gu="skeleton"] > [data-slot="bar"]::after {
+  animation: none;
+}
+
+/* ── Spinner ────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="spinner"] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gu-space-sm);
+  max-width: 100%;
+  color: var(--gu-icon-muted);
+  vertical-align: middle;
+}
+
+[data-genui] [data-gu="spinner"] > [data-slot="loader"] {
+  display: inline-flex;
+  flex: none;
+}
+
+[data-genui] [data-gu="spinner"] > [data-slot="label"] {
+  min-width: 0;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="spinner"][data-size="large"] > [data-slot="label"] {
+  font-size: var(--gu-size-base);
+  line-height: var(--gu-leading-base);
+}
+
+/* ── Stat ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="stat"] {
+  --_trend: var(--gu-text-muted);
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-xs);
+  min-width: 0;
+  padding: var(--gu-space-md);
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+}
+
+/* A Card already frames its stats. */
+[data-genui] :where([data-gu="card"]) [data-gu="stat"] {
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+[data-genui] [data-gu="stat"][data-trend="up"] {
+  --_trend: var(--gu-success-fg);
+}
+
+[data-genui] [data-gu="stat"][data-trend="down"] {
+  --_trend: var(--gu-danger-fg);
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="header"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="header"] > [data-slot="label"] {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="header"] > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+  color: var(--gu-icon-muted);
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="value"] {
+  min-width: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-xl);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--gu-weight-medium);
+  line-height: 28px;
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="footer"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--gu-space-sm);
+  min-width: 0;
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="footer"] > [data-slot="change"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--_trend);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--gu-weight-medium);
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="footer"] > [data-slot="change"] > [data-slot="trend-icon"] {
+  display: inline-flex;
+  flex: none;
+}
+
+[data-genui]
+  [data-gu="stat"][data-trend="down"]
+  > [data-slot="footer"]
+  > [data-slot="change"]
+  > [data-slot="trend-icon"] {
+  rotate: 180deg;
+}
+
+[data-genui] [data-gu="stat"] > [data-slot="footer"] > [data-slot="description"] {
+  min-width: 0;
+  color: var(--gu-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ── Image ──────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * data-box says which dimensions the spec gave: ratio (width and height), width, height, or natural. A loaded image of
+ * natural size shrinks to its own width; placeholders fill the row.
+ */
+[data-genui] [data-gu="image"] {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: var(--_w, 100%);
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+}
+
+[data-genui] [data-gu="image"]:is([data-box="natural"], [data-box="height"]):has(> [data-slot="media"] > img) {
+  width: fit-content;
+}
+
+[data-genui] [data-gu="image"] > [data-slot="media"] {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--gu-radius-md);
+}
+
+[data-genui] [data-gu="image"][data-box="ratio"] > [data-slot="media"] {
+  aspect-ratio: var(--_ratio);
+}
+
+[data-genui] [data-gu="image"][data-box="height"] > [data-slot="media"] {
+  height: var(--_h);
+}
+
+[data-genui] [data-gu="image"] > [data-slot="media"] > img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+[data-genui] [data-gu="image"]:is([data-box="ratio"], [data-box="width"]) > [data-slot="media"] > img {
+  width: 100%;
+}
+
+[data-genui] [data-gu="image"]:is([data-box="ratio"], [data-box="height"]) > [data-slot="media"] > img {
+  height: 100%;
+}
+
+[data-genui] [data-gu="image"]:is([data-box="natural"], [data-box="width"]) > [data-slot="media"] > :not(img) {
+  min-height: 120px;
+}
+
+[data-genui] [data-gu="image"] > [data-slot="caption"] {
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  overflow-wrap: anywhere;
+}
+
+/* GuardedImage parts, shared with Carousel cards: they fill whatever media box holds them. */
+[data-genui] [data-gu-image="img"] {
+  object-fit: cover;
+}
+
+[data-genui] [data-gu-image="img"][data-fit="contain"] {
+  object-fit: contain;
+}
+
+[data-genui] :is([data-gu-image="placeholder"], [data-gu-image="load"]) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gu-space-xs);
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: var(--gu-space-md);
+  border: 0;
+  border-radius: inherit;
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+  color: var(--gu-text-muted);
+  font: inherit;
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  text-align: center;
+}
+
+[data-genui] :is([data-gu-image="placeholder"], [data-gu-image="load"]) > [data-slot="icon"] {
+  display: inline-flex;
+  color: var(--gu-icon-faint);
+}
+
+[data-genui] :is([data-gu-image="placeholder"], [data-gu-image="load"]) > [data-slot="alt"] {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+[data-genui] [data-gu-image="placeholder"] > [data-slot="note"] {
+  color: var(--gu-text-faint);
+}
+
+[data-genui] [data-gu-image="load"] {
+  cursor: pointer;
+  transition: background-color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu-image="load"] > [data-slot="label"] {
+  max-width: 100%;
+  color: var(--gu-text);
+  font-weight: var(--gu-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu-image="load"]:hover {
+  background-image: linear-gradient(var(--gu-hover), var(--gu-hover));
+}
+
+[data-genui] [data-gu-image="load"]:active {
+  background-image: linear-gradient(var(--gu-pressed), var(--gu-pressed));
+}
+
+[data-genui] [data-gu-image="load"]:hover > [data-slot="icon"] {
+  color: var(--gu-icon-muted);
+}
+
+/* Inside the clipped media box: a ring drawn inward stays visible. */
+[data-genui] [data-gu-image="load"]:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ── Avatar ─────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* avatar-v2: a circle with a hairline, initials at 11px medium (a literal there too; the app has no token for it). */
+[data-genui] [data-gu="avatar"] {
+  --_size: 28px;
+  --_bg: var(--gu-cat-1);
+
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--_size);
+  height: var(--_size);
+  overflow: hidden;
+  border-radius: 9999px;
+  background-color: var(--_bg);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border);
+  color: var(--gu-text-contrast);
+  font-size: 11px;
+  font-weight: var(--gu-weight-medium);
+  line-height: 1;
+  letter-spacing: 0.05px;
+  vertical-align: middle;
+  user-select: none;
+}
+
+[data-genui] [data-gu="avatar"][data-size="small"] {
+  --_size: 20px;
+
+  font-size: 9px;
+}
+
+[data-genui] [data-gu="avatar"][data-size="large"] {
+  --_size: 40px;
+
+  font-size: var(--gu-size-base);
+}
+
+[data-genui] [data-gu="avatar"][data-color="2"] {
+  --_bg: var(--gu-cat-2);
+}
+
+[data-genui] [data-gu="avatar"][data-color="3"] {
+  --_bg: var(--gu-cat-3);
+}
+
+[data-genui] [data-gu="avatar"][data-color="4"] {
+  --_bg: var(--gu-cat-4);
+}
+
+[data-genui] [data-gu="avatar"][data-color="5"] {
+  --_bg: var(--gu-cat-5);
+}
+
+[data-genui] [data-gu="avatar"][data-color="6"] {
+  --_bg: var(--gu-cat-6);
+}
+
+[data-genui] [data-gu="avatar"][data-image] {
+  --_bg: var(--gu-layer-2);
+}
+
+[data-genui] [data-gu="avatar"] > [data-slot="initials"] {
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="avatar"] > [data-slot="image"] {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  -webkit-user-drag: none;
+}

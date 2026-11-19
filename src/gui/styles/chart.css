@@ -1,0 +1,342 @@
+/*
+ * Chart (src/gui/components/chart.tsx). Plain SVG drawn at the measured width, so text never scales. Marks take the
+ * categorical palette by series (data-series 0-5 → --gu-cat-1..6); every piece of text uses text colors. Gridlines
+ * and axes are hairlines in border colors; the hover readout is the app's tooltip-v2 surface. --_surface is the color
+ * behind the chart, for the rings that keep hover dots legible where they cross a line.
+ */
+
+[data-genui] [data-gu="chart"] {
+  --_surface: var(--gu-bg);
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  margin: 0;
+}
+
+[data-genui] :where([data-gu="card"], [data-gu="dialog"], [data-gu="drawer"], [data-gu="popover"]) [data-gu="chart"] {
+  --_surface: var(--gu-layer-1);
+}
+
+[data-genui] [data-gu="chart"] [data-series] {
+  --_c: var(--gu-cat-1);
+}
+
+[data-genui] [data-gu="chart"] [data-series="1"] {
+  --_c: var(--gu-cat-2);
+}
+
+[data-genui] [data-gu="chart"] [data-series="2"] {
+  --_c: var(--gu-cat-3);
+}
+
+[data-genui] [data-gu="chart"] [data-series="3"] {
+  --_c: var(--gu-cat-4);
+}
+
+[data-genui] [data-gu="chart"] [data-series="4"] {
+  --_c: var(--gu-cat-5);
+}
+
+[data-genui] [data-gu="chart"] [data-series="5"] {
+  --_c: var(--gu-cat-6);
+}
+
+/* ── Header and legend ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="chart"] > [data-slot="header"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--gu-space-sm);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="chart"] > [data-slot="header"] > [data-slot="title"] {
+  min-width: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-base);
+  font-weight: var(--gu-weight-medium);
+  line-height: var(--gu-leading-base);
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="chart"] > [data-slot="header"] > [data-slot="unit"] {
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-base);
+}
+
+[data-genui] [data-gu="chart"] :is([data-slot="legend"], [data-slot="donut-legend"]) {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu="chart"] > [data-slot="legend"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gu-space-xs) var(--gu-space-md);
+}
+
+[data-genui] [data-gu="chart"] [data-slot="legend-item"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="legend-name"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="swatch"] {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--gu-radius-xs);
+  background-color: var(--_c);
+}
+
+[data-genui] [data-gu="chart"] [data-slot="swatch"][data-shape="line"] {
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+/* ── Plot ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="chart"] > [data-slot="body"] {
+  min-width: 0;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="plot"] {
+  position: relative;
+  min-width: 0;
+  border-radius: var(--gu-radius-sm);
+  outline-offset: 2px;
+}
+
+/* Axes run left to right in every language; without this, right-to-left text would turn "-5" into "5-". */
+[data-genui] [data-gu="chart"] [data-slot="plot"] > svg {
+  display: block;
+  direction: ltr;
+  overflow: visible;
+  font-family: inherit;
+  touch-action: pan-y;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="empty"] {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--gu-radius-md);
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu="chart"] text {
+  fill: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="grid"] {
+  stroke: var(--gu-border-muted);
+  stroke-width: 1px;
+  shape-rendering: crispEdges;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="baseline"] {
+  stroke: var(--gu-border);
+  stroke-width: 1px;
+  shape-rendering: crispEdges;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="crosshair"] {
+  stroke: var(--gu-border-strong);
+  stroke-width: 1px;
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="band"] {
+  fill: var(--gu-hover);
+  pointer-events: none;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="bar"] {
+  fill: var(--_c);
+  transition: opacity var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu="chart"] [data-mark="bar"][data-dim] {
+  opacity: 0.55;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="area"] {
+  fill: var(--_c);
+  fill-opacity: 0.12;
+  stroke: none;
+}
+
+[data-genui] [data-gu="chart"][data-stacked] [data-mark="area"] {
+  fill-opacity: 0.22;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="line"] {
+  fill: none;
+  stroke: var(--_c);
+  stroke-width: 2px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* An 8px dot with a 2px ring in the surface color, drawn under the fill. */
+[data-genui] [data-gu="chart"] [data-mark="dot"] {
+  fill: var(--_c);
+  stroke: var(--_surface);
+  stroke-width: 4px;
+  paint-order: stroke;
+  pointer-events: none;
+}
+
+[data-genui] [data-gu="chart"] [data-mark="slice"] {
+  fill: var(--_c);
+}
+
+[data-genui] [data-gu="chart"] [data-mark="center-value"] {
+  fill: var(--gu-text);
+  font-size: var(--gu-size-lg);
+  font-weight: var(--gu-weight-medium);
+}
+
+/* ── Donut layout: the legend sits beside the ring, or under it when the surface is narrow ──────────────────────── */
+
+[data-genui] [data-gu="chart"][data-type="donut"] > [data-slot="body"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gu-space-md) var(--gu-space-xl);
+}
+
+[data-genui] [data-gu="chart"][data-type="donut"] [data-slot="plot"] {
+  flex: none;
+  border-radius: 9999px;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="donut-legend"] {
+  display: flex;
+  flex: 1 1 160px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-width: 320px;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="donut-legend"] > [data-slot="legend-item"] {
+  display: flex;
+  padding: 2px 6px;
+  margin-inline: -6px;
+  border-radius: var(--gu-radius-sm);
+  transition: background-color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu="chart"] [data-slot="donut-legend"] > [data-slot="legend-item"][data-active] {
+  background-color: var(--gu-hover);
+  color: var(--gu-text);
+}
+
+[data-genui] [data-gu="chart"] [data-slot="legend-value"] {
+  flex: none;
+  margin-inline-start: auto;
+  padding-inline-start: var(--gu-space-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Tooltip: tooltip-v2 (layer-01, floating elevation, 4px corners) ────────────────────────────────────────────── */
+
+[data-genui] [data-gu="chart"] [data-slot="tooltip"] {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: max-content;
+  max-width: min(240px, 70%);
+  padding: 6px 8px;
+  border-radius: var(--gu-radius-sm);
+  background-color: var(--gu-layer-1);
+  box-shadow: var(--gu-shadow-floating);
+  color: var(--gu-text);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  pointer-events: none;
+  transform: translateX(var(--_offset, 12px));
+}
+
+[data-genui] [data-gu="chart"] [data-slot="tooltip"][data-side="start"] {
+  transform: translateX(calc(-100% - var(--_offset, 12px)));
+}
+
+[data-genui] [data-gu="chart"] [data-slot="tooltip-label"] {
+  overflow: hidden;
+  color: var(--gu-text-muted);
+  font-weight: var(--gu-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="tooltip-row"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+[data-genui] [data-gu="chart"] [data-slot="tooltip-row"][data-total] {
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 0.5px solid var(--gu-border-muted);
+}
+
+/* A short stroke of the series color: at tooltip density a line key, not a filled box. */
+[data-genui] [data-gu="chart"] [data-slot="tooltip-key"] {
+  flex: none;
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background-color: var(--_c, transparent);
+}
+
+[data-genui] [data-gu="chart"] [data-slot="tooltip-value"] {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--gu-weight-medium);
+}
+
+[data-genui] [data-gu="chart"] [data-slot="tooltip-name"] {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gu-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@container genui (max-width: 420px) {
+  [data-genui] [data-gu="chart"] > [data-slot="legend"] {
+    column-gap: var(--gu-space-sm);
+  }
+}

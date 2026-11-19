@@ -1,0 +1,40 @@
+// Copy added by the data and chart components (src/gui/components/data.tsx, src/gui/components/chart.tsx).
+export default {
+  "c.table.empty": "No data",
+
+  "c.skeleton.loading": "Loading",
+  "c.spinner.loading": "Loading",
+
+  "c.stat.up": "Up",
+  "c.stat.down": "Down",
+  "c.stat.neutral": "No change",
+
+  "c.image.load": "Load image from {{host}}",
+  "c.image.untitled": "Image",
+  "c.image.unavailable": "This image's address isn't allowed",
+  "c.image.failed": "Couldn't load image",
+
+  "c.chart.kind.bar": "Bar chart",
+  "c.chart.kind.stacked": "Stacked bar chart",
+  "c.chart.kind.line": "Line chart",
+  "c.chart.kind.area": "Area chart",
+  "c.chart.kind.donut": "Donut chart",
+  "c.chart.titled": "{{kind}}: {{title}}",
+  "c.chart.summary": "{{head}}. {{series}}, {{points}}, values from {{min}} to {{max}}.",
+  "c.chart.summaryDonut": "{{head}}. {{points}}, total {{total}}.",
+  "c.chart.series.one": "{{count}} series",
+  "c.chart.series.other": "{{count}} series",
+  "c.chart.points.one": "{{count}} category",
+  "c.chart.points.other": "{{count}} categories",
+  "c.chart.keys": "Use the arrow keys to read each value.",
+  "c.chart.readout": "{{label}}: {{values}}",
+  "c.chart.pair": "{{name}} {{value}}",
+  "c.chart.seriesName": "Series {{index}}",
+  "c.chart.other": "Other",
+  "c.chart.total": "Total",
+  "c.chart.empty": "No data to show",
+  "c.chart.data": "Chart data",
+  "c.chart.category": "Category",
+  "c.chart.value": "Value",
+  "c.chart.share": "Share",
+} satisfies Record<string, string>

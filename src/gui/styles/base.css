@@ -38,6 +38,7 @@
   --gu-icon-muted: var(--v2-icon-icon-muted, GrayText);
   --gu-icon-faint: var(--v2-icon-icon-faint, GrayText);
   --gu-icon-accent: var(--v2-icon-icon-accent, AccentColor);
+  --gu-icon-contrast: var(--v2-icon-icon-contrast, Canvas);
 
   /* Borders and focus */
   --gu-border-muted: var(--v2-border-border-muted, GrayText);
@@ -49,6 +50,9 @@
   --gu-hover: var(--v2-overlay-simple-overlay-hover, transparent);
   --gu-pressed: var(--v2-overlay-simple-overlay-pressed, transparent);
   --gu-scrim: var(--v2-overlay-simple-overlay-scrim, rgb(0 0 0 / 40%));
+  --gu-contrast-hover: var(--v2-overlay-simple-overlay-contrast-hover, transparent);
+  /* The light-to-clear sheen the app draws over accent fills */
+  --gu-sheen: var(--v2-alpha-light-20, transparent);
 
   /* Status: bg / fg / border per tone */
   --gu-info-bg: var(--v2-state-bg-info, Canvas);
@@ -93,6 +97,7 @@
   --gu-leading-tight: var(--line-height-tight, 12px);
   --gu-leading-compact: var(--line-height-compact, 16px);
   --gu-leading-base: var(--line-height-base, 20px);
+  --gu-leading-normal: var(--line-height-normal, 130%);
   --gu-leading-prose: var(--line-height-large, 150%);
 
   /* Shape */

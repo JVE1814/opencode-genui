@@ -1,0 +1,408 @@
+/*
+ * Overlay components (src/gui/components/overlay.tsx): Dialog, Drawer, Tooltip, Popover, Carousel.
+ * Dialog follows overlays/dialog/dialog.css (layer-01, overlay elevation, 12px corners, 16px header, the scrim as
+ * ::backdrop); Drawer is the same frame sliding in from the inline end; Popover is the app's floating surface (menu-v2
+ * and toast: layer-01, floating elevation); Carousel cards use the card frame. Dialogs and popovers render in the top
+ * layer, so each is its own `genui` container: generated content inside adapts to the overlay's width, not to the
+ * surface that declared it. Slot selectors use the child combinator so they never reach a nested component's slots.
+ */
+
+/* ── Dialog, Drawer ─────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) {
+  container: genui / inline-size;
+  box-sizing: border-box;
+  max-width: none;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background-color: var(--gu-layer-1);
+  box-shadow: var(--gu-shadow-overlay);
+  color: var(--gu-text);
+  font-family: var(--gu-font-sans);
+  font-size: var(--gu-size-base);
+  line-height: var(--gu-leading-base);
+  overscroll-behavior: contain;
+  transition:
+    opacity 150ms var(--gu-ease),
+    scale 150ms var(--gu-ease),
+    translate 200ms var(--gu-ease),
+    overlay 200ms allow-discrete,
+    display 200ms allow-discrete;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"])[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The app's dialog: 480px wide, as tall as its content up to the window less 32px, corners of 12px (a literal there
+   too). */
+[data-genui] [data-gu="dialog"] {
+  width: min(calc(100vw - 32px), 480px);
+  max-height: calc(100dvh - 32px);
+  border-radius: 12px;
+  opacity: 0;
+  scale: 0.98;
+}
+
+[data-genui] [data-gu="dialog"][open] {
+  opacity: 1;
+  scale: 1;
+}
+
+@starting-style {
+  [data-genui] [data-gu="dialog"][open] {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+
+[data-genui] [data-gu="drawer"] {
+  --_from: 100%;
+
+  width: min(calc(100vw - 32px), 420px);
+  height: 100dvh;
+  max-height: 100dvh;
+  margin-block: 0;
+  margin-inline: auto 0;
+  border-start-start-radius: 12px;
+  border-end-start-radius: 12px;
+  translate: var(--_from) 0;
+}
+
+[data-genui] [data-gu="drawer"]:dir(rtl) {
+  --_from: -100%;
+}
+
+[data-genui] [data-gu="drawer"][open] {
+  translate: 0 0;
+}
+
+@starting-style {
+  [data-genui] [data-gu="drawer"][open] {
+    translate: var(--_from) 0;
+  }
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"])::backdrop {
+  background-color: var(--gu-scrim);
+  opacity: 0;
+  transition:
+    opacity 150ms var(--gu-ease),
+    overlay 150ms allow-discrete,
+    display 150ms allow-discrete;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"])[open]::backdrop {
+  opacity: 1;
+}
+
+@starting-style {
+  [data-genui] :is([data-gu="dialog"], [data-gu="drawer"])[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+/* base.css turns transitions off for reduced motion on elements and ::before/::after; ::backdrop needs its own rule. */
+@media (prefers-reduced-motion: reduce) {
+  [data-genui] :is([data-gu="dialog"], [data-gu="drawer"])::backdrop {
+    transition: none;
+  }
+}
+
+:root[data-motion="reduce"] [data-genui] :is([data-gu="dialog"], [data-gu="drawer"])::backdrop {
+  transition: none;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) > [data-slot="surface"] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) > [data-slot="surface"] > [data-slot="header"] {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: var(--gu-space-sm);
+  padding: var(--gu-space-lg);
+}
+
+[data-genui]
+  :is([data-gu="dialog"], [data-gu="drawer"])
+  > [data-slot="surface"]
+  > [data-slot="header"]
+  > [data-slot="titles"] {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--gu-space-xs);
+  min-width: 0;
+}
+
+/* dialog-title: 15px/20px medium (literals in the app's dialog.css). */
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) [data-slot="titles"] > [data-slot="title"] {
+  margin: 0;
+  color: var(--gu-text);
+  font-size: 15px;
+  font-weight: var(--gu-weight-medium);
+  line-height: 20px;
+  letter-spacing: -0.13px;
+  overflow-wrap: anywhere;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) [data-slot="titles"] > [data-slot="description"] {
+  margin: 0;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-base);
+  letter-spacing: -0.04px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+[data-genui]
+  :is([data-gu="dialog"], [data-gu="drawer"])
+  > [data-slot="surface"]
+  > [data-slot="header"]
+  > [data-slot="close"] {
+  display: inline-flex;
+  flex: none;
+  margin-block-start: -2px;
+  margin-inline-end: -4px;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) > [data-slot="surface"] > [data-slot="body"] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-height: 0;
+  padding: 0 var(--gu-space-lg) var(--gu-space-lg);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) > [data-slot="surface"] > [data-slot="body"]:empty {
+  display: none;
+}
+
+[data-genui] :is([data-gu="dialog"], [data-gu="drawer"]) > [data-slot="surface"] > [data-slot="body"] > * {
+  min-width: 0;
+}
+
+/* ── Tooltip ────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* Hugs its target, so the tooltip shows over the content and not over the empty rest of the row. */
+[data-genui] [data-gu="tooltip"] {
+  display: inline-flex;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: baseline;
+}
+
+[data-genui] [data-gu="tooltip"][data-mode="children"] [data-slot="target"] {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+}
+
+[data-genui] [data-gu="tooltip"][data-mode="text"] [data-slot="text"] {
+  border-radius: var(--gu-radius-xs);
+  color: inherit;
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--gu-text-faint);
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+  cursor: help;
+}
+
+/* ── Popover ────────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="popover"] {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+[data-genui] [data-gu="popover"] > [data-slot="trigger"] {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  anchor-name: var(--_anchor);
+}
+
+[data-genui] [data-gu="popover"] > [data-slot="panel"] {
+  container: genui / inline-size;
+  box-sizing: border-box;
+  width: min(320px, calc(100vw - 16px));
+  max-height: min(420px, calc(100dvh - 16px));
+  padding: var(--gu-space-md);
+  overflow: auto;
+  border: 0;
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-layer-1);
+  box-shadow: var(--gu-shadow-floating);
+  color: var(--gu-text);
+  font-family: var(--gu-font-sans);
+  font-size: var(--gu-size-base);
+  line-height: var(--gu-leading-base);
+  overscroll-behavior: contain;
+  opacity: 0;
+  transition:
+    opacity 120ms ease-out,
+    overlay 120ms allow-discrete,
+    display 120ms allow-discrete;
+}
+
+[data-genui] [data-gu="popover"] > [data-slot="panel"]:popover-open {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  opacity: 1;
+}
+
+@starting-style {
+  [data-genui] [data-gu="popover"] > [data-slot="panel"]:popover-open {
+    opacity: 0;
+  }
+}
+
+/* Under the button, start-aligned with it; flipped above or to the other side where there is no room. Without anchor
+   positioning the popover keeps the platform's place, centered in the window. */
+@supports (anchor-name: --genui) {
+  [data-genui] [data-gu="popover"] > [data-slot="panel"] {
+    position-anchor: var(--_anchor);
+    position-area: block-end span-inline-end;
+    position-try-fallbacks:
+      flip-block,
+      flip-inline,
+      flip-block flip-inline;
+    inset: auto;
+    margin: 0;
+    margin-block-start: var(--gu-space-xs);
+  }
+}
+
+[data-genui] [data-gu="popover"] > [data-slot="panel"] > :is([data-slot="content"], [data-slot="body"]) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-md);
+  min-width: 0;
+}
+
+/* ── Carousel ───────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu="carousel"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+}
+
+[data-genui] [data-gu="carousel"] > [data-slot="viewport"] {
+  display: flex;
+  gap: var(--gu-space-md);
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border-radius: var(--gu-radius-lg);
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+
+[data-genui] [data-gu="carousel"] > [data-slot="viewport"]::-webkit-scrollbar {
+  display: none;
+}
+
+[data-genui] [data-gu="carousel"] > [data-slot="viewport"] > [data-slot="item"] {
+  position: relative;
+  display: flex;
+  flex: 0 0 min(260px, 85%);
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-layer-1);
+  scroll-snap-align: start;
+}
+
+/* The card's hairline, drawn over its content so an edge-to-edge image does not hide it. */
+[data-genui] [data-gu="carousel"] > [data-slot="viewport"] > [data-slot="item"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+  pointer-events: none;
+}
+
+[data-genui] [data-gu="carousel"] [data-slot="item"] > [data-slot="media"] {
+  display: flex;
+  flex: none;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+
+[data-genui] [data-gu="carousel"] [data-slot="item"] > [data-slot="media"] > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+[data-genui] [data-gu="carousel"] [data-slot="item"] > [data-slot="media"] > :not(img) {
+  border-radius: 0;
+}
+
+[data-genui] [data-gu="carousel"] [data-slot="item"] > [data-slot="text"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-xs);
+  min-width: 0;
+  padding: var(--gu-space-md);
+}
+
+[data-genui] [data-gu="carousel"] [data-slot="text"] > [data-slot="title"] {
+  margin: 0;
+  color: var(--gu-text);
+  font-size: var(--gu-size-base);
+  font-weight: var(--gu-weight-medium);
+  line-height: var(--gu-leading-base);
+  overflow-wrap: anywhere;
+}
+
+[data-genui] [data-gu="carousel"] [data-slot="text"] > [data-slot="description"] {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-base);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+[data-genui] [data-gu="carousel"] > [data-slot="controls"] {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--gu-space-xs);
+}
+
+/* The chevrons point the way the row moves, which in right-to-left layouts is mirrored. */
+[data-genui] [data-gu="carousel"]:dir(rtl) > [data-slot="controls"] svg {
+  scale: -1 1;
+}
+
+[data-genui] [data-gu="carousel"] > [data-slot="empty"] {
+  margin: 0;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
