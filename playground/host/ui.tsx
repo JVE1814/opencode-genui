@@ -349,8 +349,7 @@ function Select(props: {
         aria-controls={open() ? id : undefined}
         aria-invalid={props.invalid || undefined}
         data-component="select-v2"
-        data-appearance="standard"
-        data-surface="base"
+        data-appearance="inline"
         data-expanded={open() ? "" : undefined}
         data-invalid={props.invalid ? "" : undefined}
         data-disabled={props.disabled ? "" : undefined}
@@ -375,7 +374,16 @@ function Select(props: {
           </span>
         </div>
         <span data-slot="select-v2-chevron" aria-hidden="true">
-          <Icon name="chevron-down" size="small" />
+          {/* The app's own artwork (@opencode/ui select.tsx): drawn pointing up, select.css turns it while closed. */}
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M11 9.5L8 6.5L5 9.5"
+              stroke="currentColor"
+              stroke-width="1"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
         </span>
       </button>
       <Show when={open() && trigger}>

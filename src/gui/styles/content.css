@@ -93,6 +93,22 @@
   max-width: 100%;
 }
 
+/* ui.Markdown spaces its blocks for the message flow (paragraph and code block margins). Here the component sits in a
+   Stack, a Card, an Accordion body or a Popover that spaces its children itself, so the first block's top margin and
+   the last block's bottom margin go: without this every Markdown ends with 10-16px of extra space. The host's markup
+   is matched loosely (its root, then one wrapper level, then a code block's <pre>). */
+[data-genui] [data-gu="markdown"] > :first-child,
+[data-genui] [data-gu="markdown"] > :first-child > :first-child,
+[data-genui] [data-gu="markdown"] > :first-child > :first-child > pre {
+  margin-block-start: 0;
+}
+
+[data-genui] [data-gu="markdown"] > :last-child,
+[data-genui] [data-gu="markdown"] > :last-child > :last-child,
+[data-genui] [data-gu="markdown"] > :last-child > :last-child > pre {
+  margin-block-end: 0;
+}
+
 /* ── Code ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
 
 [data-genui] [data-gu="code"] {
@@ -142,9 +158,9 @@
   min-width: 0;
 }
 
-/* ui.Code is the timeline's Markdown code block, whose <pre> carries the message flow's 12px/24px margins. Here the
-   block is the whole component, so they go. */
-[data-genui] [data-gu="code"] > [data-slot="body"] pre {
+/* ui.Code is the timeline's Markdown code block, whose <pre> (or its markdown-code wrapper) carries the message flow's
+   12px/24px margins. Here the block is the whole component, so they go. */
+[data-genui] [data-gu="code"] > [data-slot="body"] :is(pre, [data-component="markdown-code"]) {
   margin: 0;
 }
 

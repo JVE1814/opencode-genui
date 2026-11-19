@@ -18,14 +18,23 @@ const broken = [
 
 const orphan = block("canvas", { canvas: "ghost", title: "Ghost canvas" }, [replace("/state/count", 3)])
 
+// A root that cannot render at all: the surface shows the error card instead of the UI.
+const fatal = block("spec", { id: "release-board", title: "Release board" }, [
+  root("board"),
+  element("board", "KanbanBoard", { columns: ["Todo", "Doing", "Done"] }, ["todo"]),
+  element("todo", "Text", { text: "Ship 1.2" }),
+])
+
 export const invalidScenario: Scenario = {
   name: "invalid",
   title: "Invalid blocks",
   description:
-    "A ```spec block full of errors (bad JSON, unknown op and component, missing child, wrong props) and a canvas patch without a base.",
+    "A ```spec block full of errors (bad JSON, unknown op and component, missing child, wrong props), one whose root cannot render, and a canvas patch without a base.",
   steps: [
     { user: "Show me the service status." },
-    { assistant: `Here's the status:\n\n${broken}\n\nAnd an update to a canvas that doesn't exist yet:\n\n${orphan}` },
+    {
+      assistant: `Here's the status:\n\n${broken}\n\nThe release board:\n\n${fatal}\n\nAnd an update to a canvas that doesn't exist yet:\n\n${orphan}`,
+    },
   ],
   reply: () => [
     {

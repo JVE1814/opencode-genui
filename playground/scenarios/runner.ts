@@ -17,7 +17,13 @@ export interface Runner {
   assistant(
     sessionID: string,
     text: string,
-    options?: { readonly stream?: boolean; readonly complete?: boolean; readonly signal?: AbortSignal },
+    options?: {
+      readonly stream?: boolean
+      readonly complete?: boolean
+      readonly signal?: AbortSignal
+      /** A finished tool call before the text. */
+      readonly tool?: { readonly name: string; readonly output: string }
+    },
   ): Promise<string>
   stop(): void
 }
@@ -49,7 +55,7 @@ export function historyMessages(steps: readonly Step[]): Message[] {
           type: "assistant",
           time: { created, completed: created + 1000 },
           agent: "build",
-          model: { id: "claude-sonnet-4-5", providerID: "anthropic" },
+          model: { id: "playground-model", providerID: "playground" },
           content: [{ type: "text", text: step.assistant }],
           finish: "stop",
         },
@@ -64,7 +70,17 @@ export function createRunner(server: FakeServer, speed: Speed): Runner {
   const runner: Runner = {
     speed,
     async assistant(sessionID, text, options = {}) {
-      const id = server.startAssistant(sessionID)
+      const id = options.tool
+        ? server.startAssistant(sessionID, [
+            {
+              type: "tool",
+              id: `call_${Date.now().toString(36)}`,
+              name: options.tool.name,
+              state: { status: "completed", output: options.tool.output },
+            },
+            { type: "text", text: "" },
+          ])
+        : server.startAssistant(sessionID)
       const stream = options.stream ?? speed !== "instant"
       if (!stream) server.appendText(sessionID, id, text)
       else {
@@ -85,7 +101,11 @@ export function createRunner(server: FakeServer, speed: Speed): Runner {
         if (signal?.aborted) return
         if ("user" in step) server.appendUser(sessionID, step.user)
         else if ("assistant" in step)
-          await runner.assistant(sessionID, step.assistant, { complete: step.complete, signal })
+          await runner.assistant(sessionID, step.assistant, {
+            complete: step.complete,
+            signal,
+            ...(step.tool ? { tool: step.tool } : {}),
+          })
         else if (PAUSE[speed] > 0) await sleep(step.pause * PAUSE[speed], signal)
       }
     },

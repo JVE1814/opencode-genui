@@ -167,7 +167,7 @@ test.describe("fake host with the stub plugin", () => {
 })
 
 test("plays a scenario and switches the theme", async ({ page }) => {
-  await boot(page, "scenario=form&speed=instant&theme=dark")
+  await boot(page, "plugin=stub&scenario=form&speed=instant&theme=dark")
   await expect(page.locator("html")).toHaveAttribute("data-color-scheme", "dark")
   const messages = await page.evaluate(() => window.__genui.messages())
   expect(messages.map((message) => message.type)).toEqual(["user", "assistant"])

@@ -522,8 +522,11 @@
   align-items: center;
   gap: var(--gu-space-xs);
   width: fit-content;
-  max-width: 100%;
+  max-width: calc(100% + 2 * var(--gu-space-xs));
   min-height: var(--gu-control);
+  /* Room around the title for the focus ring, taken back by the margin so the title stays aligned with the body. */
+  padding-inline: var(--gu-space-xs);
+  margin-inline: calc(-1 * var(--gu-space-xs));
   list-style: none;
   border-radius: var(--gu-radius-sm);
   color: var(--gu-text);

@@ -17,14 +17,16 @@ const INPUT_TYPES = ["text", "email", "password", "number", "search", "url"] as 
  * void; a failing action is logged here so it never becomes an unhandled rejection.
  */
 export function fire(ctx: { emit: (event: string) => void }, event: string): Promise<void> {
+  const report = (error: unknown) => {
+    // An action that did not run (declined confirm, no gesture, rate limit) is not a failure: see src/gui/actions.ts.
+    if (error instanceof Error && error.name === "ActionRefused") return
+    console.error(`genui: "${event}" actions failed`, error)
+  }
   try {
     const result: unknown = ctx.emit(event)
-    return Promise.resolve(result).then(
-      () => undefined,
-      (error: unknown) => console.error(`genui: "${event}" actions failed`, error),
-    )
+    return Promise.resolve(result).then(() => undefined, report)
   } catch (error) {
-    console.error(`genui: "${event}" actions failed`, error)
+    report(error)
     return Promise.resolve()
   }
 }

@@ -53,7 +53,7 @@ export function createSessions(server: FakeServer, input: { readonly ids: readon
   })
   const [routed, setRouted] = createSignal(all[0]!.ref.key)
   const [drafts, setDrafts] = createStore<Record<string, string>>({})
-  const [model, setModel] = createSignal<ComposerModel>({ providerID: "anthropic", modelID: "claude-sonnet-4-5" })
+  const [model, setModel] = createSignal<ComposerModel>({ providerID: "playground", modelID: "playground-model" })
 
   const project = {
     id: "prj_playground",

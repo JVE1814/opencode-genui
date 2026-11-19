@@ -15,7 +15,7 @@ bun run test:e2e            # Playwright against the playground
 
 | Parameter         | Effect                                                                                                     |
 | ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| `scenario=<name>` | Conversation to play: `empty` (default), `form`, `canvas`, `invalid`, `gallery`, `history`.                |
+| `scenario=<name>` | Conversation to play: `empty` (default), `form`, `canvas`, `invalid`, `gallery`, `history`, `untrusted`.   |
 | `speed=<speed>`   | `instant` (tests), `fast`, `normal` (default), `slow`.                                                     |
 | `theme=dark`      | Start in dark mode (`data-color-scheme="dark"` on `<html>`). The header button toggles it.                 |
 | `plugin=stub`     | Load `playground/stub/gui.tsx`, a tiny plugin for testing the host itself, instead of `src/gui.tsx`.       |

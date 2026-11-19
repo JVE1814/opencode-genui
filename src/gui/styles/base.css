@@ -167,11 +167,13 @@
   border: 0;
 }
 
-/* Shared: field label, description and error, used by every form component */
+/* Shared: field label, description and error, used by every form component. Metrics of the app's field-v2 and
+   radio-v2: 8px between parts, a 13px medium label, an 11px muted description (as the checkbox and switch
+   descriptions) and a 12px error. */
 [data-genui] :where([data-gu-field]) {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -183,13 +185,14 @@
 }
 
 [data-genui] :where([data-gu-description]) {
-  font-size: var(--gu-size-sm);
-  line-height: var(--gu-leading-compact);
+  font-size: 11px;
+  line-height: var(--gu-leading-tight);
+  letter-spacing: 0.05px;
   color: var(--gu-text-muted);
 }
 
 [data-genui] :where([data-gu-error]) {
-  font-size: var(--gu-size-sm);
+  font-size: 12px;
   line-height: var(--gu-leading-compact);
   color: var(--gu-danger-fg);
 }

@@ -2,6 +2,7 @@ import { children, createMemo, createSignal, For, Index, Show, type JSX } from "
 import type { ComponentName } from "../../catalog/components.ts"
 import { useHost } from "../host.ts"
 import { MarkdownText } from "./content.tsx"
+import { fire } from "./inputs.tsx"
 import { bool, list, num, oneOf, str, uid, useBound, type GenuiComponent } from "./shared.tsx"
 
 // Layout components: Stack, Grid, Card, Separator, Tabs, Accordion, Collapsible. Styles: src/gui/styles/layout.css.
@@ -194,7 +195,7 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
     const tab = tabs()[index]
     if (!tab || tab.value === active()) return
     setValue(tab.value)
-    ctx.emit("change")
+    void fire(ctx, "change")
   }
 
   const onKeyDown = (event: KeyboardEvent, index: number) => {

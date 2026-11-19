@@ -675,8 +675,12 @@
 
 /* ── Link ───────────────────────────────────────────────────────────────────────────────────────────────────────── */
 
+/* Inline in text; as a flex item (a Stack's child) it hugs its label, so the click target and focus ring do not span
+   the empty rest of the row. */
 [data-genui] [data-gu="link"] {
   display: inline;
+  width: fit-content;
+  max-width: 100%;
   padding: 0;
   margin: 0;
   border: 0;
@@ -961,6 +965,11 @@
   /* A segmented choice spans the column, so its segments get the width they can. */
   [data-genui] [data-gu="button-group"] {
     width: 100%;
+  }
+
+  /* Tighter segments, so four short labels fit a 300px canvas instead of truncating to their first letter. */
+  [data-genui] :where([data-gu="toggle-group"], [data-gu="button-group"]) > [data-slot="item"] {
+    padding-inline: 8px;
   }
 
   [data-genui] [data-gu="pagination"] {

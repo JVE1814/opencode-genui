@@ -1,6 +1,15 @@
 import { urlHost } from "../protocol/url.ts"
 import type { Host, SurfaceContext } from "./host.ts"
 
+/** A confirm the spec asked for on an action binding (`confirm`), as src/gui/actions.ts reads it. */
+export interface RequestedConfirm {
+  readonly title?: string
+  readonly message?: string
+  readonly confirmLabel?: string
+  readonly cancelLabel?: string
+  readonly danger?: boolean
+}
+
 /** Minimum time between two outward actions of one surface, so a spec cannot flood the session. */
 export const OUTWARD_INTERVAL_MS = 1000
 
@@ -29,7 +38,7 @@ export async function allowOutward(
     /** Exactly what will happen, shown to the user (the message text, the URL). */
     readonly detail: string
     /** A confirm the spec itself asked for (a binding's `confirm`). */
-    readonly requested?: { readonly title?: string; readonly message?: string; readonly danger?: boolean }
+    readonly requested?: RequestedConfirm
     readonly confirmLabel?: string
   },
 ): Promise<boolean> {
@@ -53,17 +62,29 @@ export async function allowOutward(
   return host.confirm({
     title: input.requested?.title || input.title,
     description: notes.join("\n\n"),
-    confirm: input.confirmLabel,
+    confirm: input.requested?.confirmLabel || input.confirmLabel,
+    ...(input.requested?.cancelLabel ? { cancel: input.requested.cancelLabel } : {}),
     danger: input.requested?.danger,
   })
 }
 
-/** Opens a link from a surface, after the outward gate. The URL must already have passed `safeUrl`. */
-export async function openLink(host: Host, surface: SurfaceContext | undefined, url: string): Promise<void> {
+/**
+ * Opens a link from a surface, after the outward gate. The URL must already have passed `safeUrl`.
+ *
+ * @returns Whether the link was opened.
+ */
+export async function openLink(
+  host: Host,
+  surface: SurfaceContext | undefined,
+  url: string,
+  requested?: RequestedConfirm,
+): Promise<boolean> {
   const ok = await allowOutward(host, surface, {
     title: host.t("confirm.openLink", { host: urlHost(url) }),
     detail: url,
     confirmLabel: host.t("confirm.open"),
+    ...(requested ? { requested } : {}),
   })
   if (ok) host.openExternal(url)
+  return ok
 }

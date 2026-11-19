@@ -16,7 +16,13 @@ export interface UserMessage {
 export type AssistantPart =
   | { readonly type: "text"; readonly text: string }
   | { readonly type: "reasoning"; readonly text: string }
-  | { readonly type: "tool"; readonly id: string; readonly name: string; readonly state: { readonly status: string } }
+  | {
+      readonly type: "tool"
+      readonly id: string
+      readonly name: string
+      /** `output` is what the tool returned; the timeline renders it as Markdown, as the app does for tool output. */
+      readonly state: { readonly status: string; readonly output?: string }
+    }
 
 export interface AssistantMessage {
   readonly id: string
@@ -89,7 +95,7 @@ export function observeMessageId(id: string) {
   if (Number.isFinite(stamp) && stamp > lastStamp) lastStamp = stamp
 }
 
-const MODEL = { id: "claude-sonnet-4-5", providerID: "anthropic" }
+const MODEL = { id: "playground-model", providerID: "playground" }
 
 export function createFakeServer(options: { readonly window?: number } = {}): FakeServer {
   const window = Math.max(1, options.window ?? 20)
@@ -128,6 +134,9 @@ export function createFakeServer(options: { readonly window?: number } = {}): Fa
 
   const data = {
     session: {
+      // The session's info, as the app's synced store holds it: top-level sessions (no parentID), no staged revert.
+      get: (sessionID: string) =>
+        state.sessions[sessionID] ? { id: sessionID, title: `Session ${sessionID}`, time: { created: 0 } } : undefined,
       status: (sessionID: string) => state.sessions[sessionID]?.status ?? "idle",
       setStatus: (sessionID: string, status: "idle" | "running") => setState("sessions", sessionID, "status", status),
       message: {

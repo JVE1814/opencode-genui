@@ -323,10 +323,31 @@ describe("createSessionIndex fresh", () => {
     expect(index.fresh()).toEqual([])
   })
 
-  test("a canvas already streaming when the session loads is not fresh", () => {
-    const { index } = setup([assistant("msg_05", fence("canvas", lines({ canvas: "c" }, root()), false), false)])
+  test("a canvas in a reply still being written when the session loads is fresh; one in a finished reply is not", () => {
+    const { index } = setup([
+      assistant("msg_04", fence("canvas", lines({ canvas: "done" }, root()))),
+      user("msg_05"),
+      assistant("msg_06", fence("canvas", lines({ canvas: "c" }, root()), false), false),
+    ])
     expect(index.canvas("c")?.streaming).toBe(true)
+    expect(index.fresh()).toEqual(["c"])
+    index.consumeFresh("c")
     expect(index.fresh()).toEqual([])
+  })
+
+  test("a live patch to a canvas whose base is not loaded is not fresh, nor is a block with only its header yet", () => {
+    const { index, push, append } = setup([user("msg_01")])
+    push(assistant("msg_02", fence("canvas", `${lines({ canvas: "old" })}\n`, false), false))
+    expect(index.canvas("old")).toBeDefined()
+    expect(index.fresh()).toEqual([])
+    append(1, `${lines(element("a", "x"))}\n`)
+    expect(index.canvas("old")?.missingBase).toBe(true)
+    expect(index.fresh()).toEqual([])
+
+    push(assistant("msg_03", fence("canvas", `${lines({ canvas: "new" })}\n`, false), false))
+    expect(index.fresh()).toEqual([])
+    append(2, `${lines(root())}\n`)
+    expect(index.fresh()).toEqual(["new"])
   })
 
   test("nothing is fresh or ready before the window loads; an empty loaded session counts every reply as live", () => {

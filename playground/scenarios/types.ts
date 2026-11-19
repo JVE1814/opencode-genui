@@ -2,8 +2,15 @@
 export type Step =
   /** The user sends a message. */
   | { readonly user: string }
-  /** The assistant writes a message, streamed in deltas; `complete: false` leaves it streaming. */
-  | { readonly assistant: string; readonly complete?: boolean }
+  /**
+   * The assistant writes a message, streamed in deltas; `complete: false` leaves it streaming. `tool` puts a finished
+   * tool call before the text, whose output the timeline renders as Markdown (blocks in it are not the agent's reply).
+   */
+  | {
+      readonly assistant: string
+      readonly complete?: boolean
+      readonly tool?: { readonly name: string; readonly output: string }
+    }
   /** Waits (skipped at `?speed=instant`). */
   | { readonly pause: number }
 

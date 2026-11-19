@@ -1,0 +1,393 @@
+/*
+ * genui chrome: what genui draws around generated UI. The error card and issues footer, the untrusted note, the
+ * canvas chip in the reply, the canvas panel (header, notices) and its tab label. Same rules as base.css: scoped
+ * under [data-genui], data attributes only, --gu-* aliases only. The one exception is the last block, which styles the
+ * host's raw code block while a spec streams (progressive enhancement; the host's markup is not a contract).
+ */
+
+/* ── Unknown component ─────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu-chrome="unknown"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-xs);
+  min-width: 0;
+}
+
+[data-genui] [data-gu-chrome="unknown"] > [data-slot="note"] {
+  align-self: flex-start;
+  padding: 2px 6px;
+  border-radius: var(--gu-radius-sm);
+  background-color: var(--gu-layer-2);
+  color: var(--gu-text-faint);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+  overflow-wrap: anywhere;
+}
+
+/* ── Error card ────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu-chrome="error"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  padding: var(--gu-space-md);
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+  color: var(--gu-text);
+}
+
+[data-genui] [data-gu-chrome="error"] > [data-slot="head"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  font-weight: var(--gu-weight-medium);
+}
+
+[data-genui] [data-gu-chrome="error"] > [data-slot="head"] > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: var(--gu-leading-base);
+  color: var(--gu-danger-fg);
+}
+
+[data-genui] [data-gu-chrome="error"] > [data-slot="detail"] {
+  margin: 0;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu-chrome="error"] > [data-slot="actions"],
+[data-genui] [data-gu-chrome="issues"] [data-slot="actions"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gu-space-sm);
+}
+
+/* The issue list, shared by the card and the footer. */
+[data-genui] :is([data-gu-chrome="error"], [data-gu-chrome="issues"]) [data-slot="issues"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] :is([data-gu-chrome="error"], [data-gu-chrome="issues"]) [data-slot="issues"] > li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+[data-genui] :is([data-gu-chrome="error"], [data-gu-chrome="issues"]) [data-slot="issues"] [data-slot="where"] {
+  margin-inline-end: 6px;
+  padding: 0 4px;
+  border-radius: var(--gu-radius-xs);
+  background-color: var(--gu-layer-2);
+  color: var(--gu-text);
+  font-family: var(--gu-font-mono);
+  font-size: 12px;
+}
+
+[data-genui] :is([data-gu-chrome="error"], [data-gu-chrome="issues"]) [data-slot="issues"] > [data-slot="more"] {
+  color: var(--gu-text-faint);
+}
+
+/* ── Issues footer ─────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu-chrome="issues"] {
+  margin-block-start: var(--gu-space-sm);
+  color: var(--gu-text-faint);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu-chrome="issues"] > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  margin-inline-start: -4px;
+  border-radius: var(--gu-radius-sm);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  transition: color var(--gu-duration) var(--gu-ease);
+}
+
+[data-genui] [data-gu-chrome="issues"] > summary::-webkit-details-marker {
+  display: none;
+}
+
+[data-genui] [data-gu-chrome="issues"] > summary:hover,
+[data-genui] [data-gu-chrome="issues"][open] > summary {
+  color: var(--gu-text-muted);
+}
+
+[data-genui] [data-gu-chrome="issues"] > summary > [data-slot="icon"] {
+  display: inline-flex;
+  color: var(--gu-icon-faint);
+}
+
+/* Errors (parts of the UI did not render) get the warning tone; warnings alone stay faint. */
+[data-genui] [data-gu-chrome="issues"][data-severity="error"] > summary > [data-slot="icon"] {
+  color: var(--gu-warning-fg);
+}
+
+[data-genui] [data-gu-chrome="issues"] > [data-slot="body"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gu-space-sm);
+  padding-block-start: 6px;
+}
+
+/* The footer's ghost button (ui.Button small: 9px inline padding) lines its icon up with the issue list above. */
+[data-genui] [data-gu-chrome="issues"] > [data-slot="body"] > [data-slot="actions"] {
+  margin-inline-start: -9px;
+}
+
+/* ── Untrusted note ────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu-chrome="untrusted"] {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-block-end: 6px;
+  color: var(--gu-text-faint);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu-chrome="untrusted"] > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+  color: var(--gu-icon-faint);
+}
+
+/* ── Live dot (canvas streaming) ───────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui] [data-gu-live] {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background-color: var(--gu-icon-accent);
+  animation: gu-live 1.4s var(--gu-ease) infinite;
+}
+
+@keyframes gu-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ── Canvas chip (a canvas block in the reply) ─────────────────────────────────────────────────────────────────── */
+
+[data-genui][data-surface="chip"] {
+  margin-block: 4px;
+}
+
+[data-genui] [data-gu-chrome="chip"] {
+  display: flex;
+  align-items: center;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  max-width: 420px;
+  padding: 6px 6px 6px var(--gu-space-sm);
+  border-radius: var(--gu-radius-lg);
+  background-color: var(--gu-layer-1);
+  box-shadow: inset 0 0 0 0.5px var(--gu-border-muted);
+}
+
+[data-genui] [data-gu-chrome="chip"] > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--gu-control);
+  height: var(--gu-control);
+  border-radius: var(--gu-radius-md);
+  background-color: var(--gu-layer-2);
+  color: var(--gu-icon-muted);
+}
+
+[data-genui] [data-gu-chrome="chip"] > [data-slot="text"] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+[data-genui] [data-gu-chrome="chip"] [data-slot="title"] {
+  overflow: hidden;
+  color: var(--gu-text);
+  font-weight: var(--gu-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui] [data-gu-chrome="chip"] [data-slot="meta"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--gu-text-faint);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu-chrome="chip"][data-state="closed"] [data-slot="title"] {
+  color: var(--gu-text-muted);
+}
+
+[data-genui] [data-gu-chrome="chip"] > :last-child {
+  flex: none;
+}
+
+/* ── Canvas panel ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+[data-genui][data-gu-chrome="canvas"] {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background-color: var(--gu-bg);
+}
+
+[data-genui][data-gu-chrome="canvas"] > [data-slot="header"] {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--gu-space-sm);
+  min-width: 0;
+  height: 40px;
+  padding-inline: 16px 8px;
+  border-block-end: 0.5px solid var(--gu-border-muted);
+}
+
+[data-genui][data-gu-chrome="canvas"] > [data-slot="header"] > [data-slot="title"] {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gu-text);
+  font-weight: var(--gu-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-genui][data-gu-chrome="canvas"] > [data-slot="header"] > [data-slot="status"] {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  color: var(--gu-text-faint);
+  font-size: var(--gu-size-sm);
+}
+
+[data-genui][data-gu-chrome="canvas"] > [data-slot="header"] > [data-slot="menu"] {
+  display: inline-flex;
+  flex: none;
+  margin-inline-start: auto;
+}
+
+[data-genui][data-gu-chrome="canvas"] > [data-slot="body"] {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* Loading, empty and problem states of a canvas: centered in the panel, like the app's empty panes. */
+[data-genui] [data-gu-chrome="notice"] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--gu-space-sm);
+  max-width: 360px;
+  margin: 0 auto;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+[data-genui] [data-gu-chrome="notice"] > [data-slot="icon"] {
+  display: inline-flex;
+  color: var(--gu-icon-faint);
+}
+
+[data-genui] [data-gu-chrome="notice"] > [data-slot="title"] {
+  color: var(--gu-text);
+  font-weight: var(--gu-weight-medium);
+}
+
+[data-genui] [data-gu-chrome="notice"] > [data-slot="body"] {
+  margin: 0;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
+[data-genui] [data-gu-chrome="notice"] > [data-slot="actions"] {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--gu-space-sm);
+  margin-block-start: var(--gu-space-xs);
+}
+
+[data-genui] [data-gu-chrome="notice"][data-tone="quiet"] {
+  flex-direction: row;
+  justify-content: center;
+  color: var(--gu-text-faint);
+  font-size: var(--gu-size-sm);
+}
+
+/* ── Canvas tab label ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* Inside the host's tab trigger: inline, sized by its content (no size containment). */
+[data-genui][data-gu-chrome="tab"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  container-type: normal;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+}
+
+[data-genui][data-gu-chrome="tab"] > [data-slot="icon"] {
+  display: inline-flex;
+  flex: none;
+}
+
+[data-genui][data-gu-chrome="tab"] > [data-slot="title"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── The host's raw code block while a spec streams ────────────────────────────────────────────────────────────── */
+
+/* Until its fence closes, the app shows a spec or canvas block as highlighted JSONL. Keep it short and faded, so a
+   long spec does not push the conversation around before the UI replaces it. */
+[data-component="markdown-code"]:is([data-language="spec" i], [data-language="canvas" i]):not([data-code-content])
+  > pre {
+  max-height: 128px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 40%, transparent);
+  mask-image: linear-gradient(to bottom, #000 40%, transparent);
+}

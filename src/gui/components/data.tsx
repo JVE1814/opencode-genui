@@ -4,6 +4,7 @@ import { useStateStore } from "@json-render/solid"
 import { isIconName } from "../../catalog/icons.ts"
 import { isRemoteImage, safeUrl, urlHost } from "../../protocol/url.ts"
 import { useHost, type Host } from "../host.ts"
+import { fire } from "./inputs.tsx"
 import { bool, display, list, num, oneOf, str, uid, type GenuiComponent } from "./shared.tsx"
 
 // Data components: Table, Progress, Skeleton, Spinner, Stat, Image, Avatar. Styles: src/gui/styles/data.css.
@@ -177,7 +178,7 @@ const Table: GenuiComponent<"Table"> = (ctx) => {
     const target = path()
     if (!target) return
     store.set(target, index)
-    ctx.emit("select")
+    void fire(ctx, "select")
   }
 
   const onRowKeyDown = (event: KeyboardEvent, index: number) => {

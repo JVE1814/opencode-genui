@@ -1,0 +1,391 @@
+import { createEffect, onCleanup, untrack } from "solid-js"
+import {
+  CodeBlock,
+  Command,
+  createKeyed,
+  MenuItem,
+  Panel,
+  SettingsPage,
+  Store,
+  Style,
+  type Context,
+  type Plugin,
+  type SessionRef,
+} from "@opencode/plugin/gui"
+import { Schema } from "effect"
+import { compareRefs } from "../protocol/fold.ts"
+import { ensureInstructions, removeInstructions } from "../runtime/activation.ts"
+import { EMPTY_PERSISTED } from "../runtime/snapshot.ts"
+import { clearSurfaces, peekSurface, surfaceKeyPrefix } from "../runtime/surfaces.ts"
+import { CANVAS_TAB_PREFIX, INSTRUCTION_KEY, LANGUAGES } from "../shared/constants.ts"
+import { hintFor } from "../shared/hint.ts"
+import { parseOptions, type GenuiOptions } from "../shared/options.ts"
+import { createHostAdapter } from "./adapter.ts"
+import { canvasPanel } from "./canvas.tsx"
+import { DEFAULT_PREFS, type Host, type SurfaceContext } from "./host.ts"
+import { renderBlock } from "./inline.tsx"
+import { flushSurfaceWrites, writeStore, type SessionStore } from "./persist.ts"
+import { createSessionRegistry, type SessionRegistry } from "./sessions.ts"
+import { SettingsView } from "./settings.tsx"
+import { css } from "./styles/index.ts"
+
+export const PrefsSchema = Schema.Struct({
+  autoOpen: Schema.Literals(["select", "append", "off"]),
+  confirmActions: Schema.Literals(["always", "untrusted", "never"]),
+  remoteImages: Schema.Boolean,
+})
+
+export const PersistedSessionSchema = Schema.Struct({
+  v: Schema.Number,
+  canvases: Schema.Record(Schema.String, Schema.String),
+  surfaces: Schema.Record(Schema.String, Schema.String),
+})
+
+/** The GUI's stored state: preferences for the app, and per session the canvas snapshots and the user's UI edits. */
+export const stores = {
+  prefs: Store.global(PrefsSchema, DEFAULT_PREFS),
+  session: Store.session(PersistedSessionSchema, EMPTY_PERSISTED),
+}
+
+export type GenuiDeclarations = Plugin.Declarations<typeof stores>
+
+/** What the GUI's views share: the host seam, the session indexes and the session-level operations. */
+export interface GuiEnv {
+  readonly ctx: Context
+  readonly host: Host
+  readonly options: GenuiOptions
+  readonly sessions: SessionRegistry
+  store(session: SessionRef): SessionStore
+  /** The host key of a canvas's tab, `${plugin}:canvas.<id>`. */
+  tabKey(canvas: string): string
+  openCanvas(session: SessionRef, canvas: string, tab?: "select" | "append"): void
+  closeCanvas(session: SessionRef, canvas: string): void
+  /** The user closed this canvas's tab in this window; auto-open leaves it closed. */
+  markClosed(session: SessionRef, canvas: string): void
+  sendPrompt(session: SessionRef, text: string): Promise<void>
+  insertPrompt(session: SessionRef, text: string): void
+  /** The SurfaceContext of a surface of `session()`: what its actions reach. One object per mounted surface. */
+  surfaceInfo(input: {
+    readonly kind: SurfaceContext["kind"]
+    readonly id: () => string
+    readonly title: () => string | undefined
+    readonly trusted: () => boolean
+    readonly session: () => SessionRef | undefined
+  }): SurfaceContext
+  /** Resets the UI state of every surface (or one session's) and forgets the stored edits. */
+  resetSurfaces(session?: SessionRef): void
+}
+
+export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
+  ctx.add(Style, css)
+
+  const options = parseOptions(ctx.options)
+  const host = createHostAdapter(ctx, () => ctx.stores.prefs.value)
+  const store = (session: SessionRef): SessionStore => ctx.stores.session(session)
+  const sessions = createSessionRegistry(store)
+  const closed = new Set<string>()
+  const closedKey = (session: SessionRef, canvas: string) => `${session.key}\n${canvas}`
+  const tabKey = (canvas: string) => `${ctx.id}:${CANVAS_TAB_PREFIX}${canvas}`
+
+  const env: GuiEnv = {
+    ctx,
+    host,
+    options,
+    sessions,
+    store,
+    tabKey,
+    openCanvas(session, canvas, tab = "select") {
+      closed.delete(closedKey(session, canvas))
+      ctx.layout.open(tabKey(canvas), session, { tab, background: true })
+    },
+    closeCanvas: (session, canvas) => ctx.layout.close(tabKey(canvas), session),
+    markClosed: (session, canvas) => void closed.add(closedKey(session, canvas)),
+    async sendPrompt(session, text) {
+      await session.server.client.session.prompt({ sessionID: session.id, text })
+    },
+    insertPrompt(session, text) {
+      // The composer follows the routed session; only fill it when that is the surface's session.
+      const screen = ctx.screen.current()
+      if (!screen || ctx.sessions.current()?.key !== session.key) {
+        ctx.toast.show({ title: ctx.t("action.noSession"), variant: "error" })
+        return
+      }
+      screen.composer.insert(text)
+      screen.composer.focus()
+    },
+    surfaceInfo(input) {
+      return {
+        kind: input.kind,
+        get id() {
+          return input.id()
+        },
+        get title() {
+          return input.title()
+        },
+        get trusted() {
+          return input.trusted()
+        },
+        get sendPrompt() {
+          const session = input.session()
+          return session ? (text: string) => env.sendPrompt(session, text) : undefined
+        },
+        get insertPrompt() {
+          const session = input.session()
+          return session ? (text: string) => env.insertPrompt(session, text) : undefined
+        },
+        get openCanvas() {
+          const session = input.session()
+          if (!session) return undefined
+          return (canvas: string) => {
+            const index = sessions.get(session).index
+            if (index.ready() && !index.canvas(canvas)) {
+              ctx.toast.show({ title: ctx.t("action.canvasMissing", { canvas }), variant: "error" })
+              return
+            }
+            env.openCanvas(session, canvas)
+          }
+        },
+      }
+    },
+    resetSurfaces(session) {
+      const prefix = session ? surfaceKeyPrefix(session.key) : undefined
+      clearSurfaces((key) => {
+        if (prefix !== undefined && !key.startsWith(prefix)) return false
+        peekSurface(key)?.store.reset()
+        return true
+      })
+      flushSurfaceWrites()
+      const targets = session ? [session] : ctx.sessions.list()
+      for (const target of targets)
+        writeStore(store(target), (value) =>
+          Object.keys(value.surfaces ?? {}).length === 0 ? value : { ...value, surfaces: {} },
+        )
+    },
+  }
+
+  // ── Lifetime ──────────────────────────────────────────────────────────────────────────────────────────────────
+  const flush = () => {
+    flushSurfaceWrites()
+    sessions.flush()
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("pagehide", flush)
+    onCleanup(() => window.removeEventListener("pagehide", flush))
+  }
+  onCleanup(() => {
+    flush()
+    sessions.dispose()
+  })
+
+  // Sessions whose shell tab closed take their index with them. Not before the interface mounts: until then no session
+  // is listed, while panels and code blocks may already have asked for one.
+  createEffect(() => {
+    if (!ctx.layout.ready()) return
+    const keep = new Set(ctx.sessions.list().map((session) => session.key))
+    const current = ctx.sessions.current()
+    if (current) keep.add(current.key)
+    sessions.prune(keep)
+  })
+
+  // ── Auto-open: a canvas that starts in a live reply opens its tab once ────────────────────────────────────────
+  createEffect(() => {
+    const session = ctx.sessions.current()
+    if (!session) return
+    const index = sessions.get(session).index
+    const fresh = index.fresh()
+    if (fresh.length === 0) return
+    const mode = host.prefs().autoOpen
+    untrack(() => {
+      for (const canvas of fresh) {
+        if (mode !== "off" && !closed.has(closedKey(session, canvas)))
+          ctx.layout.open(tabKey(canvas), session, { tab: mode === "select" ? "select" : "append", background: true })
+        index.consumeFresh(canvas)
+      }
+    })
+  })
+
+  // ── Activation: tell the agent about genui in sessions shown here ─────────────────────────────────────────────
+  const sessionKey = () => {
+    const session = ctx.sessions.current()
+    if (!session || session.pending) return undefined
+    let info: { readonly parentID?: unknown } | undefined
+    try {
+      info = session.server.data.session.get(session.id) as { readonly parentID?: unknown } | undefined
+    } catch {
+      // A data store without session info (an older host): treat it as a top-level session.
+      info = {}
+    }
+    // Wait for the session's info; a subagent's session gets nothing, its parent already has the hint.
+    if (!info || info.parentID) return undefined
+    return session.key
+  }
+  if (options.instructions === "session") {
+    let warned = false
+    createKeyed(sessionKey, (key) => {
+      const session = untrack(() => ctx.sessions.current())
+      if (!session || session.key !== key) return
+      void ensureInstructions(session.server.client, session.id, INSTRUCTION_KEY, hintFor(options)).then((result) => {
+        if (result !== "failed" || warned || ctx.signal.aborted) return
+        warned = true
+        ctx.toast.show({
+          title: ctx.t("activation.failed.title"),
+          description: ctx.t("activation.failed.description"),
+          variant: "error",
+        })
+      })
+    })
+  } else {
+    // A previous "session" setting may have left the entry behind.
+    const cleaned = new Set<string>()
+    createKeyed(sessionKey, (key) => {
+      const session = untrack(() => ctx.sessions.current())
+      if (!session || session.key !== key || cleaned.has(key)) return
+      cleaned.add(key)
+      void removeInstructions(session.server.client, session.id, INSTRUCTION_KEY)
+    })
+  }
+
+  // ── Inline blocks and canvas chips ────────────────────────────────────────────────────────────────────────────
+  ctx.add(CodeBlock, { languages: [...LANGUAGES], render: (props) => renderBlock(env, props) })
+
+  // ── Canvas tabs ───────────────────────────────────────────────────────────────────────────────────────────────
+  ctx.add(Panel, canvasPanel(env))
+
+  const pickCanvas = async () => {
+    const session = ctx.sessions.current()
+    if (!session) {
+      ctx.toast.show({ title: ctx.t("noSession.title") })
+      return
+    }
+    const canvases = sessions.get(session).index.canvases()
+    if (canvases.length === 0) {
+      ctx.toast.show({ title: ctx.t("none.title"), description: ctx.t("none.description") })
+      return
+    }
+    const latest = canvases.reduce((a, b) => (compareRefs(a.last, b.last) >= 0 ? a : b))
+    if (canvases.length === 1) {
+      env.openCanvas(session, latest.id)
+      return
+    }
+    const picked = await ctx.dialogs.select({
+      title: ctx.t("pick.title"),
+      placeholder: ctx.t("pick.placeholder"),
+      current: latest.id,
+      options: canvases.map((canvas) => ({
+        title: canvas.title ?? canvas.id,
+        value: canvas.id,
+        ...(canvas.title ? { description: canvas.id } : {}),
+      })),
+    })
+    if (picked !== undefined && !ctx.signal.aborted) env.openCanvas(session, picked)
+  }
+
+  ctx.add(MenuItem, () => {
+    const session = ctx.sessions.current()
+    const canvases = session ? sessions.get(session).index.canvases() : []
+    const opened =
+      !!session &&
+      canvases.length > 0 &&
+      canvases.every((canvas) => ctx.layout.state(tabKey(canvas.id), session) !== "closed")
+    return {
+      menu: "session.panel" as const,
+      id: "canvas",
+      title: ctx.t("menu.canvas"),
+      icon: "layout-right" as const,
+      ...(canvases.length > 0 ? { description: ctx.plural("menu.canvas.count", canvases.length) } : {}),
+      ...(opened ? { opened: true } : {}),
+      run: () => void pickCanvas(),
+    }
+  })
+
+  // ── Commands ──────────────────────────────────────────────────────────────────────────────────────────────────
+  ctx.add(Command, () => ({
+    id: "open-canvas",
+    title: ctx.t("command.open"),
+    group: ctx.t("command.group"),
+    section: "session" as const,
+    enabled: !!ctx.sessions.current(),
+    run: () => pickCanvas(),
+  }))
+
+  ctx.add(Command, () => ({
+    id: "rescan",
+    title: ctx.t("command.rescan"),
+    group: ctx.t("command.group"),
+    section: "session" as const,
+    enabled: !!ctx.sessions.current(),
+    run: async () => {
+      const session = ctx.sessions.current()
+      if (!session) return
+      const count = await sessions.get(session).rescan()
+      if (ctx.signal.aborted) return
+      ctx.toast.show({
+        title: ctx.t("rescan.done"),
+        description: ctx.plural("rescan.found", count),
+        variant: "success",
+      })
+    },
+  }))
+
+  ctx.add(Command, () => ({
+    id: "reset",
+    title: ctx.t("command.reset"),
+    group: ctx.t("command.group"),
+    section: "session" as const,
+    enabled: !!ctx.sessions.current(),
+    run: async () => {
+      const session = ctx.sessions.current()
+      if (!session) return
+      const ok = await ctx.dialogs.confirm({
+        title: ctx.t("reset.title"),
+        description: ctx.t("reset.description"),
+        confirm: ctx.t("reset.confirm"),
+        danger: true,
+      })
+      if (!ok || ctx.signal.aborted) return
+      env.resetSurfaces(session)
+      ctx.toast.show({ title: ctx.t("reset.done"), variant: "success" })
+    },
+  }))
+
+  // ── Settings › genui ──────────────────────────────────────────────────────────────────────────────────────────
+  ctx.add(SettingsPage, {
+    id: ctx.id,
+    get title() {
+      return ctx.t("settings.title")
+    },
+    icon: "layout-right",
+    get entries() {
+      return [
+        {
+          id: `${ctx.id}-auto-open`,
+          title: ctx.t("settings.autoOpen.title"),
+          description: ctx.t("settings.autoOpen.description"),
+        },
+        {
+          id: `${ctx.id}-confirm`,
+          title: ctx.t("settings.confirm.title"),
+          description: ctx.t("settings.confirm.description"),
+        },
+        {
+          id: `${ctx.id}-images`,
+          title: ctx.t("settings.images.title"),
+          description: ctx.t("settings.images.description"),
+        },
+        { id: `${ctx.id}-instructions`, title: ctx.t("settings.instructions.title") },
+        {
+          id: `${ctx.id}-clear`,
+          title: ctx.t("settings.clear.title"),
+          description: ctx.t("settings.clear.description"),
+        },
+      ]
+    },
+    render: () => (
+      <SettingsView
+        env={env}
+        prefs={() => host.prefs()}
+        update={(mutate) => ctx.stores.prefs.update((draft) => void mutate(draft))}
+      />
+    ),
+  })
+}

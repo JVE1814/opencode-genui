@@ -1,4 +1,4 @@
-import { createMemo, createSignal, getOwner, runWithOwner, type Accessor } from "solid-js"
+import { createMemo, createSignal, getOwner, runWithOwner, untrack, type Accessor } from "solid-js"
 import { scanFences } from "../protocol/fence.ts"
 import {
   compareRefs,
@@ -43,7 +43,10 @@ export interface SessionIndex {
   readonly removed: Accessor<ReadonlySet<string>>
   /** Whether a `spec` or `canvas` block with this `ParsedBlock.hash` is in an assistant text part (trust). */
   knows(hash: string): boolean
-  /** Canvases whose first block arrived live (after the index became ready) and were not consumed yet. */
+  /**
+   * Canvases that started live (in a reply still being written when the index became ready, or in a later one) and have
+   * drawn something, not consumed yet. A patch whose base is not loaded is an update, never a new canvas.
+   */
   readonly fresh: Accessor<readonly string[]>
   consumeFresh(id: string): void
   /**
@@ -71,6 +74,8 @@ interface Scan {
   readonly blocks: readonly CanvasBlock[]
   readonly hashes: ReadonlySet<string>
   readonly newest?: string
+  /** The newest message that is not a reply still being written. */
+  readonly settled?: string
   /** Whether each assistant message has completed. */
   readonly complete: ReadonlyMap<string, boolean>
 }
@@ -181,14 +186,16 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     const seenParts = new Set<string>()
     const seenBlocks = new Set<string>()
     let newest: string | undefined
+    let settled: string | undefined
     let sorted = true
 
     for (const message of merged()) {
       const id = message?.id
       if (typeof id !== "string" || (revert !== undefined && id >= revert)) continue
       if (newest === undefined || id > newest) newest = id
+      const done = message.type !== "assistant" || !!message.time?.completed
+      if (done && (settled === undefined || id > settled)) settled = id
       if (message.type !== "assistant") continue
-      const done = !!message.time?.completed
       complete.set(id, done)
       const content = message.content
       if (!Array.isArray(content)) continue
@@ -237,7 +244,13 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     for (const key of parts.keys()) if (!seenParts.has(key)) parts.delete(key)
     for (const key of canvasBlocks.keys()) if (!seenBlocks.has(key)) canvasBlocks.delete(key)
     if (!sorted) blocks.sort((a, b) => compareRefs(a.ref, b.ref))
-    return { blocks, hashes, ...(newest !== undefined ? { newest } : {}), complete }
+    return {
+      blocks,
+      hashes,
+      ...(newest !== undefined ? { newest } : {}),
+      ...(settled !== undefined ? { settled } : {}),
+      complete,
+    }
   })
 
   const newest = createMemo(() => scan().newest)
@@ -299,8 +312,11 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     return memo()
   }
 
-  // The newest message when the index first became ready; only canvases that start after it are live.
-  const watermark = createMemo<string | undefined>((previous) => previous ?? (ready() ? (newest() ?? "") : undefined))
+  // The newest settled message when the index first became ready: canvases that start after it are live, including
+  // those in a reply that was still being written then (the session opened, or the app restarted, mid-reply).
+  const watermark = createMemo<string | undefined>(
+    (previous) => previous ?? (ready() ? (untrack(scan).settled ?? "") : undefined),
+  )
 
   const consumed = new Set<string>()
   const reported = new Set<string>()
@@ -317,6 +333,9 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
       for (const state of canvases()) {
         const id = state.id
         if (consumed.has(id) || retired.has(id)) continue
+        // Wait for the first patch: a patch with no base is an update to a canvas that started before the loaded
+        // messages, not a new canvas.
+        if (state.spec === null || state.missingBase) continue
         const messageID = state.first.messageID
         if (messageID > mark && complete.get(messageID) === false) ids.push(id)
       }

@@ -37,10 +37,12 @@
 }
 
 /* The app's dialog: 480px wide, as tall as its content up to the window less 32px, corners of 12px (a literal there
-   too). */
+   too). Centered in the window: the app's base reset sets every margin to 0, which removes the platform's auto
+   margins that center a modal dialog, so they are restored here. */
 [data-genui] [data-gu="dialog"] {
   width: min(calc(100vw - 32px), 480px);
   max-height: calc(100dvh - 32px);
+  margin: auto;
   border-radius: 12px;
   opacity: 0;
   scale: 0.98;

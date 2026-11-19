@@ -110,6 +110,14 @@ function Part(props: { readonly app: App; readonly part: AssistantPart }) {
         <div data-playground-tool>
           <Icon name="terminal" size="small" /> {(props.part as Extract<AssistantPart, { type: "tool" }>).name}
         </div>
+        {/* Tool output is Markdown on the session screen too, so its fenced blocks reach CodeBlock contributions. */}
+        <Show when={(props.part as Extract<AssistantPart, { type: "tool" }>).state.output}>
+          {(output) => (
+            <div data-playground-tool-output>
+              <MarkdownView text={output()} code={(block) => <CodeBlockView app={props.app} block={block} />} />
+            </div>
+          )}
+        </Show>
       </Match>
     </Switch>
   )
