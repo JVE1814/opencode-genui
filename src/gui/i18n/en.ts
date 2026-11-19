@@ -1,3 +1,4 @@
+import actions from "./actions.ts"
 import chrome from "./chrome.ts"
 import content from "./content.ts"
 import data from "./data.ts"
@@ -13,6 +14,7 @@ export const en: Readonly<Record<string, string>> = {
   ...inputs,
   ...data,
   ...overlay,
+  ...actions,
 }
 
 export default en
