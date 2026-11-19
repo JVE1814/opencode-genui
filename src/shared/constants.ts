@@ -21,3 +21,9 @@ export const DEFAULT_CANVAS = "main"
 
 /** Prefix of the canvas panel's tab ids; a tab's host key is `${PLUGIN_ID}:${CANVAS_TAB_PREFIX}${canvasId}`. */
 export const CANVAS_TAB_PREFIX = "canvas."
+
+/**
+ * State root for UI state the user types that must never be persisted (password inputs). The normalizer binds secret
+ * inputs under it; the tracked store keeps edits under it in memory only.
+ */
+export const UI_SECRET_ROOT = "__genui_secret"
