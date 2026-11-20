@@ -1,13 +1,199 @@
 diff --git a/dist/index.js b/dist/index.js
-index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a69915d69f968 100644
+index 7ddfd3c5374c35e09edb649c90805d303245f780..abb0400f166ab471587748e8e189db19f4763ff2 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -113,10 +113,14 @@ function StateProvider(props) {
-       changeListeners.delete(listener);
+@@ -30,6 +30,10 @@ __export(index_exports, {
+   VisibilityProvider: () => VisibilityProvider,
+   buildSpecFromParts: () => buildSpecFromParts,
+   createRenderer: () => createRenderer,
++  currentWork: () => currentWork,
++  evaluationsWaiting: () => evaluationsWaiting,
++  EvaluationLendContext: () => EvaluationLendContext,
++  RepeatRowsContext: () => RepeatRowsContext,
+   createStateStore: () => import_core8.createStateStore,
+   defineRegistry: () => defineRegistry,
+   elementTreeSchema: () => elementTreeSchema,
+@@ -65,6 +69,134 @@ function computeInitialFlat(isControlled, initialState) {
+   if (Object.keys(initialState).length === 0) return {};
+   return (0, import_store_utils.flattenToPointers)(initialState);
+ }
++// opencode-genui patch: the work that watches and action lists do is bounded, for the whole window (every surface
++// and state store: a remount or a second surface cannot reset a bound). Work is what one change sets off: a user's edit
++// or event, the actions it runs, the watches their writes wake, and so on. Its wakes and actions are charged to it:
++// - MAX_WATCH_WAKES calls of watches' listeners (a write calls only the watches of its own path: see StateProvider);
++// - MAX_STATE_ACTIONS state actions (setState, pushState, removeState), by events and watches alike: a "select all"
++//   sets the item of each row from a watch in the row (up to four writes in each of 2,000 rows, about what a surface
++//   renders at most);
++// - MAX_SMALL_ACTIONS actions that are awaited (validateForm, custom actions: each re-evaluates the whole UI) or that
++//   run in a watch woken by another watch's write (a chain, which is what a loop is made of).
++// What does not fit is skipped, and the console says so, as does the state store whose work it was (its `noteSkipped`,
++// when it has one). Time is bounded per task: once watches and actions have run for
++// ACTIONS_SLICE_MS in one task (what the counts let through but is slow per action: a validateForm in a UI of two
++// thousand rows, a slow machine), a list woken directly waits for the next task, so the window answers in between, and
++// goes on there with what is left of its counts; a chain is skipped (a loop would only go on). Lists wait for at most
++// MAX_WAITING_TASKS tasks in a row, then are skipped too: work that keeps setting off more work that waits (through
++// what the UI does as it renders) cannot go on for good. New work, from a user's input event or in a later task, has
++// counts of its own.
++var BATCHED_ACTIONS = /* @__PURE__ */ new Set(["setState", "pushState", "removeState"]);
++var MAX_WATCH_WAKES = 4e3;
++var MAX_STATE_ACTIONS = 8e3;
++var MAX_SMALL_ACTIONS = 64;
++var ACTIONS_SLICE_MS = 50;
++var MAX_WAITING_TASKS = 40;
++var WAIT_FOR_NEXT_TASK = "wait";
++var USER_EVENTS = /* @__PURE__ */ new Set(["keydown", "keyup", "keypress", "beforeinput", "input", "change", "compositionend", "paste", "cut", "drop", "click", "dblclick", "auxclick", "contextmenu", "mousedown", "mouseup", "pointerdown", "pointerup", "touchstart", "touchend", "submit"]);
++var workTask = { timer: void 0, start: 0, work: void 0, event: void 0, deferred: false };
++var activeWork;
++var nextTaskJobs = [];
++var waitingTasks = 0;
++function ledgerNow() {
++  return typeof performance !== "undefined" ? performance.now() : Date.now();
++}
++function openWorkTask() {
++  const task = workTask;
++  if (task.timer === void 0) {
++    task.start = ledgerNow();
++    task.deferred = false;
++    task.event = void 0;
++    task.work = { wakes: 0, state: 0, small: 0, skipped: /* @__PURE__ */ new Set() };
++    task.timer = setTimeout(() => {
++      task.timer = void 0;
++      task.work = void 0;
++      // The tasks in a row in which lists waited (see runNextTaskJobs) end with one in which none did.
++      if (nextTaskJobs.length === 0) waitingTasks = 0;
++    }, 0);
++  }
++  return task;
++}
++// The work that what runs now belongs to: the action running (its writes, and the watches they wake), else this task's.
++// A user's input event (trusted, not focus or blur, which rendering can cause) starts work of its own: it may come before
++// the timer that ends the task, after a long one.
++function currentWork() {
++  const task = openWorkTask();
++  if (activeWork) return activeWork;
++  const event = globalThis.event;
++  if (event && event !== task.event && event.isTrusted && USER_EVENTS.has(event.type)) {
++    task.event = event;
++    task.work = { wakes: 0, state: 0, small: 0, skipped: /* @__PURE__ */ new Set() };
++  }
++  return task.work;
++}
++// opencode-genui patch: exported, for what keeps a change's writes together (genui's state store): an opaque object,
++// the same for every write of one change and all it sets off, also when its lists go on in later tasks.
++function runAsWork(work, run) {
++  const outer = activeWork;
++  activeWork = work;
++  try {
++    return (0, import_core.withExpansionAccount)(work, run);
++  } finally {
++    activeWork = outer;
++  }
++}
++function skipWork(work, why) {
++  if (!work.skipped.has(why)) {
++    work.skipped.add(why);
++    console.warn(`[json-render] Skipped watches and actions: ${why} (watches that keep waking each other, or one change that sets off too much work).`);
++  }
++  return false;
++}
++function takeWatchWake(work) {
++  openWorkTask();
++  if (work.wakes >= MAX_WATCH_WAKES) return skipWork(work, `watches woke ${MAX_WATCH_WAKES} times for one change`);
++  work.wakes++;
++  return true;
++}
++// true: run the action; false: skip it and the rest of its list; WAIT_FOR_NEXT_TASK: wait (see waitForNextTask), then ask
++// again.
++function takeAction(work, name, chained) {
++  const task = openWorkTask();
++  const state = BATCHED_ACTIONS.has(name);
++  const small = !state || chained;
++  if (state && work.state >= MAX_STATE_ACTIONS) return skipWork(work, `${MAX_STATE_ACTIONS} state actions ran for one change`);
++  if (small && work.small >= MAX_SMALL_ACTIONS) return skipWork(work, `${MAX_SMALL_ACTIONS} awaited or chained actions ran for one change`);
++  if (ledgerNow() - task.start > ACTIONS_SLICE_MS) {
++    if (chained) return skipWork(work, `watches set off by other watches were still running after ${ACTIONS_SLICE_MS} ms`);
++    if (waitingTasks >= MAX_WAITING_TASKS) return skipWork(work, `watches and actions kept waiting for ${MAX_WAITING_TASKS} tasks in a row`);
++    if (!task.deferred) {
++      task.deferred = true;
++      console.warn(`[json-render] Deferred watches and actions to the next task: they ran for ${ACTIONS_SLICE_MS} ms without a break.`);
++    }
++    return WAIT_FOR_NEXT_TASK;
++  }
++  if (state) work.state++;
++  if (small) work.small++;
++  return true;
++}
++// Resolves in the next task, which has a time slice of its own, with what `job` returned there. One timer runs every job
++// that waits, in order and in one batch: the writes of all of them re-evaluate the UI once.
++function waitForNextTask(job) {
++  return new Promise((resolve, reject) => {
++    nextTaskJobs.push({ job, resolve, reject });
++    if (nextTaskJobs.length === 1) setTimeout(runNextTaskJobs, 0);
++  });
++}
++function runNextTaskJobs() {
++  const jobs = nextTaskJobs;
++  nextTaskJobs = [];
++  waitingTasks++;
++  (0, import_solid_js.batch)(() => {
++    for (const { job, resolve, reject } of jobs) {
++      try {
++        resolve(job?.());
++      } catch (error) {
++        reject(error);
++      }
++    }
++  });
++}
+ function StateProvider(props) {
+   let internalStore;
+   if (!props.store) {
+@@ -103,24 +235,70 @@ function StateProvider(props) {
+       store().update(updates);
+     }
+   });
+-  const [state, setState] = (0, import_solid_js.createSignal)(store().getSnapshot(), {
++  // opencode-genui patch: the snapshot the state signal starts with (see the effect that subscribes to the store).
++  const mountedSnapshot = store().getSnapshot();
++  const [state, setState] = (0, import_solid_js.createSignal)(mountedSnapshot, {
+     equals: false
+   });
+   const changeListeners = /* @__PURE__ */ new Set();
+-  const subscribeChanges = (listener) => {
+-    changeListeners.add(listener);
++  // opencode-genui patch: a listener that names the paths it reacts to (a watch) is kept under each of them, and a
++  // change calls only the listeners of its paths. Upstream every write called every watch's listener: a watch in each of
++  // N rows whose actions make K writes cost N × K × N calls for one change. Each call is a wake, charged to the work the
++  // change belongs to (see takeWatchWake). Other listeners hear every change, as upstream.
++  const pathListeners = /* @__PURE__ */ new Map();
++  let listenerSeq = 0;
++  const subscribeChanges = (listener, paths) => {
++    if (!Array.isArray(paths)) {
++      changeListeners.add(listener);
++      return () => {
++        changeListeners.delete(listener);
++      };
++    }
++    const entry = { listener, seq: ++listenerSeq, live: true };
++    for (const path of paths) {
++      let entries = pathListeners.get(path);
++      if (!entries) pathListeners.set(path, entries = /* @__PURE__ */ new Set());
++      entries.add(entry);
++    }
+     return () => {
+-      changeListeners.delete(listener);
++      entry.live = false;
++      for (const path of paths) {
++        const entries = pathListeners.get(path);
++        if (!entries) continue;
++        entries.delete(entry);
++        if (entries.size === 0) pathListeners.delete(path);
++      }
      };
    };
 +  // opencode-genui patch: the watches one change wakes run their first actions in one batch, so the UI re-evaluates
-+  // once for all of their writes instead of once per write (a watch in each of N rows cost N passes over N rows).
++  // once for all of their writes instead of once per write (a watch in each of N rows cost N passes over N rows). They
++  // are called in the order they subscribed, each once.
    const notifyChanges = (changes) => {
 -    for (const listener of changeListeners) {
 -      listener(changes);
@@ -16,11 +202,96 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +      for (const listener of changeListeners) {
 +        listener(changes);
 +      }
++      let woken = changes.length === 1 ? pathListeners.get(changes[0].path) : void 0;
++      if (changes.length > 1) {
++        const all = /* @__PURE__ */ new Set();
++        for (const change of changes) for (const entry of pathListeners.get(change.path) ?? []) all.add(entry);
++        woken = [...all].sort((a, b) => a.seq - b.seq);
++      }
++      if (!woken) return;
++      const work = currentWork();
++      for (const entry of woken) {
++        if (!entry.live) continue;
++        if (!takeWatchWake(work)) {
++          noteSkipped();
++          return;
++        }
++        entry.listener(changes, work);
++      }
 +    });
    };
    (0, import_solid_js.createEffect)(() => {
      const s = store();
-@@ -715,9 +719,15 @@ function RepeatScopeProvider(props) {
+-    setState(s.getSnapshot());
++    if (s.getSnapshot() !== mountedSnapshot) setState(s.getSnapshot());
+     const unsubscribe = s.subscribe(() => {
+       setState(s.getSnapshot());
+     });
+@@ -164,6 +342,10 @@ function StateProvider(props) {
+   };
+   const get = (path) => store().get(path);
+   const getSnapshot = () => store().getSnapshot();
++  // opencode-genui patch: work for this store was skipped (see the ledger).
++  function noteSkipped() {
++    store().noteSkipped?.();
++  }
+   const ctx = {
+     get state() {
+       return state();
+@@ -172,7 +354,8 @@ function StateProvider(props) {
+     set,
+     update,
+     getSnapshot,
+-    subscribeChanges
++    subscribeChanges,
++    noteSkipped
+   };
+   return (0, import_web.createComponent)(StateContext.Provider, {
+     value: ctx,
+@@ -307,6 +490,8 @@ function ValidationProvider(props) {
+       };
+     });
+   };
++  // opencode-genui patch: while validateAll runs, results are collected here and written once at its end.
++  let collecting;
+   const validate = (path, config) => {
+     const currentState = getSnapshot();
+     const segments = path.split("/").filter(Boolean);
+@@ -329,6 +514,10 @@ function ValidationProvider(props) {
+       validated: true,
+       result
+     };
++    if (collecting) {
++      collecting[path] = newFieldState;
++      return result;
++    }
+     fieldStatesRef = {
+       ...fieldStatesRef,
+       [path]: newFieldState
+@@ -358,11 +547,18 @@ function ValidationProvider(props) {
+   };
+   const validateAll = () => {
+     let allValid = true;
+-    for (const [path, config] of Object.entries(fieldConfigs())) {
+-      const result = validate(path, config);
+-      if (!result.valid) {
+-        allValid = false;
++    collecting = { ...fieldStatesRef };
++    try {
++      for (const [path, config] of Object.entries(fieldConfigs())) {
++        const result = validate(path, config);
++        if (!result.valid) {
++          allValid = false;
++        }
+       }
++    } finally {
++      fieldStatesRef = collecting;
++      collecting = void 0;
++      setFieldStates(fieldStatesRef);
+     }
+     return allValid;
+   };
+@@ -715,9 +911,15 @@ function RepeatScopeProvider(props) {
    return (0, import_web12.createComponent)(RepeatScopeContext.Provider, {
      get value() {
        return {
@@ -39,7 +310,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
        };
      },
      get children() {
-@@ -842,6 +852,109 @@ function useDevtoolsActive() {
+@@ -842,7 +1044,163 @@ function useDevtoolsActive() {
    (0, import_solid_js6.onCleanup)(unsub);
    return active;
  }
@@ -47,13 +318,15 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +function resolvePropsGuarded(rawProps, ctx, type) {
 +  try {
 +    return (0, import_core6.resolveElementProps)(rawProps, ctx);
-+  } catch {
++  } catch (error) {
++    if (error?.evaluationDeferred) throw error;
 +    const resolved = {};
 +    for (const [key, value] of Object.entries(rawProps ?? {})) {
 +      try {
 +        resolved[key] = (0, import_core6.resolvePropValue)(value, ctx);
 +      } catch (error) {
-+        console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
++        if (error?.evaluationDeferred) throw error;
++        if (!error?.expansionLimit) console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
 +        resolved[key] = void 0;
 +      }
 +    }
@@ -65,51 +338,85 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +// (every write re-evaluates the whole UI, so a list of K writes in a UI of E elements cost K × E). Other actions are
 +// awaited as before, and run after a microtask once a batch ran before them (as upstream after every action): by then
 +// any batch the list runs in has ended, so what the writes showed has mounted (validateForm knows its fields).
-+// `take` is asked before each action; false ends the list.
-+var BATCHED_ACTIONS = /* @__PURE__ */ new Set(["setState", "pushState", "removeState"]);
-+async function runActionList(bindings, run, take) {
++// Each action is charged to `work` first (see takeAction): the list ends where one is skipped, and waits for the next
++// task where one must wait, not running meanwhile (`pause(true)`, then `pause(false)`); a run of state actions goes on
++// there, in the batch of all that waited (see waitForNextTask). Each action runs as part of `work`. `away(true)` says
++// that the list waits for a later task, `away(false)` that it runs again (as its batch starts, or as it goes on).
++async function runActionList(bindings, run, work, chained, pause, away) {
 +  let index = 0;
++  const runBatch = () => {
++    let verdict = true;
++    (0, import_solid_js.batch)(() => {
++      while (index < bindings.length && BATCHED_ACTIONS.has(bindings[index]?.action)) {
++        verdict = takeAction(work, bindings[index].action, chained);
++        if (verdict !== true) return;
++        const binding = bindings[index++];
++        runAsWork(work, () => run(binding)).catch(console.error);
++      }
++    });
++    return verdict;
++  };
++  const wait = async (job) => {
++    pause?.(true);
++    away?.(true);
++    let back = false;
++    const comeBack = () => {
++      if (back) return;
++      back = true;
++      away?.(false);
++    };
++    try {
++      return await waitForNextTask(job && (() => {
++        pause?.(false);
++        comeBack();
++        try {
++          return job();
++        } finally {
++          pause?.(true);
++        }
++      }));
++    } finally {
++      pause?.(false);
++      comeBack();
++    }
++  };
 +  while (index < bindings.length) {
 +    const name = bindings[index]?.action;
 +    if (BATCHED_ACTIONS.has(name)) {
-+      let ended = false;
-+      (0, import_solid_js.batch)(() => {
-+        while (index < bindings.length && BATCHED_ACTIONS.has(bindings[index]?.action)) {
-+          if (!take()) {
-+            ended = true;
-+            return;
-+          }
-+          run(bindings[index++]).catch(console.error);
-+        }
-+      });
-+      if (ended) return;
++      let verdict = runBatch();
++      while (verdict === WAIT_FOR_NEXT_TASK) verdict = await wait(runBatch);
++      if (verdict !== true) return false;
 +      if (index < bindings.length) await void 0;
 +      continue;
 +    }
-+    if (!take()) return;
-+    await run(bindings[index++]);
++    const verdict = takeAction(work, name, chained);
++    if (verdict === WAIT_FOR_NEXT_TASK) {
++      await wait();
++      continue;
++    }
++    if (!verdict) return false;
++    const binding = bindings[index++];
++    await runAsWork(work, () => run(binding));
 +  }
++  return true;
 +}
 +// opencode-genui patch: watches are bounded. Upstream, a watch whose actions write a path it (or another watch)
 +// watches runs again on its own write; with an awaited action in between, each round passes through a microtask only, so
-+// such a loop never yields to the event loop and the window freezes. Three rules end every such loop:
++// such a loop never yields to the event loop and the window freezes. Rules that end every such loop:
 +// - A watch is not woken by the writes of its own actions (made directly, or by the watches those writes wake in turn).
 +// - A watch hears only the changes made after it subscribed: a row a watch adds is not woken by the change that woke the
 +//   watch (upstream it was, as the provider's listener set grows while it is iterated).
-+// - A watch woken by a write made while any watch of the same state store was running (a chain of watches) takes one
-+//   unit of the store's budget per action it runs, WATCH_CHAIN_ACTIONS_PER_TASK in all before the event loop gets a
-+//   turn; when the budget is spent, the rest of the chain is skipped. A chain is what a loop is made of, and the budget
-+//   belongs to the store, so it also holds across remounts (a watch that hides and re-shows its own parent is mounted
-+//   afresh every round) and for watches that add watching rows. It is small because every write re-evaluates the whole
-+//   UI, so a loop that grows the UI costs the square of its length.
-+// Watches woken directly by a user's edit, an event's actions or a streamed update are not charged: one change may wake
-+// a watch in every row of a long list (a "select all"), and each runs once, its whole action list, as a press would.
-+var WATCH_CHAIN_ACTIONS_PER_TASK = 64;
++// - A watch woken by a write made while any watch of the same state store was running (a chain of watches) charges each
++//   of its actions to the small count of its work, and is skipped past the time slice (see takeAction). One change may
++//   still wake a watch in every row of a long list (a "select all").
++// What is running and which change came when belongs to the state store, so it holds across remounts (a watch that
++// hides and re-shows its own parent is mounted afresh every round); the counts belong to the work. A watch whose list
++// waits for the next task is not running meanwhile: the user's edits then are not chained to it.
 +var watchBudgets = /* @__PURE__ */ new WeakMap();
 +function watchBudgetOf(stateStore) {
 +  let budget = watchBudgets.get(stateStore);
 +  if (!budget) {
-+    budget = { running: 0, executing: [], changes: /* @__PURE__ */ new WeakMap(), seq: 0, actions: 0, warned: false, timer: void 0 };
++    budget = { running: 0, executing: [], changes: /* @__PURE__ */ new WeakMap(), seq: 0 };
 +    watchBudgets.set(stateStore, budget);
 +  }
 +  return budget;
@@ -122,22 +429,6 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +  }
 +  return note;
 +}
-+function takeWatchAction(budget, path) {
-+  if (budget.timer === void 0) budget.timer = setTimeout(() => {
-+    budget.timer = void 0;
-+    budget.actions = 0;
-+    budget.warned = false;
-+  }, 0);
-+  if (budget.actions >= WATCH_CHAIN_ACTIONS_PER_TASK) {
-+    if (!budget.warned) {
-+      budget.warned = true;
-+      console.warn(`[json-render] Skipped the watch on "${path}": watches set off by other watches ran ${WATCH_CHAIN_ACTIONS_PER_TASK} actions without a break (watches that keep waking each other).`);
-+    }
-+    return false;
-+  }
-+  budget.actions++;
-+  return true;
-+}
 +function executeAsWatch(budget, watcher, run) {
 +  budget.executing.push(watcher);
 +  try {
@@ -146,32 +437,83 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +    budget.executing.pop();
 +  }
 +}
++// opencode-genui patch: an element's props and `visible` are evaluated for rendering, as deferrable evaluations (see
++// withEvaluation in patches/@json-render%2Fcore): once a task has evaluated expressions for its slice, the elements left
++// wait for the next task, which evaluates as many as its slice allows, and so on, while the window answers in between.
++// An element shows nothing until its first evaluation is done; one that shows keeps what it last resolved meanwhile.
++// What the task that deferred an element lends to its later evaluation (EvaluationLendContext, provided by the host: a
++// runner, such as one that puts back the activation of the press that showed it) wraps that evaluation.
++var PENDING_ELEMENT = Object.freeze({ type: "", props: {} });
++var EvaluationLendContext = (0, import_solid_js6.createContext)(void 0);
++var evaluationSignals = /* @__PURE__ */ new Map();
++var evaluationRetryScheduled = false;
++function waitForEvaluation(lend) {
++  const runner = typeof lend === "function" ? lend() ?? null : null;
++  let signal = evaluationSignals.get(runner);
++  if (!signal) evaluationSignals.set(runner, signal = (0, import_solid_js6.createSignal)(void 0, { equals: false }));
++  signal[0]();
++  if (!evaluationRetryScheduled) {
++    evaluationRetryScheduled = true;
++    setTimeout(() => {
++      evaluationRetryScheduled = false;
++      const waiting = evaluationSignals;
++      evaluationSignals = /* @__PURE__ */ new Map();
++      for (const [runner, signal] of waiting) {
++        if (runner) runner(() => signal[1](void 0));
++        else signal[1](void 0);
++      }
++    }, 0);
++  }
++}
++// opencode-genui patch: exported. Whether evaluations wait for a later task (for tests).
++function evaluationsWaiting() {
++  return evaluationRetryScheduled;
++}
  function ElementRenderer(props) {
++  const evaluationLend = (0, import_solid_js6.useContext)(EvaluationLendContext);
    const repeatScope = useRepeatScope();
    const {
-@@ -875,30 +988,40 @@ function ElementRenderer(props) {
+     ctx
+@@ -875,30 +1233,59 @@ function ElementRenderer(props) {
        directives
      };
    });
 -  const isVisible = (0, import_solid_js6.createMemo)(() => props.element.visible === void 0 ? true : (0, import_core6.evaluateVisibility)(props.element.visible, fullCtx()));
+-  const emit = async (eventName) => {
 +  // opencode-genui patch: a prop or condition that throws (an object with two directive keys, a $cond that is not a
 +  // condition) resolves to undefined, or hides the element, instead of blanking the parent through its boundary.
-+  const isVisible = (0, import_solid_js6.createMemo)(() => {
++  const isVisible = (0, import_solid_js6.createMemo)((previous) => {
 +    if (props.element.visible === void 0) return true;
 +    try {
-+      return (0, import_core6.evaluateVisibility)(props.element.visible, fullCtx());
++      return (0, import_core6.withEvaluation)(true, () => (0, import_core6.evaluateVisibility)(props.element.visible, fullCtx()));
 +    } catch (error) {
-+      console.warn(`[json-render] Could not evaluate "visible" of <${props.element.type}>:`, error);
++      if (error?.evaluationDeferred) {
++        waitForEvaluation(evaluationLend);
++        return previous ?? false;
++      }
++      if (!error?.expansionLimit) console.warn(`[json-render] Could not evaluate "visible" of <${props.element.type}>:`, error);
 +      return false;
 +    }
 +  });
 +  // opencode-genui patch: the action's params resolved against the live state (as upstream), and lists run through
-+  // runActionList.
++  // runActionList. The repeat scope is read through getters, only when a param needs it, and not through the fullCtx
++  // memo: an action runs in a batch of writes, where reading a memo that an earlier write made stale first runs every
++  // computation queued so far (every row's item, the repeat's row ids): a "select all" over N rows cost N × N.
 +  const prepareAction = (b) => {
 +    if (!b.params) return b;
 +    const liveCtx = {
-+      ...fullCtx(),
-+      stateModel: getSnapshot()
++      stateModel: getSnapshot(),
++      get repeatItem() {
++        return repeatScope?.item;
++      },
++      get repeatIndex() {
++        return repeatScope?.index;
++      },
++      get repeatBasePath() {
++        return repeatScope?.basePath;
++      },
++      functions,
++      directives
 +    };
 +    const resolved = {};
 +    for (const [key, val] of Object.entries(b.params)) {
@@ -182,7 +524,9 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +      params: resolved
 +    };
 +  };
-   const emit = async (eventName) => {
++  // opencode-genui patch: `away` (optional) hears when the list waits for a later task and when it runs again (see
++  // runActionList).
++  const emit = async (eventName, away) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
      if (!binding) return;
@@ -205,21 +549,23 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 -        params: resolved
 -      });
 -    }
-+    await runActionList(actionBindings, (b) => execute(prepareAction(b)), () => true);
++    const done = await runActionList(actionBindings, (b) => execute(prepareAction(b)), currentWork(), false, void 0, typeof away === "function" ? away : void 0);
++    if (!done) stateStore.noteSkipped?.();
    };
    const on = (eventName) => {
      const onBindings = props.element.on;
-@@ -924,32 +1047,31 @@ function ElementRenderer(props) {
+@@ -924,46 +1311,57 @@ function ElementRenderer(props) {
      if (!watchConfig) return;
      const paths = Object.keys(watchConfig);
      if (paths.length === 0) return;
+-    const unsubscribe = stateStore.subscribeChanges((changes) => {
+-      const changedPaths = new Set(changes.map((change) => change.path));
 +    const budget = watchBudgetOf(stateStore);
 +    const watcher = {};
 +    const since = budget.seq;
-     const unsubscribe = stateStore.subscribeChanges((changes) => {
++    const unsubscribe = stateStore.subscribeChanges((changes, work) => {
 +      const { seq, chained } = noteWatchChange(budget, changes);
 +      if (seq <= since || budget.executing.includes(watcher)) return;
-       const changedPaths = new Set(changes.map((change) => change.path));
        void (async () => {
 -        for (const path of paths) {
 -          if (!changedPaths.has(path)) continue;
@@ -245,24 +591,30 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +        budget.running++;
 +        try {
 +          for (const path of paths) {
-+            if (!changedPaths.has(path)) continue;
++            if (!changes.some((change) => change.path === path)) continue;
 +            const binding = watchConfig[path];
 +            if (!binding) continue;
 +            const bindings = Array.isArray(binding) ? binding : [binding];
-+            let spent = false;
-+            await runActionList(bindings, (b) => executeAsWatch(budget, watcher, () => execute(prepareAction(b))), () => {
-+              if (!chained || takeWatchAction(budget, path)) return true;
-+              spent = true;
-+              return false;
++            const done = await runActionList(bindings, (b) => executeAsWatch(budget, watcher, () => execute(prepareAction(b))), work, chained, (waiting) => {
++              budget.running += waiting ? -1 : 1;
              });
-+            if (spent) return;
++            if (!done) {
++              stateStore.noteSkipped?.();
++              return;
++            }
            }
 +        } finally {
 +          budget.running--;
          }
-       })().catch(console.error);
+-      })().catch(console.error);
+-    });
++      })().catch((error) => {
++        if (!error?.expansionLimit) console.error(error);
++      });
++    }, paths);
+     (0, import_solid_js6.onCleanup)(() => {
+       unsubscribe();
      });
-@@ -959,11 +1081,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = (0, import_solid_js6.createMemo)(() => {
      const rawProps = props.element.props;
@@ -273,14 +625,31 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +      return void 0;
 +    }
    });
-   const resolvedElement = (0, import_solid_js6.createMemo)(() => {
+-  const resolvedElement = (0, import_solid_js6.createMemo)(() => {
++  const resolvedElement = (0, import_solid_js6.createMemo)((previous) => {
      const rawProps = props.element.props;
 -    const resolvedProps = (0, import_core6.resolveElementProps)(rawProps, fullCtx());
-+    const resolvedProps = resolvePropsGuarded(rawProps, fullCtx(), props.element.type);
++    let resolvedProps;
++    try {
++      resolvedProps = (0, import_core6.withEvaluation)(true, () => resolvePropsGuarded(rawProps, fullCtx(), props.element.type));
++    } catch (error) {
++      if (!error?.evaluationDeferred) throw error;
++      waitForEvaluation(evaluationLend);
++      return previous ?? PENDING_ELEMENT;
++    }
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -1076,10 +1202,14 @@ function ElementRendererContent(props) {
+@@ -971,7 +1369,7 @@ function ElementRenderer(props) {
+   });
+   return (0, import_web18.createComponent)(import_solid_js6.Show, {
+     get when() {
+-      return isVisible();
++      return isVisible() && resolvedElement() !== PENDING_ELEMENT;
+     },
+     get children() {
+       return (0, import_web18.createComponent)(import_solid_js6.ErrorBoundary, {
+@@ -1076,10 +1474,14 @@ function ElementRendererContent(props) {
            });
          }
        });
@@ -295,7 +664,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
          get emit() {
            return props.emit;
          },
-@@ -1111,6 +1241,77 @@ function ElementRendererContent(props) {
+@@ -1111,8 +1513,85 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -364,21 +733,35 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 +// items, a few hundred kilobytes of state, mounted a renderer per row for seconds. genui renders at most as much per
 +// surface in all, and reports the rest (src/gui/element.ts).
 +var MAX_REPEAT_ROWS = 2e3;
-+function limitRows(ids) {
-+  return ids.length > MAX_REPEAT_ROWS ? ids.slice(0, MAX_REPEAT_ROWS) : ids;
++// opencode-genui patch: exported. What the host provides to the elements it renders: an accessor of how many rows the
++// element's repeat may render (undefined: up to MAX_REPEAT_ROWS).
++var RepeatRowsContext = (0, import_solid_js6.createContext)(void 0);
++function limitRows(ids, limit) {
++  const max = typeof limit === "number" && limit < MAX_REPEAT_ROWS ? Math.max(0, limit) : MAX_REPEAT_ROWS;
++  return ids.length > max ? ids.slice(0, max) : ids;
 +}
++var NO_ROWS = Object.freeze([]);
 +function sameRowKeys(a, b) {
 +  return a.length === b.length && a.every((key, i) => key === b[i]);
 +}
  function RepeatChildren(props) {
    const stateStore = useStateStore();
++  const rowLimit = (0, import_solid_js6.useContext)(RepeatRowsContext);
    const repeat = () => props.element.repeat;
-@@ -1123,17 +1324,19 @@ function RepeatChildren(props) {
+   const parentScope = useRepeatScope();
+   const statePath = () => {
+@@ -1122,18 +1601,25 @@ function RepeatChildren(props) {
+     }
      return resolved;
    };
-   const items = () => statePath() === void 0 ? [] : (0, import_core6.getByPath)(stateStore.state, statePath()) ?? [];
+-  const items = () => statePath() === void 0 ? [] : (0, import_core6.getByPath)(stateStore.state, statePath()) ?? [];
++  // opencode-genui patch: the list is read in one memo, and each row's item in another (both compare by identity: the
++  // state store replaces what a write changes). Upstream every row read the list from the state on every write anywhere,
++  // so every write re-evaluated every row of every repeat and all they render: with a watch in each of N rows that
++  // runs validateForm (each run writes its result), one key press cost N passes over N rows.
++  const items = (0, import_solid_js6.createMemo)(() => statePath() === void 0 ? NO_ROWS : (0, import_core6.getByPath)(stateStore.state, statePath()) ?? NO_ROWS);
 +  const rowIds = createRowIds();
-+  const rowKeys = (0, import_solid_js6.createMemo)(() => limitRows(rowIds(items(), repeat())), void 0, {
++  const rowKeys = (0, import_solid_js6.createMemo)(() => limitRows(rowIds(items(), repeat()), typeof rowLimit === "function" ? rowLimit() : void 0), void 0, {
 +    equals: sameRowKeys
 +  });
    return (0, import_web18.createComponent)(import_solid_js6.For, {
@@ -392,15 +775,16 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
 -        return r.key && typeof itemValue === "object" && itemValue !== null ? String(itemValue[r.key] ?? index()) : String(index());
 -      };
 +    children: (_rowKey, index) => {
++      const item = (0, import_solid_js6.createMemo)(() => items()[index()]);
        return (0, import_web18.createComponent)(RepeatScopeProvider, {
 -        item: itemValue,
 +        get item() {
-+          return items()[index()];
++          return item();
 +        },
          get index() {
            return index();
          },
-@@ -1161,6 +1364,7 @@ function RepeatChildren(props) {
+@@ -1161,6 +1647,7 @@ function RepeatChildren(props) {
                    get element() {
                      return el();
                    },
@@ -408,25 +792,213 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a6991
                    get spec() {
                      return props.spec;
                    },
+@@ -1915,6 +2402,10 @@ function useChatUI(options) {
+   buildSpecFromParts,
+   createRenderer,
+   createStateStore,
++  currentWork,
++  evaluationsWaiting,
++  EvaluationLendContext,
++  RepeatRowsContext,
+   defineRegistry,
+   elementTreeSchema,
+   flatToTree,
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b55b540312 100644
+index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..bf14fa8f097a8bc556bcf3b10ceaa1d450ab6055 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -5,7 +5,7 @@ import {
+@@ -5,8 +5,8 @@ import {
  
  // src/contexts/state.tsx
  import { createComponent as _$createComponent } from "solid-js/web";
 -import { createContext, useContext, createSignal, createEffect, createMemo, onCleanup } from "solid-js";
+-import { getByPath, createStateStore } from "@json-render/core";
 +import { batch, createContext, useContext, createSignal, createEffect, createMemo, onCleanup } from "solid-js";
- import { getByPath, createStateStore } from "@json-render/core";
++import { getByPath, createStateStore, withExpansionAccount } from "@json-render/core";
  import { flattenToPointers } from "@json-render/core/store-utils";
  var StateContext = createContext(null);
-@@ -62,10 +62,14 @@ function StateProvider(props) {
-       changeListeners.delete(listener);
+ function computeInitialFlat(isControlled, initialState) {
+@@ -14,6 +14,134 @@ function computeInitialFlat(isControlled, initialState) {
+   if (Object.keys(initialState).length === 0) return {};
+   return flattenToPointers(initialState);
+ }
++// opencode-genui patch: the work that watches and action lists do is bounded, for the whole window (every surface
++// and state store: a remount or a second surface cannot reset a bound). Work is what one change sets off: a user's edit
++// or event, the actions it runs, the watches their writes wake, and so on. Its wakes and actions are charged to it:
++// - MAX_WATCH_WAKES calls of watches' listeners (a write calls only the watches of its own path: see StateProvider);
++// - MAX_STATE_ACTIONS state actions (setState, pushState, removeState), by events and watches alike: a "select all"
++//   sets the item of each row from a watch in the row (up to four writes in each of 2,000 rows, about what a surface
++//   renders at most);
++// - MAX_SMALL_ACTIONS actions that are awaited (validateForm, custom actions: each re-evaluates the whole UI) or that
++//   run in a watch woken by another watch's write (a chain, which is what a loop is made of).
++// What does not fit is skipped, and the console says so, as does the state store whose work it was (its `noteSkipped`,
++// when it has one). Time is bounded per task: once watches and actions have run for
++// ACTIONS_SLICE_MS in one task (what the counts let through but is slow per action: a validateForm in a UI of two
++// thousand rows, a slow machine), a list woken directly waits for the next task, so the window answers in between, and
++// goes on there with what is left of its counts; a chain is skipped (a loop would only go on). Lists wait for at most
++// MAX_WAITING_TASKS tasks in a row, then are skipped too: work that keeps setting off more work that waits (through
++// what the UI does as it renders) cannot go on for good. New work, from a user's input event or in a later task, has
++// counts of its own.
++var BATCHED_ACTIONS = /* @__PURE__ */ new Set(["setState", "pushState", "removeState"]);
++var MAX_WATCH_WAKES = 4e3;
++var MAX_STATE_ACTIONS = 8e3;
++var MAX_SMALL_ACTIONS = 64;
++var ACTIONS_SLICE_MS = 50;
++var MAX_WAITING_TASKS = 40;
++var WAIT_FOR_NEXT_TASK = "wait";
++var USER_EVENTS = /* @__PURE__ */ new Set(["keydown", "keyup", "keypress", "beforeinput", "input", "change", "compositionend", "paste", "cut", "drop", "click", "dblclick", "auxclick", "contextmenu", "mousedown", "mouseup", "pointerdown", "pointerup", "touchstart", "touchend", "submit"]);
++var workTask = { timer: void 0, start: 0, work: void 0, event: void 0, deferred: false };
++var activeWork;
++var nextTaskJobs = [];
++var waitingTasks = 0;
++function ledgerNow() {
++  return typeof performance !== "undefined" ? performance.now() : Date.now();
++}
++function openWorkTask() {
++  const task = workTask;
++  if (task.timer === void 0) {
++    task.start = ledgerNow();
++    task.deferred = false;
++    task.event = void 0;
++    task.work = { wakes: 0, state: 0, small: 0, skipped: /* @__PURE__ */ new Set() };
++    task.timer = setTimeout(() => {
++      task.timer = void 0;
++      task.work = void 0;
++      // The tasks in a row in which lists waited (see runNextTaskJobs) end with one in which none did.
++      if (nextTaskJobs.length === 0) waitingTasks = 0;
++    }, 0);
++  }
++  return task;
++}
++// The work that what runs now belongs to: the action running (its writes, and the watches they wake), else this task's.
++// A user's input event (trusted, not focus or blur, which rendering can cause) starts work of its own: it may come before
++// the timer that ends the task, after a long one.
++function currentWork() {
++  const task = openWorkTask();
++  if (activeWork) return activeWork;
++  const event = globalThis.event;
++  if (event && event !== task.event && event.isTrusted && USER_EVENTS.has(event.type)) {
++    task.event = event;
++    task.work = { wakes: 0, state: 0, small: 0, skipped: /* @__PURE__ */ new Set() };
++  }
++  return task.work;
++}
++// opencode-genui patch: exported, for what keeps a change's writes together (genui's state store): an opaque object,
++// the same for every write of one change and all it sets off, also when its lists go on in later tasks.
++function runAsWork(work, run) {
++  const outer = activeWork;
++  activeWork = work;
++  try {
++    return withExpansionAccount(work, run);
++  } finally {
++    activeWork = outer;
++  }
++}
++function skipWork(work, why) {
++  if (!work.skipped.has(why)) {
++    work.skipped.add(why);
++    console.warn(`[json-render] Skipped watches and actions: ${why} (watches that keep waking each other, or one change that sets off too much work).`);
++  }
++  return false;
++}
++function takeWatchWake(work) {
++  openWorkTask();
++  if (work.wakes >= MAX_WATCH_WAKES) return skipWork(work, `watches woke ${MAX_WATCH_WAKES} times for one change`);
++  work.wakes++;
++  return true;
++}
++// true: run the action; false: skip it and the rest of its list; WAIT_FOR_NEXT_TASK: wait (see waitForNextTask), then ask
++// again.
++function takeAction(work, name, chained) {
++  const task = openWorkTask();
++  const state = BATCHED_ACTIONS.has(name);
++  const small = !state || chained;
++  if (state && work.state >= MAX_STATE_ACTIONS) return skipWork(work, `${MAX_STATE_ACTIONS} state actions ran for one change`);
++  if (small && work.small >= MAX_SMALL_ACTIONS) return skipWork(work, `${MAX_SMALL_ACTIONS} awaited or chained actions ran for one change`);
++  if (ledgerNow() - task.start > ACTIONS_SLICE_MS) {
++    if (chained) return skipWork(work, `watches set off by other watches were still running after ${ACTIONS_SLICE_MS} ms`);
++    if (waitingTasks >= MAX_WAITING_TASKS) return skipWork(work, `watches and actions kept waiting for ${MAX_WAITING_TASKS} tasks in a row`);
++    if (!task.deferred) {
++      task.deferred = true;
++      console.warn(`[json-render] Deferred watches and actions to the next task: they ran for ${ACTIONS_SLICE_MS} ms without a break.`);
++    }
++    return WAIT_FOR_NEXT_TASK;
++  }
++  if (state) work.state++;
++  if (small) work.small++;
++  return true;
++}
++// Resolves in the next task, which has a time slice of its own, with what `job` returned there. One timer runs every job
++// that waits, in order and in one batch: the writes of all of them re-evaluate the UI once.
++function waitForNextTask(job) {
++  return new Promise((resolve, reject) => {
++    nextTaskJobs.push({ job, resolve, reject });
++    if (nextTaskJobs.length === 1) setTimeout(runNextTaskJobs, 0);
++  });
++}
++function runNextTaskJobs() {
++  const jobs = nextTaskJobs;
++  nextTaskJobs = [];
++  waitingTasks++;
++  batch(() => {
++    for (const { job, resolve, reject } of jobs) {
++      try {
++        resolve(job?.());
++      } catch (error) {
++        reject(error);
++      }
++    }
++  });
++}
+ function StateProvider(props) {
+   let internalStore;
+   if (!props.store) {
+@@ -52,24 +180,70 @@ function StateProvider(props) {
+       store().update(updates);
+     }
+   });
+-  const [state, setState] = createSignal(store().getSnapshot(), {
++  // opencode-genui patch: the snapshot the state signal starts with (see the effect that subscribes to the store).
++  const mountedSnapshot = store().getSnapshot();
++  const [state, setState] = createSignal(mountedSnapshot, {
+     equals: false
+   });
+   const changeListeners = /* @__PURE__ */ new Set();
+-  const subscribeChanges = (listener) => {
+-    changeListeners.add(listener);
++  // opencode-genui patch: a listener that names the paths it reacts to (a watch) is kept under each of them, and a
++  // change calls only the listeners of its paths. Upstream every write called every watch's listener: a watch in each of
++  // N rows whose actions make K writes cost N × K × N calls for one change. Each call is a wake, charged to the work the
++  // change belongs to (see takeWatchWake). Other listeners hear every change, as upstream.
++  const pathListeners = /* @__PURE__ */ new Map();
++  let listenerSeq = 0;
++  const subscribeChanges = (listener, paths) => {
++    if (!Array.isArray(paths)) {
++      changeListeners.add(listener);
++      return () => {
++        changeListeners.delete(listener);
++      };
++    }
++    const entry = { listener, seq: ++listenerSeq, live: true };
++    for (const path of paths) {
++      let entries = pathListeners.get(path);
++      if (!entries) pathListeners.set(path, entries = /* @__PURE__ */ new Set());
++      entries.add(entry);
++    }
+     return () => {
+-      changeListeners.delete(listener);
++      entry.live = false;
++      for (const path of paths) {
++        const entries = pathListeners.get(path);
++        if (!entries) continue;
++        entries.delete(entry);
++        if (entries.size === 0) pathListeners.delete(path);
++      }
      };
    };
 +  // opencode-genui patch: the watches one change wakes run their first actions in one batch, so the UI re-evaluates
-+  // once for all of their writes instead of once per write (a watch in each of N rows cost N passes over N rows).
++  // once for all of their writes instead of once per write (a watch in each of N rows cost N passes over N rows). They
++  // are called in the order they subscribed, each once.
    const notifyChanges = (changes) => {
 -    for (const listener of changeListeners) {
 -      listener(changes);
@@ -435,11 +1007,96 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +      for (const listener of changeListeners) {
 +        listener(changes);
 +      }
++      let woken = changes.length === 1 ? pathListeners.get(changes[0].path) : void 0;
++      if (changes.length > 1) {
++        const all = /* @__PURE__ */ new Set();
++        for (const change of changes) for (const entry of pathListeners.get(change.path) ?? []) all.add(entry);
++        woken = [...all].sort((a, b) => a.seq - b.seq);
++      }
++      if (!woken) return;
++      const work = currentWork();
++      for (const entry of woken) {
++        if (!entry.live) continue;
++        if (!takeWatchWake(work)) {
++          noteSkipped();
++          return;
++        }
++        entry.listener(changes, work);
++      }
 +    });
    };
    createEffect(() => {
      const s = store();
-@@ -664,9 +668,15 @@ function RepeatScopeProvider(props) {
+-    setState(s.getSnapshot());
++    if (s.getSnapshot() !== mountedSnapshot) setState(s.getSnapshot());
+     const unsubscribe = s.subscribe(() => {
+       setState(s.getSnapshot());
+     });
+@@ -113,6 +287,10 @@ function StateProvider(props) {
+   };
+   const get = (path) => store().get(path);
+   const getSnapshot = () => store().getSnapshot();
++  // opencode-genui patch: work for this store was skipped (see the ledger).
++  function noteSkipped() {
++    store().noteSkipped?.();
++  }
+   const ctx = {
+     get state() {
+       return state();
+@@ -121,7 +299,8 @@ function StateProvider(props) {
+     set,
+     update,
+     getSnapshot,
+-    subscribeChanges
++    subscribeChanges,
++    noteSkipped
+   };
+   return _$createComponent(StateContext.Provider, {
+     value: ctx,
+@@ -256,6 +435,8 @@ function ValidationProvider(props) {
+       };
+     });
+   };
++  // opencode-genui patch: while validateAll runs, results are collected here and written once at its end.
++  let collecting;
+   const validate = (path, config) => {
+     const currentState = getSnapshot();
+     const segments = path.split("/").filter(Boolean);
+@@ -278,6 +459,10 @@ function ValidationProvider(props) {
+       validated: true,
+       result
+     };
++    if (collecting) {
++      collecting[path] = newFieldState;
++      return result;
++    }
+     fieldStatesRef = {
+       ...fieldStatesRef,
+       [path]: newFieldState
+@@ -307,11 +492,18 @@ function ValidationProvider(props) {
+   };
+   const validateAll = () => {
+     let allValid = true;
+-    for (const [path, config] of Object.entries(fieldConfigs())) {
+-      const result = validate(path, config);
+-      if (!result.valid) {
+-        allValid = false;
++    collecting = { ...fieldStatesRef };
++    try {
++      for (const [path, config] of Object.entries(fieldConfigs())) {
++        const result = validate(path, config);
++        if (!result.valid) {
++          allValid = false;
++        }
+       }
++    } finally {
++      fieldStatesRef = collecting;
++      collecting = void 0;
++      setFieldStates(fieldStatesRef);
+     }
+     return allValid;
+   };
+@@ -664,9 +856,15 @@ function RepeatScopeProvider(props) {
    return _$createComponent5(RepeatScopeContext.Provider, {
      get value() {
        return {
@@ -458,16 +1115,16 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
        };
      },
      get children() {
-@@ -689,7 +699,7 @@ import { insert as _$insert2 } from "solid-js/web";
+@@ -689,7 +887,7 @@ import { insert as _$insert2 } from "solid-js/web";
  import { memo as _$memo2 } from "solid-js/web";
  import { createComponent as _$createComponent6 } from "solid-js/web";
  import { createContext as createContext6, useContext as useContext6, createMemo as createMemo3, createEffect as createEffect3, createSignal as createSignal4, onCleanup as onCleanup2, ErrorBoundary, Show, For } from "solid-js";
 -import { resolveElementProps, resolveBindings, resolveActionParam, resolveRepeatItemStatePath, resolveRepeatStatePath, evaluateVisibility as evaluateVisibility2, getByPath as getByPath2, isDevtoolsActive, subscribeDevtoolsActive, createDirectiveRegistry } from "@json-render/core";
-+import { resolveElementProps, resolvePropValue, resolveBindings, resolveActionParam, resolveRepeatItemStatePath, resolveRepeatStatePath, evaluateVisibility as evaluateVisibility2, getByPath as getByPath2, isDevtoolsActive, subscribeDevtoolsActive, createDirectiveRegistry } from "@json-render/core";
++import { resolveElementProps, resolvePropValue, resolveBindings, resolveActionParam, resolveRepeatItemStatePath, resolveRepeatStatePath, evaluateVisibility as evaluateVisibility2, getByPath as getByPath2, isDevtoolsActive, subscribeDevtoolsActive, createDirectiveRegistry, withEvaluation } from "@json-render/core";
  var _tmpl$2 = /* @__PURE__ */ _$template2(`<span style=display:contents>`);
  var EMPTY_FUNCTIONS = {};
  var FunctionsContext = createContext6(EMPTY_FUNCTIONS);
-@@ -706,6 +716,109 @@ function useDevtoolsActive() {
+@@ -706,7 +904,163 @@ function useDevtoolsActive() {
    onCleanup2(unsub);
    return active;
  }
@@ -475,13 +1132,15 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +function resolvePropsGuarded(rawProps, ctx, type) {
 +  try {
 +    return resolveElementProps(rawProps, ctx);
-+  } catch {
++  } catch (error) {
++    if (error?.evaluationDeferred) throw error;
 +    const resolved = {};
 +    for (const [key, value] of Object.entries(rawProps ?? {})) {
 +      try {
 +        resolved[key] = resolvePropValue(value, ctx);
 +      } catch (error) {
-+        console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
++        if (error?.evaluationDeferred) throw error;
++        if (!error?.expansionLimit) console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
 +        resolved[key] = void 0;
 +      }
 +    }
@@ -493,51 +1152,85 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +// (every write re-evaluates the whole UI, so a list of K writes in a UI of E elements cost K × E). Other actions are
 +// awaited as before, and run after a microtask once a batch ran before them (as upstream after every action): by then
 +// any batch the list runs in has ended, so what the writes showed has mounted (validateForm knows its fields).
-+// `take` is asked before each action; false ends the list.
-+var BATCHED_ACTIONS = /* @__PURE__ */ new Set(["setState", "pushState", "removeState"]);
-+async function runActionList(bindings, run, take) {
++// Each action is charged to `work` first (see takeAction): the list ends where one is skipped, and waits for the next
++// task where one must wait, not running meanwhile (`pause(true)`, then `pause(false)`); a run of state actions goes on
++// there, in the batch of all that waited (see waitForNextTask). Each action runs as part of `work`. `away(true)` says
++// that the list waits for a later task, `away(false)` that it runs again (as its batch starts, or as it goes on).
++async function runActionList(bindings, run, work, chained, pause, away) {
 +  let index = 0;
++  const runBatch = () => {
++    let verdict = true;
++    batch(() => {
++      while (index < bindings.length && BATCHED_ACTIONS.has(bindings[index]?.action)) {
++        verdict = takeAction(work, bindings[index].action, chained);
++        if (verdict !== true) return;
++        const binding = bindings[index++];
++        runAsWork(work, () => run(binding)).catch(console.error);
++      }
++    });
++    return verdict;
++  };
++  const wait = async (job) => {
++    pause?.(true);
++    away?.(true);
++    let back = false;
++    const comeBack = () => {
++      if (back) return;
++      back = true;
++      away?.(false);
++    };
++    try {
++      return await waitForNextTask(job && (() => {
++        pause?.(false);
++        comeBack();
++        try {
++          return job();
++        } finally {
++          pause?.(true);
++        }
++      }));
++    } finally {
++      pause?.(false);
++      comeBack();
++    }
++  };
 +  while (index < bindings.length) {
 +    const name = bindings[index]?.action;
 +    if (BATCHED_ACTIONS.has(name)) {
-+      let ended = false;
-+      batch(() => {
-+        while (index < bindings.length && BATCHED_ACTIONS.has(bindings[index]?.action)) {
-+          if (!take()) {
-+            ended = true;
-+            return;
-+          }
-+          run(bindings[index++]).catch(console.error);
-+        }
-+      });
-+      if (ended) return;
++      let verdict = runBatch();
++      while (verdict === WAIT_FOR_NEXT_TASK) verdict = await wait(runBatch);
++      if (verdict !== true) return false;
 +      if (index < bindings.length) await void 0;
 +      continue;
 +    }
-+    if (!take()) return;
-+    await run(bindings[index++]);
++    const verdict = takeAction(work, name, chained);
++    if (verdict === WAIT_FOR_NEXT_TASK) {
++      await wait();
++      continue;
++    }
++    if (!verdict) return false;
++    const binding = bindings[index++];
++    await runAsWork(work, () => run(binding));
 +  }
++  return true;
 +}
 +// opencode-genui patch: watches are bounded. Upstream, a watch whose actions write a path it (or another watch)
 +// watches runs again on its own write; with an awaited action in between, each round passes through a microtask only, so
-+// such a loop never yields to the event loop and the window freezes. Three rules end every such loop:
++// such a loop never yields to the event loop and the window freezes. Rules that end every such loop:
 +// - A watch is not woken by the writes of its own actions (made directly, or by the watches those writes wake in turn).
 +// - A watch hears only the changes made after it subscribed: a row a watch adds is not woken by the change that woke the
 +//   watch (upstream it was, as the provider's listener set grows while it is iterated).
-+// - A watch woken by a write made while any watch of the same state store was running (a chain of watches) takes one
-+//   unit of the store's budget per action it runs, WATCH_CHAIN_ACTIONS_PER_TASK in all before the event loop gets a
-+//   turn; when the budget is spent, the rest of the chain is skipped. A chain is what a loop is made of, and the budget
-+//   belongs to the store, so it also holds across remounts (a watch that hides and re-shows its own parent is mounted
-+//   afresh every round) and for watches that add watching rows. It is small because every write re-evaluates the whole
-+//   UI, so a loop that grows the UI costs the square of its length.
-+// Watches woken directly by a user's edit, an event's actions or a streamed update are not charged: one change may wake
-+// a watch in every row of a long list (a "select all"), and each runs once, its whole action list, as a press would.
-+var WATCH_CHAIN_ACTIONS_PER_TASK = 64;
++// - A watch woken by a write made while any watch of the same state store was running (a chain of watches) charges each
++//   of its actions to the small count of its work, and is skipped past the time slice (see takeAction). One change may
++//   still wake a watch in every row of a long list (a "select all").
++// What is running and which change came when belongs to the state store, so it holds across remounts (a watch that
++// hides and re-shows its own parent is mounted afresh every round); the counts belong to the work. A watch whose list
++// waits for the next task is not running meanwhile: the user's edits then are not chained to it.
 +var watchBudgets = /* @__PURE__ */ new WeakMap();
 +function watchBudgetOf(stateStore) {
 +  let budget = watchBudgets.get(stateStore);
 +  if (!budget) {
-+    budget = { running: 0, executing: [], changes: /* @__PURE__ */ new WeakMap(), seq: 0, actions: 0, warned: false, timer: void 0 };
++    budget = { running: 0, executing: [], changes: /* @__PURE__ */ new WeakMap(), seq: 0 };
 +    watchBudgets.set(stateStore, budget);
 +  }
 +  return budget;
@@ -550,22 +1243,6 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +  }
 +  return note;
 +}
-+function takeWatchAction(budget, path) {
-+  if (budget.timer === void 0) budget.timer = setTimeout(() => {
-+    budget.timer = void 0;
-+    budget.actions = 0;
-+    budget.warned = false;
-+  }, 0);
-+  if (budget.actions >= WATCH_CHAIN_ACTIONS_PER_TASK) {
-+    if (!budget.warned) {
-+      budget.warned = true;
-+      console.warn(`[json-render] Skipped the watch on "${path}": watches set off by other watches ran ${WATCH_CHAIN_ACTIONS_PER_TASK} actions without a break (watches that keep waking each other).`);
-+    }
-+    return false;
-+  }
-+  budget.actions++;
-+  return true;
-+}
 +function executeAsWatch(budget, watcher, run) {
 +  budget.executing.push(watcher);
 +  try {
@@ -574,32 +1251,83 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +    budget.executing.pop();
 +  }
 +}
++// opencode-genui patch: an element's props and `visible` are evaluated for rendering, as deferrable evaluations (see
++// withEvaluation in patches/@json-render%2Fcore): once a task has evaluated expressions for its slice, the elements left
++// wait for the next task, which evaluates as many as its slice allows, and so on, while the window answers in between.
++// An element shows nothing until its first evaluation is done; one that shows keeps what it last resolved meanwhile.
++// What the task that deferred an element lends to its later evaluation (EvaluationLendContext, provided by the host: a
++// runner, such as one that puts back the activation of the press that showed it) wraps that evaluation.
++var PENDING_ELEMENT = Object.freeze({ type: "", props: {} });
++var EvaluationLendContext = createContext6(void 0);
++var evaluationSignals = /* @__PURE__ */ new Map();
++var evaluationRetryScheduled = false;
++function waitForEvaluation(lend) {
++  const runner = typeof lend === "function" ? lend() ?? null : null;
++  let signal = evaluationSignals.get(runner);
++  if (!signal) evaluationSignals.set(runner, signal = createSignal4(void 0, { equals: false }));
++  signal[0]();
++  if (!evaluationRetryScheduled) {
++    evaluationRetryScheduled = true;
++    setTimeout(() => {
++      evaluationRetryScheduled = false;
++      const waiting = evaluationSignals;
++      evaluationSignals = /* @__PURE__ */ new Map();
++      for (const [runner, signal] of waiting) {
++        if (runner) runner(() => signal[1](void 0));
++        else signal[1](void 0);
++      }
++    }, 0);
++  }
++}
++// opencode-genui patch: exported. Whether evaluations wait for a later task (for tests).
++function evaluationsWaiting() {
++  return evaluationRetryScheduled;
++}
  function ElementRenderer(props) {
++  const evaluationLend = useContext6(EvaluationLendContext);
    const repeatScope = useRepeatScope();
    const {
-@@ -739,30 +852,40 @@ function ElementRenderer(props) {
+     ctx
+@@ -739,30 +1093,59 @@ function ElementRenderer(props) {
        directives
      };
    });
 -  const isVisible = createMemo3(() => props.element.visible === void 0 ? true : evaluateVisibility2(props.element.visible, fullCtx()));
+-  const emit = async (eventName) => {
 +  // opencode-genui patch: a prop or condition that throws (an object with two directive keys, a $cond that is not a
 +  // condition) resolves to undefined, or hides the element, instead of blanking the parent through its boundary.
-+  const isVisible = createMemo3(() => {
++  const isVisible = createMemo3((previous) => {
 +    if (props.element.visible === void 0) return true;
 +    try {
-+      return evaluateVisibility2(props.element.visible, fullCtx());
++      return withEvaluation(true, () => evaluateVisibility2(props.element.visible, fullCtx()));
 +    } catch (error) {
-+      console.warn(`[json-render] Could not evaluate "visible" of <${props.element.type}>:`, error);
++      if (error?.evaluationDeferred) {
++        waitForEvaluation(evaluationLend);
++        return previous ?? false;
++      }
++      if (!error?.expansionLimit) console.warn(`[json-render] Could not evaluate "visible" of <${props.element.type}>:`, error);
 +      return false;
 +    }
 +  });
 +  // opencode-genui patch: the action's params resolved against the live state (as upstream), and lists run through
-+  // runActionList.
++  // runActionList. The repeat scope is read through getters, only when a param needs it, and not through the fullCtx
++  // memo: an action runs in a batch of writes, where reading a memo that an earlier write made stale first runs every
++  // computation queued so far (every row's item, the repeat's row ids): a "select all" over N rows cost N × N.
 +  const prepareAction = (b) => {
 +    if (!b.params) return b;
 +    const liveCtx = {
-+      ...fullCtx(),
-+      stateModel: getSnapshot()
++      stateModel: getSnapshot(),
++      get repeatItem() {
++        return repeatScope?.item;
++      },
++      get repeatIndex() {
++        return repeatScope?.index;
++      },
++      get repeatBasePath() {
++        return repeatScope?.basePath;
++      },
++      functions,
++      directives
 +    };
 +    const resolved = {};
 +    for (const [key, val] of Object.entries(b.params)) {
@@ -610,7 +1338,9 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +      params: resolved
 +    };
 +  };
-   const emit = async (eventName) => {
++  // opencode-genui patch: `away` (optional) hears when the list waits for a later task and when it runs again (see
++  // runActionList).
++  const emit = async (eventName, away) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
      if (!binding) return;
@@ -633,21 +1363,23 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 -        params: resolved
 -      });
 -    }
-+    await runActionList(actionBindings, (b) => execute(prepareAction(b)), () => true);
++    const done = await runActionList(actionBindings, (b) => execute(prepareAction(b)), currentWork(), false, void 0, typeof away === "function" ? away : void 0);
++    if (!done) stateStore.noteSkipped?.();
    };
    const on = (eventName) => {
      const onBindings = props.element.on;
-@@ -788,32 +911,31 @@ function ElementRenderer(props) {
+@@ -788,46 +1171,57 @@ function ElementRenderer(props) {
      if (!watchConfig) return;
      const paths = Object.keys(watchConfig);
      if (paths.length === 0) return;
+-    const unsubscribe = stateStore.subscribeChanges((changes) => {
+-      const changedPaths = new Set(changes.map((change) => change.path));
 +    const budget = watchBudgetOf(stateStore);
 +    const watcher = {};
 +    const since = budget.seq;
-     const unsubscribe = stateStore.subscribeChanges((changes) => {
++    const unsubscribe = stateStore.subscribeChanges((changes, work) => {
 +      const { seq, chained } = noteWatchChange(budget, changes);
 +      if (seq <= since || budget.executing.includes(watcher)) return;
-       const changedPaths = new Set(changes.map((change) => change.path));
        void (async () => {
 -        for (const path of paths) {
 -          if (!changedPaths.has(path)) continue;
@@ -673,24 +1405,30 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +        budget.running++;
 +        try {
 +          for (const path of paths) {
-+            if (!changedPaths.has(path)) continue;
++            if (!changes.some((change) => change.path === path)) continue;
 +            const binding = watchConfig[path];
 +            if (!binding) continue;
 +            const bindings = Array.isArray(binding) ? binding : [binding];
-+            let spent = false;
-+            await runActionList(bindings, (b) => executeAsWatch(budget, watcher, () => execute(prepareAction(b))), () => {
-+              if (!chained || takeWatchAction(budget, path)) return true;
-+              spent = true;
-+              return false;
++            const done = await runActionList(bindings, (b) => executeAsWatch(budget, watcher, () => execute(prepareAction(b))), work, chained, (waiting) => {
++              budget.running += waiting ? -1 : 1;
              });
-+            if (spent) return;
++            if (!done) {
++              stateStore.noteSkipped?.();
++              return;
++            }
            }
 +        } finally {
 +          budget.running--;
          }
-       })().catch(console.error);
+-      })().catch(console.error);
+-    });
++      })().catch((error) => {
++        if (!error?.expansionLimit) console.error(error);
++      });
++    }, paths);
+     onCleanup2(() => {
+       unsubscribe();
      });
-@@ -823,11 +945,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = createMemo3(() => {
      const rawProps = props.element.props;
@@ -701,14 +1439,31 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +      return void 0;
 +    }
    });
-   const resolvedElement = createMemo3(() => {
+-  const resolvedElement = createMemo3(() => {
++  const resolvedElement = createMemo3((previous) => {
      const rawProps = props.element.props;
 -    const resolvedProps = resolveElementProps(rawProps, fullCtx());
-+    const resolvedProps = resolvePropsGuarded(rawProps, fullCtx(), props.element.type);
++    let resolvedProps;
++    try {
++      resolvedProps = withEvaluation(true, () => resolvePropsGuarded(rawProps, fullCtx(), props.element.type));
++    } catch (error) {
++      if (!error?.evaluationDeferred) throw error;
++      waitForEvaluation(evaluationLend);
++      return previous ?? PENDING_ELEMENT;
++    }
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -940,10 +1066,14 @@ function ElementRendererContent(props) {
+@@ -835,7 +1229,7 @@ function ElementRenderer(props) {
+   });
+   return _$createComponent6(Show, {
+     get when() {
+-      return isVisible();
++      return isVisible() && resolvedElement() !== PENDING_ELEMENT;
+     },
+     get children() {
+       return _$createComponent6(ErrorBoundary, {
+@@ -940,10 +1334,14 @@ function ElementRendererContent(props) {
            });
          }
        });
@@ -723,7 +1478,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
          get emit() {
            return props.emit;
          },
-@@ -975,6 +1105,77 @@ function ElementRendererContent(props) {
+@@ -975,8 +1373,85 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -792,21 +1547,35 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 +// items, a few hundred kilobytes of state, mounted a renderer per row for seconds. genui renders at most as much per
 +// surface in all, and reports the rest (src/gui/element.ts).
 +var MAX_REPEAT_ROWS = 2e3;
-+function limitRows(ids) {
-+  return ids.length > MAX_REPEAT_ROWS ? ids.slice(0, MAX_REPEAT_ROWS) : ids;
++// opencode-genui patch: exported. What the host provides to the elements it renders: an accessor of how many rows the
++// element's repeat may render (undefined: up to MAX_REPEAT_ROWS).
++var RepeatRowsContext = createContext6(void 0);
++function limitRows(ids, limit) {
++  const max = typeof limit === "number" && limit < MAX_REPEAT_ROWS ? Math.max(0, limit) : MAX_REPEAT_ROWS;
++  return ids.length > max ? ids.slice(0, max) : ids;
 +}
++var NO_ROWS = Object.freeze([]);
 +function sameRowKeys(a, b) {
 +  return a.length === b.length && a.every((key, i) => key === b[i]);
 +}
  function RepeatChildren(props) {
    const stateStore = useStateStore();
++  const rowLimit = useContext6(RepeatRowsContext);
    const repeat = () => props.element.repeat;
-@@ -987,17 +1188,19 @@ function RepeatChildren(props) {
+   const parentScope = useRepeatScope();
+   const statePath = () => {
+@@ -986,18 +1461,25 @@ function RepeatChildren(props) {
+     }
      return resolved;
    };
-   const items = () => statePath() === void 0 ? [] : getByPath2(stateStore.state, statePath()) ?? [];
+-  const items = () => statePath() === void 0 ? [] : getByPath2(stateStore.state, statePath()) ?? [];
++  // opencode-genui patch: the list is read in one memo, and each row's item in another (both compare by identity: the
++  // state store replaces what a write changes). Upstream every row read the list from the state on every write anywhere,
++  // so every write re-evaluated every row of every repeat and all they render: with a watch in each of N rows that
++  // runs validateForm (each run writes its result), one key press cost N passes over N rows.
++  const items = createMemo3(() => statePath() === void 0 ? NO_ROWS : getByPath2(stateStore.state, statePath()) ?? NO_ROWS);
 +  const rowIds = createRowIds();
-+  const rowKeys = createMemo3(() => limitRows(rowIds(items(), repeat())), void 0, {
++  const rowKeys = createMemo3(() => limitRows(rowIds(items(), repeat()), typeof rowLimit === "function" ? rowLimit() : void 0), void 0, {
 +    equals: sameRowKeys
 +  });
    return _$createComponent6(For, {
@@ -820,15 +1589,16 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
 -        return r.key && typeof itemValue === "object" && itemValue !== null ? String(itemValue[r.key] ?? index()) : String(index());
 -      };
 +    children: (_rowKey, index) => {
++      const item = createMemo3(() => items()[index()]);
        return _$createComponent6(RepeatScopeProvider, {
 -        item: itemValue,
 +        get item() {
-+          return items()[index()];
++          return item();
 +        },
          get index() {
            return index();
          },
-@@ -1025,6 +1228,7 @@ function RepeatChildren(props) {
+@@ -1025,6 +1507,7 @@ function RepeatChildren(props) {
                    get element() {
                      return el();
                    },
@@ -836,3 +1606,14 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b5
                    get spec() {
                      return props.spec;
                    },
+@@ -1795,6 +2278,10 @@ export {
+   useActions,
+   useBoundProp,
+   useChatUI,
++  currentWork,
++  evaluationsWaiting,
++  EvaluationLendContext,
++  RepeatRowsContext,
+   useFieldValidation,
+   useIsVisible,
+   useJsonRenderMessage,

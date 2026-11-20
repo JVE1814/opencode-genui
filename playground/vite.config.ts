@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+import { readdirSync, readFileSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import path from "node:path"
@@ -9,6 +11,41 @@ import { gui } from "@opencode/plugin/gui/vite"
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repo = path.resolve(here, "..")
 const fakeSdk = path.join(here, "fake-sdk/index.ts")
+
+/**
+ * A digest of the dependency patches (patches/) and of the installed files they change. Vite's dependency cache
+ * (node_modules/.vite) hashes the lockfile and only the patches folder's modification time, so after a patch changed
+ * (and the install applied it) the playground kept serving the old patched json-render, and the e2e tests of the new
+ * behavior failed. In the optimizer's options, which Vite hashes, the digest makes a changed patch re-optimize.
+ */
+export function patchDigest(root: string = repo): string {
+  const hash = createHash("sha256")
+  const dir = path.join(root, "patches")
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+      .filter((name) => name.endsWith(".patch"))
+      .sort()
+  } catch {
+    return "none"
+  }
+  for (const name of names) {
+    const text = readFileSync(path.join(dir, name), "utf8")
+    hash.update(`${name}\0${text}\0`)
+    // `@scope%2Fname@1.2.3.patch` patches node_modules/@scope/name; its `+++ b/<file>` lines name the files it changes.
+    const stem = name.slice(0, -".patch".length)
+    const pkg = decodeURIComponent(stem.slice(0, stem.lastIndexOf("@")))
+    for (const [, file] of text.matchAll(/^\+\+\+ b\/(.+)$/gm)) {
+      hash.update(`${file}\0`)
+      try {
+        hash.update(readFileSync(path.join(root, "node_modules", pkg, file!)))
+      } catch {
+        hash.update("missing")
+      }
+    }
+  }
+  return hash.digest("hex").slice(0, 16)
+}
 
 /** Builds the stub plugin with the same `gui()` preset as the real bundle, in memory, for `?bundle=stub`. */
 async function buildStubBundle(): Promise<string> {
@@ -89,6 +126,8 @@ export default defineConfig({
       "@opencode/ui/theme/resolve",
       "@opencode/ui/theme/v2/resolve",
     ],
+    // Hashed with the rest of these options: a changed patch (see patchDigest) re-optimizes the dependencies.
+    esbuildOptions: { banner: { js: `/* genui patches ${patchDigest()} */` } },
   },
   server: { port: 5178, fs: { allow: [repo] } },
   preview: { port: 5178 },

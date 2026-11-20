@@ -27,6 +27,14 @@
 //
 // Top-level fenced code blocks, at any indentation, are split out and shown with `ui.Code`, so they read and copy
 // exactly as written; copying a selection of the rest strips the joiners (see MarkdownText).
+//
+// What the renderer does with the text is bounded too (see MarkdownBudget): marked looks for the closing delimiter of
+// every `*`, `_` or `~` run that could open emphasis through the rest of its paragraph, so runs that never close cost
+// the square of their number (8,000 of them in 32 KB took 13 s), and KaTeX costs about 5 µs per character of math. Past
+// a text's budget, emphasis delimiters are written as character references (`&#42;`), which marked shows as the
+// character and never reads as a delimiter, and math is written as text. The rest of marked's work grows faster than
+// the text too (each inline token rescans the rest of its paragraph for math), so a text shows its first
+// MAX_MARKDOWN_TEXT characters.
 
 import { safeUrl } from "../../protocol/url.ts"
 
@@ -35,6 +43,32 @@ export const JOINER = "\u2060"
 
 /** The href of every link genui hands the renderer starts with this, then the encoded address (see `linkTarget`). */
 export const LINK_PREFIX = "#genui-link:"
+
+/**
+ * What the renderer may spend on one Markdown text, shared by its parts (see `prepareMarkdown`): `emphasis` in runs
+ * scanned (an opening delimiter run costs its paragraph's openers and a 300th of its paragraph's length: see
+ * emphasisCost), `math` in characters of math (and MATH_SPAN_COST per span or block).
+ */
+export interface MarkdownBudget {
+  emphasis: number
+  math: number
+}
+
+/** The emphasis budget per character of the text, and at most for one text. */
+export const EMPHASIS_PER_CHAR = 8
+export const MAX_EMPHASIS = 1_000_000
+/** The math budget of one text (about 0.1 to 0.2 s of KaTeX), and what each span or block costs on top of its length. */
+export const MAX_MATH = 20_000
+export const MATH_SPAN_COST = 40
+
+/** How much of one Markdown text is shown (about 0.3 s of marked's work at worst); the rest is cut, with "…". */
+export const MAX_MARKDOWN_TEXT = 40_000
+
+/** A fresh budget for a text of `length` characters. */
+export const markdownBudget = (length: number): MarkdownBudget => ({
+  emphasis: Math.min(MAX_EMPHASIS, EMPHASIS_PER_CHAR * length),
+  math: MAX_MATH,
+})
 
 /** One part of a Markdown text: prose for `ui.Markdown`, or a fenced code block for `ui.Code`. */
 export type MarkdownPart =
@@ -215,6 +249,39 @@ export function defuse(text: string, breaker = JOINER): string {
  * space breaks the same constructs, so text that only looks like math to this file stays safe (with a visible space).
  */
 const defuseMath = (text: string) => defuse(text, " ")
+
+// Character references marked shows as the character and never reads as syntax.
+const REFERENCES: Readonly<Record<string, string>> = {
+  "*": "&#42;",
+  _: "&#95;",
+  "~": "&#126;",
+  $: "&#36;",
+  "\\": "&#92;",
+}
+
+/**
+ * Text with its emphasis delimiters written as character references, except inside code spans (where a reference would
+ * show as written).
+ */
+function plainDelimiters(text: string): string {
+  let out = ""
+  for (let index = 0; index < text.length; ) {
+    if (text[index] === "`") {
+      const end = codeSpanEnd(text, index)
+      const stop = end === -1 ? runEnd(text, index, "`") : end
+      out += text.slice(index, stop)
+      index = stop
+      continue
+    }
+    const char = text[index]!
+    out += char === "*" || char === "_" || char === "~" ? REFERENCES[char] : char
+    index++
+  }
+  return out
+}
+
+/** Math written as text: what makes it math (`$`, `\`) or emphasis written as character references. */
+const mathAsText = (text: string) => text.replace(/[*_~$\\]/g, (char) => REFERENCES[char]!)
 
 /** Text without the joiners `neutralizeMarkdown` added, for copying. */
 export const stripJoiners = (text: string) => text.replaceAll(JOINER, "")
@@ -676,7 +743,18 @@ function referenceImage(src: string, open: number, work: LinkWork, definitions: 
 }
 
 /** Rewrites the links, images, autolinks and bare URLs of a prose run (step 2), defusing everything else (step 1). */
-function inline(src: string, imageLabel: string, definitions: Definitions): string {
+/**
+ * One paragraph through steps 1 and 2. The emphasis delimiters `plain` marks are written as character references (and
+ * all of them in a link's text after the first one marked), and math past what is left of `budget.math` as text (see
+ * MarkdownBudget).
+ */
+function inline(
+  src: string,
+  imageLabel: string,
+  definitions: Definitions,
+  plain: Uint8Array | undefined,
+  budget: MarkdownBudget,
+): string {
   let out = ""
   let pending = ""
   const flush = (before: "link" | "math" | "end") => {
@@ -695,11 +773,14 @@ function inline(src: string, imageLabel: string, definitions: Definitions): stri
     out += `[${label}](${LINK_PREFIX}${encodeTarget(target)}${titlePart(target, title)})`
   }
   /** The model's link text: defused, and never ending in a backslash that would escape genui's `]`. */
-  const label = (text: string) => {
-    const defused = defuse(text)
+  const label = (text: string, plain: boolean) => {
+    const defused = defuse(plain ? plainDelimiters(text) : text)
     return endsEscaping(defused) ? `${defused}\\` : defused
   }
 
+  // Whether the budget ran out before `index` (the first marked character comes before it).
+  const firstPlain = plain ? plain.indexOf(1) : -1
+  const past = (index: number) => firstPlain >= 0 && index >= firstPlain
   const mathEnd = mathScanner(src)
   const bareUrlEnd = bareUrlScanner(src)
   const work = linkWork(src)
@@ -709,8 +790,12 @@ function inline(src: string, imageLabel: string, definitions: Definitions): stri
     if (char === "$" || (char === "\\" && src[index + 1] === "(")) {
       const end = mathEnd(index)
       if (end > index) {
-        flush("math")
-        out += defuseMath(src.slice(index, end))
+        const cost = end - index + MATH_SPAN_COST
+        if (budget.math >= cost) {
+          budget.math -= cost
+          flush("math")
+          out += defuseMath(src.slice(index, end))
+        } else pending += mathAsText(src.slice(index, end))
         index = end
         continue
       }
@@ -747,7 +832,7 @@ function inline(src: string, imageLabel: string, definitions: Definitions): stri
         (image ? referenceImage(src, index + 1, work, definitions) : undefined)
       if (parsed) {
         const text = linkText(parsed.label, work)
-        link(image && !text.trim() ? literal(imageLabel) : label(text), parsed.url, parsed.title)
+        link(image && !text.trim() ? literal(imageLabel) : label(text, past(index)), parsed.url, parsed.title)
         index = parsed.end
         continue
       }
@@ -761,11 +846,103 @@ function inline(src: string, imageLabel: string, definitions: Definitions): stri
         continue
       }
     }
-    pending += char
+    pending += plain?.[index] ? REFERENCES[char] : char
     index++
   }
   flush("end")
   return out
+}
+
+/**
+ * Which characters of a paragraph inline() writes as character references: the opening emphasis runs past what
+ * `budget.emphasis` pays for, which it charges (undefined: none). An opening run is a run of `*`, `_` or `~` that marked
+ * could take as opening emphasis (left-flanking, and for `_` not after a letter or digit); marked then scans the
+ * runs of that character after it for its closing run. When the next one is a run of the same length that can only
+ * close, the scan ends there, and the run costs 1 and a 50th of the characters in between; otherwise it costs every
+ * run of that character after it and a 50th of the rest of the paragraph. Runs that can only close cost nothing (marked
+ * scans from none), so they stay, and close the openers that were paid for.
+ */
+function emphasisCutoff(text: string, budget: MarkdownBudget): Uint8Array | undefined {
+  interface Run {
+    readonly index: number
+    readonly length: number
+    readonly char: string
+    readonly opens: boolean
+    readonly onlyCloses: boolean
+  }
+  const runs: Run[] = []
+  for (let index = 0; index < text.length; ) {
+    const char = text[index]!
+    if (char === "`") {
+      // Code spans hold no delimiters.
+      const end = codeSpanEnd(text, index)
+      index = end === -1 ? runEnd(text, index, "`") : end
+      continue
+    }
+    if (char !== "*" && char !== "_" && char !== "~") {
+      index++
+      continue
+    }
+    const end = runEnd(text, index, char)
+    const before = index > 0 ? charBefore(text, index) : undefined
+    const after = end < text.length ? charAt(text, end) : undefined
+    const left =
+      after !== undefined &&
+      !SPACE.test(after) &&
+      (!PUNCTUATION.test(after) || before === undefined || SPACE_OR_PUNCTUATION.test(before))
+    const right =
+      before !== undefined &&
+      !SPACE.test(before) &&
+      (!PUNCTUATION.test(before) || after === undefined || SPACE_OR_PUNCTUATION.test(after))
+    const opens = left && !(char === "_" && before !== undefined && ALPHANUMERIC.test(before))
+    runs.push({ index, length: end - index, char, opens, onlyCloses: right && !left })
+    index = end
+  }
+  // For each run, the next run of the same character and how many such runs follow it.
+  const next: (Run | undefined)[] = []
+  const following: number[] = []
+  const seen = new Map<string, { run: Run; count: number }>()
+  for (let at = runs.length - 1; at >= 0; at--) {
+    const run = runs[at]!
+    const later = seen.get(run.char)
+    next[at] = later?.run
+    following[at] = later?.count ?? 0
+    seen.set(run.char, { run, count: (later?.count ?? 0) + 1 })
+  }
+  let cutoff = -1
+  for (let at = 0; at < runs.length; at++) {
+    const run = runs[at]!
+    if (!run.opens) continue
+    const closer = next[at]
+    const cost =
+      closer && closer.onlyCloses && closer.length === run.length
+        ? 1 + Math.ceil((closer.index - run.index) / 50)
+        : following[at]! + Math.ceil((text.length - run.index) / 50)
+    if (cost > budget.emphasis) {
+      cutoff = at
+      break
+    }
+    budget.emphasis -= cost
+  }
+  if (cutoff < 0) return undefined
+  const plain = new Uint8Array(text.length)
+  for (let at = cutoff; at < runs.length; at++) {
+    const run = runs[at]!
+    if (run.opens) plain.fill(1, run.index, run.index + run.length)
+  }
+  return plain
+}
+
+const SPACE = /\s/u
+const PUNCTUATION = /[\p{P}\p{S}]/u
+const SPACE_OR_PUNCTUATION = /[\s\p{P}\p{S}]/u
+const ALPHANUMERIC = /[\p{L}\p{N}]/u
+
+/** The character (a whole code point) at `index`, and the one that ends right before `index`. */
+const charAt = (text: string, index: number) => String.fromCodePoint(text.codePointAt(index)!)
+function charBefore(text: string, index: number): string {
+  const low = text.charCodeAt(index - 1)
+  return low >= 0xdc00 && low <= 0xdfff && index >= 2 ? charAt(text, index - 2) : text[index - 1]!
 }
 
 // A reference definition on a line of its own: `[label]: address "title"` (the title on the same line).
@@ -801,12 +978,22 @@ function definitionLines(lines: readonly string[]): (DefinitionLine | undefined)
   })
 }
 
-/** A prose run: reference definitions written again, the rest through `inline`. */
-function prose(lines: readonly string[], imageLabel: string, definitions: Definitions): string {
+/**
+ * A prose run: reference definitions written again, the rest through `inline`, a paragraph at a time (inline syntax
+ * never crosses a blank line, and the emphasis budget is per paragraph's scans).
+ */
+function prose(lines: readonly string[], imageLabel: string, definitions: Definitions, budget: MarkdownBudget): string {
   const out: string[] = []
   let run: string[] = []
+  const paragraph = (text: string) => inline(text, imageLabel, definitions, emphasisCutoff(text, budget), budget)
   const flush = () => {
-    if (run.length > 0) out.push(inline(run.join("\n"), imageLabel, definitions))
+    let start = 0
+    for (let index = 0; index <= run.length; index++) {
+      if (index < run.length && run[index]!.trim() !== "") continue
+      if (index > start) out.push(paragraph(run.slice(start, index).join("\n")))
+      if (index < run.length) out.push(run[index]!)
+      start = index + 1
+    }
     run = []
   }
   const found = definitionLines(lines)
@@ -830,16 +1017,20 @@ function prose(lines: readonly string[], imageLabel: string, definitions: Defini
  * construct that could make a link, image or tag is broken with an invisible joiner (see the top of this file).
  * `imageLabel` is the link text for an image without alt text.
  */
-export function neutralizeMarkdown(text: string, imageLabel: string): string {
+export function neutralizeMarkdown(
+  text: string,
+  imageLabel: string,
+  budget: MarkdownBudget = markdownBudget(text.length),
+): string {
   try {
-    return neutralizeLines(text.split("\n"), imageLabel)
+    return neutralizeLines(text.split("\n"), imageLabel, budget)
   } finally {
     spanCache.clear()
     bracketCache.clear()
   }
 }
 
-function neutralizeLines(lines: readonly string[], imageLabel: string): string {
+function neutralizeLines(lines: readonly string[], imageLabel: string, budget: MarkdownBudget): string {
   const kinds = lineKinds(lines)
   const groups: { readonly kind: (typeof kinds)[number]; readonly lines: readonly string[] }[] = []
   for (let start = 0; start < lines.length; ) {
@@ -860,10 +1051,38 @@ function neutralizeLines(lines: readonly string[], imageLabel: string): string {
   return groups
     .map((group) =>
       group.kind === "prose"
-        ? prose(group.lines, imageLabel, definitions)
+        ? prose(group.lines, imageLabel, definitions, budget)
         : group.kind === "math"
-          ? defuseMath(group.lines.join("\n"))
+          ? mathGroup(group.lines, budget)
           : defuse(group.lines.join("\n")),
     )
     .join("\n")
+}
+
+/**
+ * A display-math block or a math fence, as math while the budget pays for it; past that, a fence as plain code and a
+ * `$$` block as text.
+ */
+function mathGroup(lines: readonly string[], budget: MarkdownBudget): string {
+  const text = lines.join("\n")
+  const cost = text.length + MATH_SPAN_COST
+  if (budget.math >= cost) {
+    budget.math -= cost
+    return defuseMath(text)
+  }
+  const fence = FENCE.exec(lines[0] ?? "")
+  if (fence) return defuse([`${fence[1]}${fence[2]}text`, ...lines.slice(1)].join("\n"))
+  return defuse(mathAsText(text))
+}
+
+/**
+ * A model-written Markdown text as MarkdownText hands it to the renderer: its parts (see `splitMarkdown`), the prose
+ * ones neutralized, sharing one budget (see MarkdownBudget), so splitting a text into parts gains nothing.
+ */
+export function prepareMarkdown(text: string, imageLabel: string): MarkdownPart[] {
+  const shown = text.length > MAX_MARKDOWN_TEXT ? `${text.slice(0, MAX_MARKDOWN_TEXT)}\n\n…` : text
+  const budget = markdownBudget(shown.length)
+  return splitMarkdown(shown).map((part) =>
+    part.kind === "markdown" ? { kind: "markdown", text: neutralizeMarkdown(part.text, imageLabel, budget) } : part,
+  )
 }

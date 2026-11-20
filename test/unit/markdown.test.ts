@@ -8,7 +8,9 @@ import {
   LINK_PREFIX,
   linkTarget,
   mathScanner,
+  MAX_MARKDOWN_TEXT,
   neutralizeMarkdown,
+  prepareMarkdown,
   splitMarkdown,
   stripJoiners,
 } from "../../src/gui/components/markdown.ts"
@@ -30,16 +32,68 @@ function render(text: string): string {
 }
 
 /** Tags marked and its code highlighting generate from Markdown syntax; anything else came from raw HTML. */
-// Markdown's tags, then the MathML and SVG that KaTeX writes for math (the app's renderer, not the text).
 const MARKDOWN_TAGS = new Set(
+  "p a em strong code pre ul ol li blockquote h1 h2 h3 h4 h5 h6 hr br table thead tbody tr th td del input span div".split(
+    " ",
+  ),
+)
+
+/**
+ * The tags KaTeX writes for math (the app's renderer, not the text): its spans, MathML, and SVG for wide accents and
+ * roots. Allowed inside KaTeX's own output only (see `mathTags`): the same tags anywhere else came from raw HTML, such
+ * as `<svg><a href=…><path/></a></svg>` [review6#R10].
+ */
+const KATEX_TAGS = new Set(
   [
-    "p a em strong code pre ul ol li blockquote h1 h2 h3 h4 h5 h6 hr br table thead tbody tr th td del input span div",
-    "math semantics mrow mi mn mo mtext mspace annotation msub msup msubsup mfrac msqrt mroot mstyle mpadded mphantom",
-    "menclose munder mover munderover mtable mtr mtd mlabeledtr merror ms svg path line",
+    "span math semantics mrow mi mn mo mtext mspace annotation msub msup msubsup mfrac msqrt mroot mstyle mpadded",
+    "mphantom menclose munder mover munderover mtable mtr mtd mlabeledtr merror ms svg path line",
   ]
     .join(" ")
     .split(" "),
 )
+
+/**
+ * Rendered HTML split into KaTeX's output (each `<span class="katex">` subtree, to its matching `</span>`) and the
+ * rest, so each part is checked against its own tags.
+ */
+function splitMath(html: string): { readonly rest: string; readonly math: string[] } {
+  const math: string[] = []
+  let rest = ""
+  let at = 0
+  for (;;) {
+    const start = html.indexOf('<span class="katex">', at)
+    if (start === -1) break
+    rest += html.slice(at, start)
+    const tag = /<(\/?)span\b[^>]*>/g
+    tag.lastIndex = start
+    let depth = 0
+    let end = html.length
+    for (let match = tag.exec(html); match; match = tag.exec(html)) {
+      depth += match[1] ? -1 : 1
+      if (depth === 0) {
+        end = tag.lastIndex
+        break
+      }
+    }
+    math.push(html.slice(start, end))
+    at = end
+  }
+  return { rest: rest + html.slice(at), math }
+}
+
+/** The tags of rendered HTML that neither Markdown nor KaTeX writes, with where each was found. */
+function foreignTags(html: string): string[] {
+  const { rest, math } = splitMath(html)
+  return [
+    ...tags(rest)
+      .filter((tag) => !MARKDOWN_TAGS.has(tag.name))
+      .map((tag) => `<${tag.name}>`),
+    ...math
+      .flatMap(tags)
+      .filter((tag) => !KATEX_TAGS.has(tag.name) || /\shref\s*=/i.test(tag.attributes))
+      .map((tag) => `<${tag.name}${tag.attributes}> in KaTeX output`),
+  ]
+}
 
 /** The real tags of rendered HTML (text from the source is escaped, so every `<` left starts a tag). */
 function tags(html: string): { readonly name: string; readonly attributes: string }[] {
@@ -225,13 +279,31 @@ const LINK_FORMS = [
 describe("neutralizeMarkdown", () => {
   test.each(ATTACKS)("renders no image and no raw HTML: %j", (attack) => {
     const html = render(attack)
+    expect(foreignTags(html), html).toEqual([])
     for (const tag of tags(html)) {
-      expect(MARKDOWN_TAGS.has(tag.name), `<${tag.name}> in ${html}`).toBe(true)
       // Nothing that loads or runs anything (the highlighter's own <pre style> sets colors only).
       expect(tag.attributes, html).not.toMatch(/\s(src|srcset|poster|data|on\w+)\s*=|url\(/i)
     }
     expect(decorated(html)).toEqual([])
     expectOwnLinks(html)
+  })
+
+  test("the raw-HTML check allows KaTeX's MathML and SVG only inside KaTeX's output [review6#R10]", () => {
+    const math = render("$\\sqrt{a}$ and $\\overrightarrow{AB}$")
+    expect(tags(math).some((tag) => tag.name === "svg")).toBe(true)
+    expect(foreignTags(math)).toEqual([])
+    // The same tags as raw HTML, as a regression of the neutralizer would let them through.
+    expect(foreignTags('<p><svg><a href="https://x.example/"><path d="M0"/></a></svg></p>')).toEqual([
+      "<svg>",
+      "<path>",
+      "<svg>",
+    ])
+    expect(foreignTags("<p><math><mi>x</mi></math></p>")).toEqual(["<math>", "<mi>", "<mi>", "<math>"])
+    // Inside KaTeX's output, a link or a tag KaTeX never writes is still caught.
+    expect(foreignTags('<span class="katex"><svg><a href="https://x.example/"></a></svg></span>')).toEqual([
+      '<a href="https://x.example/"> in KaTeX output',
+      "<a> in KaTeX output",
+    ])
   })
 
   test.each(QUOTE_ATTACKS)("a quote in a link cannot add attributes: %j", (attack) => {
@@ -461,7 +533,7 @@ describe("neutralizeMarkdown", () => {
       const html = render(text)
       expect(decorated(html), JSON.stringify(text)).toEqual([])
       expectOwnLinks(html)
-      for (const tag of tags(html)) expect(MARKDOWN_TAGS.has(tag.name), `${JSON.stringify(text)} -> ${html}`).toBe(true)
+      expect(foreignTags(html), `${JSON.stringify(text)} -> ${html}`).toEqual([])
     }
     // [review5#S6] The texts are distinct (a generator that lost precision repeated 831 of them over and over).
     expect(seen.size).toBeGreaterThan(2950)
@@ -616,5 +688,73 @@ describe("splitMarkdown", () => {
   test("the joiner is U+2060", () => {
     expect(JOINER).toBe("\u2060")
     expect(stripJoiners(`a<${JOINER}b`)).toBe("a<b")
+  })
+})
+
+describe("what the app's renderer does with a text is bounded [review8#R6S2-4]", () => {
+  /** The HTML of a text as MarkdownText hands it to ui.Markdown (its parts sharing one budget), and how long it took. */
+  function timed(text: string): { readonly html: string; readonly ms: number } {
+    const started = performance.now()
+    const html = prepareMarkdown(text, "Image")
+      .map((part) => (part.kind === "markdown" ? (parser.parse(part.text, { async: false }) as string) : part.code))
+      .join("")
+    return { html, ms: performance.now() - started }
+  }
+  const strongs = (html: string) => html.split("<strong>").length - 1
+
+  test("emphasis runs that never close cost a bounded amount, and show as the characters", () => {
+    // marked scans the rest of the paragraph for each run's closing delimiter: 13 s for "**a " × 8,000 (32 KB) before.
+    for (const text of [
+      "**a ".repeat(8000),
+      "*a ".repeat(10_000),
+      "_a ".repeat(10_000),
+      "~a ".repeat(10_000),
+      "*a\n".repeat(10_000),
+    ]) {
+      const { html, ms } = timed(text)
+      expect(ms, text.slice(0, 8)).toBeLessThan(800)
+      expect(
+        html
+          .replace(/<[^>]+>/g, "")
+          .replaceAll("&#42;", "*")
+          .replaceAll("&#95;", "_")
+          .replaceAll("&#126;", "~"),
+      ).toContain(text.slice(0, 40).trim().split("\n")[0] ?? "")
+    }
+    // So do many paragraphs of them, or many parts: they share the text's budget.
+    expect(timed(`${"**a ".repeat(400)}\n\n`.repeat(25)).ms).toBeLessThan(800)
+    expect(timed(`${"**a ".repeat(300)}\n\n\`\`\`\nx\n\`\`\`\n\n`.repeat(30)).ms).toBeLessThan(800)
+  })
+
+  test("ordinary emphasis is kept: a list of 300 bold items", () => {
+    const list = Array.from({ length: 300 }, (_, index) => `- **Item ${index}**: what it does, in a few words`).join(
+      "\n",
+    )
+    expect(strongs(timed(list).html)).toBe(300)
+    expect(strongs(timed("A **bold** and *em* and ~~gone~~ word.").html)).toBe(1)
+    expect(timed("A **bold** and *em* and ~~gone~~ word.").html).toContain("<del>gone</del>")
+  })
+
+  test("math past the text's budget is shown as text", () => {
+    const { html, ms } = timed("$x^2$ ".repeat(10_000))
+    expect(ms).toBeLessThan(800)
+    expect(html).toContain('class="katex"')
+    expect(html).toContain("&#36;x^2&#36;")
+    // A math fence past the budget is plain code; one within it is math.
+    const fence = "```math\n" + "x+".repeat(6_000) + "\n```"
+    const parts = prepareMarkdown(`${fence}\n\n${fence}`, "Image")
+    expect(
+      parts.map((part) =>
+        part.kind === "markdown" ? part.text.split("\n").filter((line) => line.startsWith("```")) : [],
+      ),
+    ).toEqual([["```math", "```", "```text", "```"]])
+  })
+
+  test("a text shows its first MAX_MARKDOWN_TEXT characters", () => {
+    const parts = prepareMarkdown("word ".repeat(10_000), "Image")
+    const text = parts.map((part) => (part.kind === "markdown" ? part.text : "")).join("")
+    expect(text.length).toBeLessThanOrEqual(MAX_MARKDOWN_TEXT + 3)
+    expect(text.endsWith("…")).toBe(true)
+    expect(prepareMarkdown("Short.", "Image")).toEqual([{ kind: "markdown", text: "Short." }])
   })
 })

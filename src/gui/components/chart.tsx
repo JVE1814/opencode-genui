@@ -1,4 +1,5 @@
 import { createMemo, createSignal, Index, Match, onCleanup, onMount, Show, Switch } from "solid-js"
+import { MAX_CHART_POINTS as MAX_POINTS, MAX_CHART_SERIES as MAX_SERIES } from "../costs.ts"
 import { useHost } from "../host.ts"
 import { numberFormat } from "./data.tsx"
 import { bool, display, list, num, oneOf, str, uid, type GenuiComponent } from "./shared.tsx"
@@ -13,9 +14,6 @@ import { bool, display, list, num, oneOf, str, uid, type GenuiComponent } from "
 const TYPES = ["bar", "line", "area", "donut"] as const
 type ChartType = (typeof TYPES)[number]
 
-/** The palette's size; the catalog asks the model for at most this many series. */
-const MAX_SERIES = 6
-const MAX_POINTS = 500
 const DEFAULT_HEIGHT = 200
 /** Average advance of a character at --gu-size-sm, to fit labels without measuring text. */
 const CHAR = 7.2

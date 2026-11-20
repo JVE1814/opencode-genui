@@ -25,8 +25,12 @@ interface Intent {
   readonly choice?: object
   /** Not an activation: a dispatch that may not act outward at all (see `withoutIntent`). */
   readonly passive?: true
-  /** A choice waiting for the gap (see `choiceTurn`): its dispatch runs nothing meanwhile, and it counts for nothing else. */
-  waiting?: boolean
+  /**
+   * How many waits outside the page its dispatch is in (see `whileAway`): the host's answer to a message it sent, a
+   * confirm dialog, the clipboard, a choice's gap. Meanwhile the dispatch runs nothing, and its intent counts for nothing
+   * else.
+   */
+  away: number
 }
 
 // The newest choice intent of each control (see `withIntent`).
@@ -41,18 +45,37 @@ export const INTENT_TTL_MS = 5000
 // The intents of the activations each surface is dispatching right now, newest last.
 const intents = new WeakMap<object, Intent[]>()
 
-// The newest intent of the surface that has not expired, leaving out choices that wait for the gap: while one waits, a
-// write that is no dispatch of its own (typing, which wakes watches) must not find its intent and open a modal with it.
+// The intent of the dispatch running now on the surface: the newest one that has not expired, leaving out dispatches
+// that wait outside the page (see `whileAway`). Tasks never interleave, and a dispatch spans tasks only while it waits
+// outside the page, so the one this finds is running in this very task. A write in another task (typing, which wakes
+// watches, or the agent's next patch) finds none: it cannot borrow the intent of a dispatch whose message is still being
+// sent, to open a modal or act outward with it.
 function liveIntent(key: object): Intent | undefined {
   const list = intents.get(key)
   if (!list) return undefined
   const now = Date.now()
   for (let index = list.length - 1; index >= 0; index--) {
     const intent = list[index]!
-    if (!intent.waiting && now - intent.since <= INTENT_TTL_MS) return intent
+    if (intent.away === 0 && now - intent.since <= INTENT_TTL_MS) return intent
   }
   return undefined
 }
+
+/**
+ * Runs `wait`, something the current dispatch of the surface waits for outside the page (the host's answer to a message,
+ * a confirm dialog, the clipboard), with that dispatch's intent set aside meanwhile (see `liveIntent`). The intent is
+ * back, with what is left of its burst and its time, once `wait` settles.
+ */
+export async function whileAway<T>(key: object | undefined, wait: () => Promise<T>): Promise<T> {
+  const intent = key && liveIntent(key)
+  if (intent) intent.away++
+  try {
+    return await wait()
+  } finally {
+    if (intent) intent.away--
+  }
+}
+
 // When each surface last started acting outward, for OUTWARD_INTERVAL_MS.
 const lastActivation = new WeakMap<object, number>()
 
@@ -67,6 +90,14 @@ export function hasUserGesture(): boolean {
 }
 
 /**
+ * Told by json-render when an action list of the dispatch waits for a later task (`true`: it ran for its time slice,
+ * see patches/@json-render%2Fsolid) and when it runs again (`false`). Meanwhile the dispatch's intent is set aside, as
+ * while it waits outside the page (see `whileAway`): the window answers input in between, and a keystroke's task must
+ * not find the intent (a watch it wakes would open an untrusted modal with it).
+ */
+export type Away = (waiting: boolean) => void
+
+/**
  * Runs `dispatch`, the actions a control fires because the user activated it on purpose (a press, a pick from a menu
  * or list, Enter in a field, a choice; see ACTIVATION_EVENTS in src/catalog/actions.ts), with an outward intent granted
  * to its surface. The outward actions this dispatch runs take from the intent, also after awaits and confirm dialogs,
@@ -78,18 +109,32 @@ export function hasUserGesture(): boolean {
  */
 export async function withIntent<T>(
   surface: SurfaceContext | undefined,
-  dispatch: () => Promise<T>,
+  dispatch: (away: Away) => Promise<T>,
   options: { readonly choice?: object } = {},
 ): Promise<T> {
-  if (!surface || !hasUserGesture()) return dispatch()
-  const intent: Intent = { spent: 0, since: Date.now(), ...(options.choice ? { choice: options.choice } : {}) }
+  if (!surface || !hasUserGesture()) return dispatch(() => {})
+  activations.set(surface, (activations.get(surface) ?? 0) + 1)
+  const intent: Intent = { spent: 0, since: Date.now(), away: 0, ...(options.choice ? { choice: options.choice } : {}) }
   if (options.choice) latestChoice.set(options.choice, intent)
   const open = intents.get(surface)
   if (open) open.push(intent)
   else intents.set(surface, [intent])
+  // How many of the dispatch's action lists wait for a later task right now (see `Away`).
+  let waiting = 0
+  const away: Away = (now) => {
+    if (now) {
+      waiting++
+      intent.away++
+    } else if (waiting > 0) {
+      waiting--
+      intent.away--
+    }
+  }
   try {
-    return await dispatch()
+    return await dispatch(away)
   } finally {
+    intent.away -= waiting
+    waiting = 0
     const list = intents.get(surface)
     const index = list?.indexOf(intent) ?? -1
     if (list && index !== -1) list.splice(index, 1)
@@ -104,7 +149,7 @@ export async function withIntent<T>(
  */
 export async function withoutIntent<T>(surface: SurfaceContext | undefined, dispatch: () => Promise<T>): Promise<T> {
   if (!surface) return dispatch()
-  const intent: Intent = { spent: OUTWARD_BURST, since: Date.now(), passive: true }
+  const intent: Intent = { spent: OUTWARD_BURST, since: Date.now(), away: 0, passive: true }
   const open = intents.get(surface)
   if (open) open.push(intent)
   else intents.set(surface, [intent])
@@ -117,15 +162,75 @@ export async function withoutIntent<T>(surface: SurfaceContext | undefined, disp
   }
 }
 
-/** Whether the surface is dispatching an activation (whose actions may act outward, or ask for a confirm). */
+/**
+ * Whether the dispatch running now on the surface is an activation (whose actions may act outward, ask for a confirm or
+ * open a modal). False in a task the surface dispatches nothing in, such as a keystroke's (see `liveIntent`).
+ */
 export function hasIntent(surface: SurfaceContext | undefined): boolean {
   const intent = surface && liveIntent(surface)
   return !!intent && !intent.passive
 }
 
+// The runner each intent lends (see `lendActivation`).
+const lenders = new WeakMap<Intent, (run: () => void) => void>()
+
+/**
+ * What the surface's running activation, if any, lends to the elements it shows that the render budget's task slice
+ * defers to a later task (see `defer` in src/runtime/budget.ts): a runner that puts the activation's intent back on the
+ * surface while a later task mounts them, so that a Dialog the press opened, placed after a long list the same press
+ * revealed, still opens on an untrusted surface. Only for that mount: a task in between (a keystroke's) finds nothing,
+ * the intent is the same one (its burst is not renewed), and it lends nothing once INTENT_TTL_MS after its grant or
+ * last renewal has passed. Undefined while the surface runs no activation.
+ */
+export function lendActivation(surface: SurfaceContext | undefined): ((run: () => void) => void) | undefined {
+  const intent = surface && liveIntent(surface)
+  if (!surface || !intent || intent.passive) return undefined
+  // One runner per intent: the render budget wakes the elements it lent to together, in chunks (see budget.ts).
+  const known = lenders.get(intent)
+  if (known) return known
+  const lend = (run: () => void) => {
+    if (Date.now() - intent.since > INTENT_TTL_MS) return run()
+    const list = intents.get(surface) ?? []
+    intents.set(surface, list)
+    // The same intent, also while its dispatch waits for a later task itself (`away`): what it spends is its own.
+    const lent: Intent = {
+      get spent() {
+        return intent.spent
+      },
+      set spent(value) {
+        intent.spent = value
+      },
+      get since() {
+        return intent.since
+      },
+      set since(value) {
+        intent.since = value
+      },
+      away: 0,
+    }
+    // What a task that runs with it defers again is lent the same.
+    lenders.set(lent, lend)
+    list.push(lent)
+    try {
+      run()
+    } finally {
+      const index = list.lastIndexOf(lent)
+      if (index !== -1) list.splice(index, 1)
+    }
+  }
+  lenders.set(intent, lend)
+  return lend
+}
+
+/** Whether the dispatch running now on the surface is a passive one (focus, blur, a slider, a browsed choice). */
+export function isPassiveDispatch(surface: SurfaceContext | undefined): boolean {
+  return !!(surface && liveIntent(surface)?.passive)
+}
+
 /**
  * Asks the user with the app's confirm dialog. Accepting is itself a deliberate activation, so it renews the surface's
- * current intent: the rest of the dispatch keeps its burst however long the user took to read.
+ * current intent: the rest of the dispatch keeps its burst however long the user took to read. While the dialog is up,
+ * the intent is set aside (see `whileAway`).
  */
 export async function confirmIntent(
   host: Host,
@@ -133,9 +238,187 @@ export async function confirmIntent(
   options: Parameters<Host["confirm"]>[0],
 ): Promise<boolean> {
   const intent = liveIntent(surface ?? host)
-  const ok = await host.confirm(options)
+  const ok = await whileAway(surface ?? host, () => host.confirm(options))
   if (ok && intent) intent.since = Date.now()
   return ok
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Modals
+// ---------------------------------------------------------------------------------------------------------------------
+//
+// Whether a modal (Dialog, Drawer, src/gui/components/overlay.tsx) may open. The record lives here, keyed by the
+// surface's state store and the modal's open path, and window-wide, never in the component: a spec that hides and
+// re-shows a Dialog mounts a fresh one, which would start with a clean record of its own and loop again.
+
+/** How long after the user dismissed a modal (Escape, its close button, its backdrop) another one opens only from an activation. */
+export const REOPEN_MS = 1500
+
+// How many activations each surface dispatched (see `withIntent`), and how many versions of the agent's state it showed
+// (see `noteAgentState`), so far.
+const activations = new WeakMap<object, number>()
+const agentStates = new WeakMap<object, number>()
+
+/** Says that the surface shows a new version of the agent's state (its next patch, a re-sent block). */
+export function noteAgentState(surface: SurfaceContext): void {
+  agentStates.set(surface, (agentStates.get(surface) ?? 0) + 1)
+}
+
+// What each state store's last dismissal of a modal saw: the surface, and its counts of activations and agent states.
+const dismissals = new WeakMap<
+  object,
+  { readonly surface: object; readonly activations: number; readonly states: number }
+>()
+/** How many modals may open in one task, in the whole window. */
+export const MODAL_OPENS_PER_TASK = 8
+
+/** Why a modal did not open (see `modalRefusal`). */
+export type ModalRefusal = "again" | "shown" | "many" | "passive" | "untrusted" | "dismissed"
+
+// The current task: a number the next timer task moves on, with what this task did. A loop that opens and closes a
+// modal through focus moves never yields, so everything that bounds it is counted per task.
+let modalTask = 0
+let modalTaskTimer: ReturnType<typeof setTimeout> | undefined
+let modalOpens = 0
+let modalWarned = false
+const currentModalTask = () => {
+  modalTaskTimer ??= setTimeout(() => {
+    modalTaskTimer = undefined
+    modalTask++
+    modalOpens = 0
+    modalWarned = false
+  })
+  return modalTask
+}
+// The open paths of each state store whose modal opened or closed in the current task, and how (closed wins).
+const modalToggles = new WeakMap<object, { task: number; paths: Map<string, "opened" | "closed"> }>()
+// The modal elements genui opened, by state store and open path (the element tells whether it is still shown).
+const shownModals = new WeakMap<object, Map<string, Set<{ readonly open: boolean; readonly isConnected: boolean }>>>()
+// When the user last dismissed a modal, in any surface.
+let modalDismissed = Number.NEGATIVE_INFINITY
+
+function toggledPaths(store: object): Map<string, "opened" | "closed"> {
+  const task = currentModalTask()
+  const record = modalToggles.get(store)
+  if (record?.task === task) return record.paths
+  const paths = new Map<string, "opened" | "closed">()
+  modalToggles.set(store, { task, paths })
+  return paths
+}
+
+// Whether a modal element genui opened at `path` of `store` is shown now (forgetting those that are not).
+function isShown(store: object, path: string): boolean {
+  const elements = shownModals.get(store)?.get(path)
+  if (!elements) return false
+  for (const element of elements) if (!element.open || !element.isConnected) elements.delete(element)
+  return elements.size > 0
+}
+
+/** Records that `element` opened as the modal at `path` of `store` (see `modalRefusal`'s `shown`). */
+export function noteModalShown(
+  store: object,
+  path: string,
+  element: { readonly open: boolean; readonly isConnected: boolean },
+) {
+  let paths = shownModals.get(store)
+  if (!paths) shownModals.set(store, (paths = new Map()))
+  let elements = paths.get(path)
+  if (!elements) paths.set(path, (elements = new Set()))
+  elements.add(element)
+}
+
+/**
+ * Why the modal at open path `path` of the state store `store` may not open now, or undefined when it may:
+ *
+ * - `again`: a modal at this path of this store closed in this task, or opened in it and is no longer shown, whichever
+ *   instance of the Dialog (a remounted one too) asks. A modal that keeps opening and closing within one task never lets
+ *   the window paint; that loop went through focus moves (see `asModalFocusMove`), and this bounds any other.
+ * - `shown`: another modal element at this path of this store opened in this task and is shown (a Dialog and a Drawer
+ *   bound to one path): the state stays open, and that one is what the user sees.
+ * - `many`: MODAL_OPENS_PER_TASK modals opened in this task, in the whole window (the same loop through ever new paths).
+ * - `passive`: the surface's running dispatch is a passive one (focus, blur, a slider, a browsed choice), on any surface.
+ * - `untrusted`: on an untrusted surface, only an activation opens a modal (a model-written modal is a phishing tool).
+ * - `dismissed`: once the user dismissed a modal of this store, only an activation opens one of its modals, until the
+ *   user activates a control of its surface or the agent sends a new version of its state, however long that takes: a
+ *   watch woken by the dismissal could wait past any time limit (its list deferred to later tasks) and re-open it after
+ *   every Escape. And within REOPEN_MS of the user dismissing any modal, only an activation opens one, on any surface.
+ */
+export function modalRefusal(
+  store: object,
+  path: string,
+  surface: SurfaceContext | undefined,
+): ModalRefusal | undefined {
+  const toggled = toggledPaths(store).get(path)
+  if (toggled) return toggled === "opened" && isShown(store, path) ? "shown" : "again"
+  if (modalOpens >= MODAL_OPENS_PER_TASK) return "many"
+  if (isPassiveDispatch(surface)) return "passive"
+  const activation = hasIntent(surface)
+  if (surface?.trusted === false && !activation) return "untrusted"
+  if (activation) return undefined
+  const dismissal = dismissals.get(store)
+  if (
+    dismissal &&
+    (activations.get(dismissal.surface) ?? 0) === dismissal.activations &&
+    (agentStates.get(dismissal.surface) ?? 0) === dismissal.states
+  )
+    return "dismissed"
+  if (Date.now() - modalDismissed < REOPEN_MS) return "dismissed"
+  return undefined
+}
+
+/**
+ * Records what happened to the modal at `path` of `store`, on `surface`: it `opened`, it `closed` (from state), or the
+ * user `dismissed` it (Escape, the close button, the backdrop). Each counts as a change of that path in this task (see
+ * `modalRefusal`).
+ */
+export function noteModal(
+  store: object,
+  path: string,
+  change: "opened" | "closed" | "dismissed",
+  surface?: SurfaceContext,
+): void {
+  const toggled = toggledPaths(store)
+  if (change !== "opened" || !toggled.has(path)) toggled.set(path, change === "opened" ? "opened" : "closed")
+  if (change === "opened") modalOpens++
+  if (change !== "dismissed") return
+  modalDismissed = Date.now()
+  const key: object = surface ?? store
+  dismissals.set(store, { surface: key, activations: activations.get(key) ?? 0, states: agentStates.get(key) ?? 0 })
+}
+
+// How many of genui's own showModal() or close() calls are running (see `asModalFocusMove`).
+let modalFocusMoves = 0
+
+/**
+ * Runs `move`, genui's own showModal() or close() of a modal. Both move focus at once (into the modal, and back to where
+ * it was), and the focus and blur events they cause are not the user's: a field's on.focus and on.blur do not run for
+ * them (see `isModalFocusMove`). Otherwise a spec whose field opens a modal on focus (directly or through a watch) and
+ * closes it on blur loops: every open blurs the field, every close focuses it again.
+ */
+export function asModalFocusMove(move: () => void): void {
+  modalFocusMoves++
+  try {
+    move()
+  } finally {
+    modalFocusMoves--
+  }
+}
+
+/** Whether a focus or blur event comes from a modal genui is opening or closing right now (see `asModalFocusMove`). */
+export const isModalFocusMove = (): boolean => modalFocusMoves > 0
+
+/** Says once per task, in the console, that a modal was refused for a reason other than its surface's trust. */
+export function warnModalRefusal(reason: ModalRefusal, path: string): void {
+  if (reason === "untrusted" || reason === "shown" || modalWarned) return
+  modalWarned = true
+  const why: Record<Exclude<ModalRefusal, "untrusted" | "shown">, string> = {
+    again:
+      "it closed in this task, or opened in it and is no longer shown (a modal that keeps opening and closing loops)",
+    many: `${MODAL_OPENS_PER_TASK} modals already opened in this task`,
+    passive: "focus, blur, a slider or a browsed choice opened it, which is no activation",
+    dismissed: `the user dismissed a modal (of this UI since its last activation, or less than ${REOPEN_MS} ms ago); only a press or another activation opens one now`,
+  }
+  console.warn(`[genui] The modal at "${path}" did not open: ${why[reason]}.`)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -146,12 +429,13 @@ export async function confirmIntent(
 // keeps the text from being selected (packages/ui/src/overlays/dialog/dialog.css, `[data-slot=dialog-description]`).
 // So genui's description reads as one run of text whatever the host does with whitespace:
 //
-//   [genui's note (untrusted) | the spec's message (trusted)] [The UI says: “the spec's text” (untrusted)]
-//   [Message: the payload, line breaks shown as ↵]
+//   [genui's note (untrusted) | the spec's message (trusted)] [Message: the payload, line breaks shown as ↵]
 //
 // The payload comes last and runs to the end of the dialog, so nothing it contains can pass for genui's own text that
-// follows it; it is labelled, word for word, and spelled out so that nothing in it hides. The spec's text on an untrusted
-// surface is quoted with every quotation mark (and lookalike) in it replaced, so it cannot close genui's quote.
+// follows it; it is labelled, word for word, and spelled out so that nothing in it hides. On an untrusted surface the
+// spec's own title and message are not shown at all: in one run of plain text nothing can mark where they end, since
+// any delimiter genui puts after them has lookalikes among the letters of some script (a Hebrew yod, a syllabics final
+// acute), and text after a forged one ("Checked by genui: safe to send") read as genui's own verdict.
 
 // Characters that draw nothing, or reorder or disguise text: controls (but tab and line breaks), format characters (zero-width
 // and bidirectional marks, Unicode tag characters), private-use, unassigned and lone surrogate code points, line and
@@ -225,31 +509,6 @@ export function showPayload(host: Host, text: string): string {
   })
 }
 
-// Quotation marks of every script, and characters that look like one: primes, ditto marks, spacing accents and other
-// modifier symbols (\p{Sk}, but the emoji skin tones), modifier letters (U+02B9-02FF, U+0374-0375), the Armenian,
-// N'Ko and Latin apostrophes and saltillos.
-const QUOTE_LIKE =
-  /(?![\u{1F3FB}-\u{1F3FF}])[\p{Pi}\p{Pf}\p{Sk}"＂＇‚‛„‟〃״׳′″‴‵‶‷⁗「」『』﹁﹂﹃﹄〝〞〟❛❜❝❞❟❠❮❯⹂\u02B9-\u02FF\u0374\u0375\u055A-\u055F\u07F4\u07F5\uA788-\uA78C\u{1F676}-\u{1F678}]/gu
-
-// Combining marks that do not sit on a letter, a digit or another mark: on their own they draw a free-standing accent,
-// and some look like a quotation mark (U+030B draws ˝, U+030E a small ").
-const LOOSE_MARKS = /(?<![\p{L}\p{N}\p{M}])\p{M}+/gu
-
-/**
- * Text the spec wrote for a confirm, as an untrusted dialog quotes it: on one line, made visible as a payload is, with
- * every quotation mark and lookalike replaced and combining marks that sit on no letter spelled out, so it cannot close
- * genui's quote and go on as text that reads like genui's own. Lookalikes go first: a mark on one (ʺ̋, itself a letter)
- * is loose once it is replaced, rather than riding on the replacement.
- */
-export function quoteSpecText(host: Host, text: string): string {
-  const flat = reveal(host, text)
-    .replace(QUOTE_LIKE, "'")
-    .replace(LOOSE_MARKS, (run) => spellOut(host, run))
-    .replace(/\s+/gu, " ")
-    .trim()
-  return `“${flat}”`
-}
-
 export interface ConfirmInput {
   /** genui's confirm title, e.g. "Send this message to the agent?". */
   readonly title: string
@@ -278,9 +537,9 @@ function payloadPart(host: Host, input: ConfirmInput): string | undefined {
 /**
  * The confirm dialog for an action. It always shows the whole payload, last. On a trusted surface (the agent's own
  * reply, a canvas) the spec's confirm may word the title, message and buttons. On an untrusted one (tool output, a file)
- * the title and buttons stay genui's, and the spec's text appears only quoted and labelled, after genui's note. The
- * parts are separated by blank lines for a host that keeps them, and read as one paragraph where the host collapses
- * them (see the top of this section).
+ * the title, note and buttons are genui's, and the spec's own words are left out (see the top of this section); only
+ * its `danger` is kept. The parts are separated by blank lines for a host that keeps them, and read as one paragraph
+ * where the host collapses them.
  */
 export function confirmOptions(host: Host, surface: SurfaceContext | undefined, input: ConfirmInput) {
   const requested = input.requested
@@ -298,12 +557,7 @@ export function confirmOptions(host: Host, surface: SurfaceContext | undefined, 
       ...danger,
     }
   }
-  const said = [requested?.title, requested?.message].filter(Boolean).join(" — ")
-  const notes = [
-    host.t("confirm.untrusted"),
-    said ? host.t("confirm.specSays", { text: quoteSpecText(host, said) }) : undefined,
-    payload,
-  ].filter(Boolean)
+  const notes = [host.t("confirm.untrusted"), payload].filter(Boolean)
   return {
     title: input.title,
     description: notes.join("\n\n"),
@@ -329,7 +583,7 @@ async function choiceTurn(key: object, intent: Intent, choice: object): Promise<
   const turn = new Promise<void>((resolve) => (done = resolve))
   const queued = ahead.then(() => turn)
   choiceQueue.set(key, queued)
-  intent.waiting = true
+  intent.away++
   try {
     await ahead
     for (;;) {
@@ -342,7 +596,7 @@ async function choiceTurn(key: object, intent: Intent, choice: object): Promise<
       await new Promise((resolve) => setTimeout(resolve, wait))
     }
   } finally {
-    intent.waiting = false
+    intent.away--
     done()
     if (choiceQueue.get(key) === queued) choiceQueue.delete(key)
   }

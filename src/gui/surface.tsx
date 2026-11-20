@@ -1,5 +1,7 @@
 import {
   createComputed,
+  createEffect,
+  createMemo,
   createSignal,
   ErrorBoundary,
   onCleanup,
@@ -20,11 +22,13 @@ import { VALIDATION_FUNCTIONS } from "../protocol/pattern.ts"
 import { createHandlers, type ChainLink } from "./actions.ts"
 import { ChainBridge } from "./chain.ts"
 import { reserveToolbar, SurfaceMemoryContext } from "./components/shared.tsx"
-import { createRenderBudget, RENDER_UNITS, RenderBudgetContext, TEXT_PER_UNIT } from "./element.ts"
+import { joinInlinePool, windowPool } from "../runtime/budget.ts"
+import { poolKind, SKIPPED_WORK, tooLarge } from "./issues.ts"
+import { createRenderBudget, RenderBudgetContext } from "./element.ts"
 import { ErrorCard, IssuesFooter } from "./fallback.tsx"
 import { HostContext, QuietWriteContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
-import { allowOutward } from "./outward.ts"
-import { getRendering } from "./registry.tsx"
+import { allowOutward, lendActivation, noteAgentState } from "./outward.ts"
+import { EvaluationLend, getRendering } from "./registry.tsx"
 
 export interface SurfaceViewProps {
   readonly host: Host
@@ -39,6 +43,8 @@ export interface SurfaceViewProps {
   readonly lineErrors?: Accessor<readonly LineError[]>
   /** Whether the surface may ask the agent to fix its problems. Defaults to whenever it can send a prompt. */
   readonly canFix?: Accessor<boolean>
+  /** An older copy of an inline UI the agent sent again with the same id (see POOL_SURFACES). */
+  readonly superseded?: Accessor<boolean>
 }
 
 const NO_LINES: readonly LineError[] = Object.freeze([])
@@ -92,20 +98,71 @@ export function SurfaceView(props: SurfaceViewProps): JSX.Element {
   )
 }
 
-/** The issue a surface reports while elements do not fit in its render budget (see RenderBudget). */
-export const TOO_LARGE: SurfaceIssue = {
-  severity: "warning",
-  code: "too_large",
-  message: `the UI is too large, so part of it is not shown: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all (a repeat inside a repeat renders the product of both lists, and a long text read in every row of a repeat counts once per row): show fewer items or less text`,
+const heightListeners = new WeakMap<Element, (height: number) => void>()
+let heightObserver: ResizeObserver | undefined
+
+/**
+ * Tells `listener` the content height of a surface's box whenever it changes: its observed size, or, while it holds a
+ * reserved `min-height`, its height without it. One observer serves every surface, so the boxes are read together:
+ * an observer per surface measured right after the previous surface's writes, a layout per surface, and 900 small
+ * blocks in one tool output froze the window for a second. Returns the function that stops it.
+ */
+function observeHeight(element: HTMLElement, listener: (height: number) => void): () => void {
+  heightObserver ??= new ResizeObserver((entries) => {
+    const sizes = entries.map((entry) => entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height)
+    // Boxes that hold a reserved height: all of them without it at once, then read (one layout), then back.
+    const held = entries.map((entry) => (entry.target as HTMLElement).style.minHeight)
+    if (held.some(Boolean)) {
+      entries.forEach((entry, index) => {
+        if (held[index]) (entry.target as HTMLElement).style.minHeight = ""
+      })
+      entries.forEach((entry, index) => {
+        if (held[index]) sizes[index] = entry.target.getBoundingClientRect().height
+      })
+      entries.forEach((entry, index) => {
+        if (held[index]) (entry.target as HTMLElement).style.minHeight = held[index]!
+      })
+    }
+    entries.forEach((entry, index) => heightListeners.get(entry.target)?.(sizes[index]!))
+  })
+  heightListeners.set(element, listener)
+  heightObserver.observe(element)
+  return () => {
+    heightListeners.delete(element)
+    heightObserver?.unobserve(element)
+  }
 }
 
 function Frame(props: SurfaceViewProps) {
   const host = props.host
   const streaming = () => props.streaming?.() ?? false
-  const budget = createRenderBudget()
+  // Charged by every element: the surface's own budget, its kind's window-wide pool, and the window's task slices. An
+  // element a press shows that the slice defers mounts with that press's activation (a Dialog it opened).
+  const kind = createMemo(() => poolKind(props.info, props.superseded?.() ?? false))
+  // The agent's newest inline UI keeps room of its own in their pool (see joinInlinePool).
+  const membership = createMemo(() => {
+    if (kind() !== "inline") return undefined
+    const member = joinInlinePool()
+    onCleanup(member.leave)
+    return member
+  })
+  const budget = createRenderBudget({
+    pool: () => membership()?.meters() ?? windowPool(kind()),
+    sliced: true,
+    lend: () => lendActivation(props.info),
+  })
+  // Whether json-render skipped part of what a change of the state set off (until the agent's next state).
+  const [skippedWork, setSkippedWork] = createSignal(false)
+  createEffect(() => {
+    const store = props.runtime().store
+    setSkippedWork(store.skippedWork())
+    onCleanup(store.onSkippedWork(() => setSkippedWork(store.skippedWork())))
+  })
   const issues = () => {
     const compiled = props.compiled().issues
-    return budget.skipped() > 0 ? [...compiled, TOO_LARGE] : compiled
+    const skipped = budget.skipped()
+    const shown = skipped > 0 ? [...compiled, tooLarge(kind(), budget.pooled() === skipped)] : compiled
+    return skippedWork() ? [...shown, SKIPPED_WORK] : shown
   }
   const lineErrors = () => (streaming() ? NO_LINES : (props.lineErrors?.() ?? NO_LINES))
   const canFix = () => (props.canFix ? props.canFix() : !!props.info.sendPrompt)
@@ -137,27 +194,17 @@ function Frame(props: SurfaceViewProps) {
         element.removeEventListener("keydown", release, { capture: true })
       })
     }
-    // The content's own height: while reserved, the box is at least the reserved height.
-    const measure = () => {
-      const held = element.style.minHeight
-      if (!held) return element.getBoundingClientRect().height
-      element.style.minHeight = ""
-      const height = element.getBoundingClientRect().height
-      element.style.minHeight = held
-      return height
-    }
-    const observer = new ResizeObserver(() => {
-      const height = measure()
-      if (height <= 0) return
-      const target = untrack(reserved)
-      if (target !== undefined) {
-        if (height < target - 0.5) return
-        setReserved(undefined)
-      }
-      untrack(props.runtime).height = height
-    })
-    observer.observe(element)
-    onCleanup(() => observer.disconnect())
+    onCleanup(
+      observeHeight(element, (height) => {
+        if (height <= 0) return
+        const target = untrack(reserved)
+        if (target !== undefined) {
+          if (height < target - 0.5) return
+          setReserved(undefined)
+        }
+        untrack(props.runtime).height = height
+      }),
+    )
   })
 
   const untrustedNote = () =>
@@ -220,6 +267,7 @@ function Render(props: {
   readonly canFix: Accessor<boolean>
 }) {
   const store = props.runtime.store
+  let agentState: unknown
   createComputed(() => {
     const spec = props.compiled().spec
     // What password Inputs are bound to is never persisted (the secret root never is either).
@@ -228,6 +276,11 @@ function Render(props: {
     store.setItemKeys(itemKeys(spec))
     // The agent's state is the store's base; the user's edits stay on top of it as the spec streams and changes.
     store.setBase(spec?.state)
+    // A modal the user dismissed may open again by itself from the agent's next version of its state.
+    if (spec?.state !== agentState) {
+      agentState = spec?.state
+      noteAgentState(props.info)
+    }
   })
   // json-render reads its handlers once, so they are bound to this surface for the provider's lifetime.
   // onSuccess/onError handlers run through json-render's own execute, connected by ChainBridge inside the provider.
@@ -258,7 +311,14 @@ function Render(props: {
       >
         <ChainBridge link={link} />
         <QuietWriteContext.Provider value={(path, value) => store.set(path, value)}>
-          <Renderer spec={props.compiled().spec} registry={registry} loading={props.streaming()} fallback={fallback} />
+          <EvaluationLend lend={() => lendActivation(props.info)}>
+            <Renderer
+              spec={props.compiled().spec}
+              registry={registry}
+              loading={props.streaming()}
+              fallback={fallback}
+            />
+          </EvaluationLend>
         </QuietWriteContext.Provider>
       </JSONUIProvider>
     </ErrorBoundary>

@@ -3,6 +3,7 @@ import { getByPath } from "@json-render/core"
 import { useStateStore } from "@json-render/solid"
 import { isIconName } from "../../catalog/icons.ts"
 import { isRemoteImage, safeUrl, urlHost } from "../../protocol/url.ts"
+import { MAX_TABLE_COLUMNS, tableRows, tableWidth } from "../costs.ts"
 import { useHost, useSurface, type Host } from "../host.ts"
 import { askOutward } from "../outward.ts"
 import { useActivation } from "./inputs.tsx"
@@ -68,8 +69,6 @@ interface TableColumn {
 }
 
 const ALIGNS = ["start", "center", "end"] as const
-// Rows past this are not rendered; a table this long belongs in a file, and the surface must stay cheap to update.
-const MAX_ROWS = 500
 // Cells that mean "no value" and so do not decide whether a column is numeric.
 const EMPTY_CELLS = new Set(["", "-", "–", "—", "n/a", "N/A"])
 // "1,234", "-3.5", "12%", "$4.20", "1.2K", "250 ms": right-aligned like numbers. Dates and versions with dashes are not.
@@ -78,19 +77,21 @@ const NUMERIC = /^[-+−]?[$€£¥₹]?\s?\d[\d,.\s]*(?:%|‰|[kKMBGT]|ms|s|x|�
 /** Lowercase letters and digits only, so "Service name" finds a row's `service_name`. */
 const loose = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "")
 
+/** The columns a Table shows: at most MAX_TABLE_COLUMNS (src/gui/costs.ts counts them the same way). */
 function tableColumns(raw: unknown, rows: readonly unknown[]): TableColumn[] {
   const columns: TableColumn[] = []
-  list(raw).forEach((column, index) => {
+  for (const [index, column] of list(raw).entries()) {
+    if (columns.length >= MAX_TABLE_COLUMNS) break
     if (typeof column === "string" || typeof column === "number") {
       const label = str(column)
       columns.push({ key: label, label, index })
     } else if (isRecord(column)) {
       const key = str(column.key) || str(column.label)
-      if (!key) return
+      if (!key) continue
       const align = ALIGNS.includes(column.align as Align) ? (column.align as Align) : undefined
       columns.push({ key, label: str(column.label) || key, align, index })
     }
-  })
+  }
   if (columns.length > 0) return columns
 
   // No columns: take them from the rows, keys of object rows in first-seen order, or positions of array rows.
@@ -100,8 +101,30 @@ function tableColumns(raw: unknown, rows: readonly unknown[]): TableColumn[] {
     if (Array.isArray(row)) width = Math.max(width, row.length)
     else if (isRecord(row)) for (const key of Object.keys(row)) keys.add(key)
   }
-  if (keys.size > 0) return [...keys].map((key, index) => ({ key, label: key, index }))
-  return Array.from({ length: width }, (_, index) => ({ key: String(index), label: "", index }))
+  if (keys.size > 0) return [...keys].slice(0, MAX_TABLE_COLUMNS).map((key, index) => ({ key, label: key, index }))
+  return Array.from({ length: Math.min(width, MAX_TABLE_COLUMNS) }, (_, index) => ({
+    key: String(index),
+    label: "",
+    index,
+  }))
+}
+
+/** How many columns the spec's table has in all, to say how many it does not show. */
+function allColumns(raw: unknown, rows: readonly unknown[]): number {
+  const named = list(raw).filter(
+    (column) =>
+      typeof column === "string" ||
+      typeof column === "number" ||
+      (isRecord(column) && !!(str(column.key) || str(column.label))),
+  ).length
+  if (named > 0) return named
+  const keys = new Set<string>()
+  let width = 0
+  for (const row of rows.slice(0, 50)) {
+    if (Array.isArray(row)) width = Math.max(width, row.length)
+    else if (isRecord(row)) for (const key of Object.keys(row)) keys.add(key)
+  }
+  return keys.size > 0 ? keys.size : width
 }
 
 function cellValue(row: unknown, column: TableColumn): unknown {
@@ -151,8 +174,26 @@ const Table: GenuiComponent<"Table"> = (ctx) => {
   const store = useStateStore()
   const activate = useActivation(ctx)
 
-  const rows = createMemo(() => list(ctx.props.rows).slice(0, MAX_ROWS))
+  // At most MAX_TABLE_ROWS rows and MAX_TABLE_CELLS cells (src/gui/costs.ts, which the render budget charges).
+  const allRows = createMemo(() => list(ctx.props.rows))
+  const rows = createMemo(() => {
+    const all = allRows()
+    return all.slice(0, tableRows(all.length, Math.max(1, tableWidth(ctx.props.columns, all))))
+  })
   const columns = createMemo(() => tableColumns(ctx.props.columns, rows()))
+  // What the table leaves out, said under it.
+  const cut = createMemo(() => {
+    const total = allColumns(ctx.props.columns, allRows())
+    const shownRows = rows().length
+    return shownRows < allRows().length || columns().length < total
+      ? host.t("c.table.cut", {
+          rows: shownRows,
+          totalRows: allRows().length,
+          columns: columns().length,
+          totalColumns: total,
+        })
+      : ""
+  })
   const values = createMemo(() => {
     const cols = columns()
     return rows().map((row) => cols.map((column) => cellValue(row, column)))
@@ -271,6 +312,9 @@ const Table: GenuiComponent<"Table"> = (ctx) => {
           </Show>
         </tbody>
       </table>
+      <Show when={cut()}>
+        <p data-slot="cut">{cut()}</p>
+      </Show>
     </div>
   )
 }

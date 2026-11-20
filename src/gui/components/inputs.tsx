@@ -1,7 +1,7 @@
 import { createEffect, createMemo, For, Show, type Accessor, type JSX } from "solid-js"
 import { normalizeOptions, type Option } from "../../catalog/components.ts"
 import { useHost, useSurface } from "../host.ts"
-import { withIntent, withoutIntent } from "../outward.ts"
+import { isModalFocusMove, withIntent, withoutIntent, type Away } from "../outward.ts"
 import { bool, list, num, oneOf, str, uid, useBound, useChecks, type GenuiComponent } from "./shared.tsx"
 
 // Form fields: Input, Textarea, Select, Checkbox, Radio, Switch, Slider. Buttons and choice controls are in
@@ -20,14 +20,17 @@ const INPUT_TYPES = ["text", "email", "password", "number", "search", "url"] as 
  * This grants no outward intent of its own. Events the user does not mean as an activation (focus, blur, a slider's
  * movement) go through `usePassive`, activations through `useActivation`.
  */
-export function fire(ctx: { emit: (event: string) => void }, event: string): Promise<void> {
+export function fire(ctx: { emit: (event: string) => void }, event: string, away?: Away): Promise<void> {
   const report = (error: unknown) => {
     // An action that did not run (declined confirm, no gesture, rate limit) is not a failure: see src/gui/actions.ts.
     if (error instanceof Error && error.name === "ActionRefused") return
+    // A param that would build too long a text (patches/@json-render%2Fcore): json-render has said so once this task.
+    if ((error as { expansionLimit?: unknown } | undefined)?.expansionLimit === true) return
     console.error(`genui: "${event}" actions failed`, error)
   }
   try {
-    const result: unknown = ctx.emit(event)
+    // json-render's emit (as patched) also takes `away`, told when the event's list waits for a later task.
+    const result: unknown = (ctx.emit as (event: string, away?: Away) => unknown)(event, away)
     return Promise.resolve(result).then(() => undefined, report)
   } catch (error) {
     report(error)
@@ -52,9 +55,9 @@ export function useActivation(ctx: {
   return (event, first) =>
     withIntent(
       surface,
-      async () => {
+      async (away) => {
         if (first && !(await first())) return
-        await fire(ctx, event)
+        await fire(ctx, event, away)
       },
       event === "change" ? { choice: control } : {},
     )
@@ -290,10 +293,13 @@ const Input: GenuiComponent<"Input"> = (ctx) => {
             event.preventDefault()
             void activate("submit")
           }}
-          onFocus={() => void passive("focus")}
+          // Not for the focus moves a modal makes as it opens or closes (see asModalFocusMove): they are not the user's.
+          onFocus={() => {
+            if (!isModalFocusMove()) void passive("focus")
+          }}
           onBlur={() => {
             checks.validate("blur")
-            void passive("blur")
+            if (!isModalFocusMove()) void passive("blur")
           }}
         />
       </div>
@@ -366,16 +372,23 @@ const Textarea: GenuiComponent<"Textarea"> = (ctx) => {
 const SELECT_TRIGGER_CLASS = "genui-select-trigger"
 
 /**
+ * Whether the app's select (Kobalte's typeahead, createTypeSelect) takes a key as typed text: a single character, or a
+ * key name that does not start with a letter, without Ctrl or Meta, whatever Alt is (Alt+letter is a character on
+ * macOS, and Kobalte does not look at it). Space is not, while nothing has been typed: it opens the list.
+ */
+const isTypeaheadKey = (event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey">) =>
+  (event.key.length === 1 || !/^[A-Z]/i.test(event.key)) && event.key !== " " && !event.ctrlKey && !event.metaKey
+
+/**
  * Keeps keys on a closed select's trigger from changing its value: the app's select (Kobalte's) picks the previous or
- * next option on ArrowLeft and ArrowRight, and the first match of typed letters, without opening its list. Each pick
- * is a choice, which genui sends, so arrowing through the options sent the ones passed on the way. The list opens
- * with ArrowDown, ArrowUp, Enter or Space as before, and a pick from it is the choice.
+ * next option on ArrowLeft and ArrowRight, and the first match of typed text (`isTypeaheadKey`), without opening its
+ * list. Each pick is a choice, which genui sends, so arrowing through the options sent the ones passed on the way. The
+ * list opens with ArrowDown, ArrowUp, Enter or Space as before, and a pick from it is the choice.
  */
 function closedTriggerKeys(event: KeyboardEvent) {
   const trigger = event.target
   if (!(trigger instanceof Element) || trigger.getAttribute("aria-expanded") !== "false") return
-  const typed = event.key.length === 1 && event.key !== " " && !event.ctrlKey && !event.metaKey && !event.altKey
-  if (!typed && event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
+  if (!isTypeaheadKey(event) && event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
   event.preventDefault()
   event.stopPropagation()
 }

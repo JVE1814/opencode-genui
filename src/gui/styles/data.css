@@ -131,6 +131,15 @@
   text-align: start;
 }
 
+/* What a long or wide table leaves out (src/gui/costs.ts), quiet like the caption. */
+[data-genui] [data-gu="table"] > [data-slot="cut"] {
+  margin: 0;
+  padding: 6px 12px 4px;
+  color: var(--gu-text-muted);
+  font-size: var(--gu-size-sm);
+  line-height: var(--gu-leading-compact);
+}
+
 [data-genui] [data-gu="table"] > table > tbody > tr[data-slot="empty"] > td {
   height: 40px;
   color: var(--gu-text-muted);

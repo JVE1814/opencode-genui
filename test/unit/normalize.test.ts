@@ -11,6 +11,7 @@ import {
   BOUND_PROPS,
   escapePointer,
   isExpression,
+  MAX_SECRET_BASES,
   normalizeChained,
   secretPaths,
   normalizeSpec,
@@ -20,6 +21,7 @@ import {
   uiStatePath,
 } from "../../src/protocol/normalize.ts"
 import { IGNORED_CHECK, SAFE_CHECKS } from "../../src/protocol/pattern.ts"
+import { seeded as drawFrom } from "./random.ts"
 
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
@@ -861,6 +863,114 @@ describe("normalizeSpec: password inputs", () => {
     expect(secretPaths(output)).toBe(secretPaths(output))
     expect(secretPaths(spec({ name: { type: "Input", props: { label: "N" } } }))).toEqual([])
     expect(secretPaths(null)).toEqual([])
+  })
+
+  describe("secretPaths is linear in the spec", () => {
+    const password = (bind: Loose) => ({ type: "Input", props: { label: "P", type: "password", value: bind } })
+
+    // The walk before it was made linear, which visits every path from an element up to the root: the reference for
+    // what the patterns are on specs without cycles.
+    function reference(input: Loose): string[] {
+      const elements = input.elements as Record<string, Loose>
+      const parents = new Map<string, string[]>()
+      for (const [key, element] of Object.entries(elements))
+        for (const child of element.children ?? []) parents.set(child, [...(parents.get(child) ?? []), key])
+      const itemBases = (key: string, seen: Set<string>): string[] => {
+        const result: string[] = []
+        for (const parent of parents.get(key) ?? []) {
+          if (seen.has(parent)) continue
+          const next = new Set(seen).add(parent)
+          const statePath = elements[parent]?.repeat?.statePath
+          if (typeof statePath === "string") result.push(`${statePath}/*`)
+          else if (statePath && typeof statePath.$item === "string") {
+            const field = statePath.$item ? `/${statePath.$item}` : ""
+            const outer = itemBases(parent, next)
+            result.push(...(outer.length > 0 ? outer.map((base) => `${base}${field}/*`) : [`/**${field}/*`]))
+          } else result.push(...itemBases(parent, next))
+        }
+        return result
+      }
+      const paths = new Set<string>()
+      for (const [key, element] of Object.entries(elements)) {
+        const value = element.props?.value
+        if (element.props?.type !== "password" || !value) continue
+        if (typeof value.$bindState === "string") paths.add(value.$bindState)
+        else {
+          const field = value.$bindItem ? `/${value.$bindItem}` : ""
+          const bases = itemBases(key, new Set([key]))
+          if (bases.length === 0 && !field) continue
+          for (const base of bases.length > 0 ? bases : ["/**"]) paths.add(`${base}${field}`)
+        }
+      }
+      return [...paths].sort()
+    }
+
+    test("the same patterns as walking every path, on 3,000 random specs without cycles", () => {
+      const draw = drawFrom(7)
+      for (let round = 0; round < 3000; round++) {
+        const count = 2 + draw(10)
+        const elements: Loose = {}
+        for (let index = 0; index < count; index++) {
+          const children: string[] = []
+          for (let child = index + 1; child < count; child++)
+            if (draw(10) < 3) children.push(`e${child}`, ...(draw(5) === 0 ? [`e${child}`] : []))
+          const repeat =
+            draw(10) < 3
+              ? { statePath: draw(2) === 0 ? `/list${index}` : { $item: draw(10) < 3 ? "" : `f${index}` } }
+              : undefined
+          const bind = draw(2) === 0 ? { $bindItem: draw(5) === 0 ? "" : "pw" } : { $bindState: `/s${index}` }
+          elements[`e${index}`] = {
+            ...(draw(10) < 3 ? password(bind) : { type: "Stack", props: {} }),
+            children,
+            ...(repeat ? { repeat } : {}),
+          }
+        }
+        const input = { root: "e0", elements }
+        expect([...secretPaths(input as unknown as Spec)]).toEqual(reference(input))
+      }
+    })
+
+    test("a child listed 25,000 times, and a lattice of repeats 18 levels deep, take milliseconds", () => {
+      const repeated = {
+        root: "list",
+        elements: {
+          list: { type: "Stack", props: {}, repeat: { statePath: "/rows" }, children: Array(25_000).fill("pw") },
+          pw: { ...password({ $bindItem: "pw" }), children: [] },
+        },
+      }
+      let start = performance.now()
+      expect(secretPaths(repeated as unknown as Spec)).toEqual(["/rows/*/pw"])
+      expect(performance.now() - start).toBeLessThan(150)
+
+      // Every element of a level lists both elements of the next one: 2^18 paths from the Input up to the top.
+      const elements: Loose = { top: { type: "Stack", props: {}, repeat: { statePath: "/g" }, children: ["a0", "b0"] } }
+      for (let level = 0; level < 18; level++) {
+        const children = level === 17 ? ["pw"] : [`a${level + 1}`, `b${level + 1}`]
+        elements[`a${level}`] = { type: "Stack", props: {}, children, repeat: { statePath: { $item: `x${level}` } } }
+        elements[`b${level}`] = { type: "Stack", props: {}, children, repeat: { statePath: { $item: `y${level}` } } }
+      }
+      elements.pw = { ...password({ $bindItem: "pw" }), children: [] }
+      start = performance.now()
+      const lattice = secretPaths({ root: "top", elements } as unknown as Spec)
+      expect(performance.now() - start).toBeLessThan(150)
+      // Past MAX_SECRET_BASES patterns, an element's items match at any depth: still every item's pw.
+      expect(lattice.length).toBeLessThanOrEqual(2 * (MAX_SECRET_BASES + 1))
+      expect(lattice.every((path) => path.startsWith("/**/") && path.endsWith("/pw"))).toBe(true)
+    })
+
+    test("an element that is its own ancestor gets the any-depth pattern", () => {
+      const cycle = {
+        root: "a",
+        elements: {
+          a: { type: "Stack", props: {}, repeat: { statePath: "/rows" }, children: ["b"] },
+          b: { type: "Stack", props: {}, repeat: { statePath: { $item: "kids" } }, children: ["c"] },
+          c: { type: "Stack", props: {}, children: ["b", "pw"] },
+          pw: { ...password({ $bindItem: "pw" }), children: [] },
+        },
+      }
+      // Rows of b nest in rows of b without end: /rows/*/kids/*/kids/*/.../pw, which only an any-depth pattern covers.
+      expect(secretPaths(cycle as unknown as Spec)).toEqual(["/**/kids/*/pw"])
+    })
   })
 
   test("seeding both roots keeps the state's identity while seeds do not change", () => {

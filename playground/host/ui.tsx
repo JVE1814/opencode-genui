@@ -373,7 +373,14 @@ function Select(props: {
             if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
               event.preventDefault()
               next = index === -1 ? props.options[0] : props.options[index + (event.key === "ArrowLeft" ? -1 : 1)]
-            } else if (event.key.length === 1 && event.key !== " " && !event.ctrlKey && !event.metaKey) {
+            } else if (
+              // Kobalte's createTypeSelect: a character or a key name not starting with a letter, without Ctrl or
+              // Meta, whatever Alt is.
+              (event.key.length === 1 || !/^[A-Z]/i.test(event.key)) &&
+              event.key !== " " &&
+              !event.ctrlKey &&
+              !event.metaKey
+            ) {
               const letter = event.key.toLowerCase()
               const count = props.options.length
               for (let step = 1; step <= count && !next; step++) {

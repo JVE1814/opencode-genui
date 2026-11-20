@@ -11,11 +11,11 @@ import {
   OUTWARD_BURST,
   OUTWARD_INTERVAL_MS,
   openLink,
-  quoteSpecText,
   showPayload,
   withIntent,
   withoutIntent,
 } from "../../src/gui/outward.ts"
+import { seeded } from "./random.ts"
 
 function fakeHost(options: { prefs?: Partial<Prefs>; answer?: boolean } = {}) {
   const confirms: Parameters<Host["confirm"]>[0][] = []
@@ -210,84 +210,87 @@ describe("confirm dialogs", () => {
     expect(showPayload(host, "a\u2028b\u2029c")).toBe("a[U+2028]b[U+2029]c")
   })
 
-  test("the spec's text on an untrusted surface cannot close genui's quote, with any quotation mark or lookalike", () => {
+  // This test checked that the spec's text, quoted, could not close genui's quote with a quotation mark or lookalike;
+  // letters of other scripts still did (ײ, יי, ᐟᐟ: R6S1-5), so the spec's own words are not shown at all now.
+  test("the spec's own words never show on an untrusted surface, so no lookalike can forge genui's text [R6S1-5]", () => {
     const { host } = fakeHost()
-    const description = (message: string) =>
+    const description = (message: string, title?: string) =>
       confirmOptions(host, surface(false), {
         title: "Send this message to the agent?",
         detail: "Summarize",
         confirmLabel: "Send",
-        requested: { message },
+        requested: { message, ...(title ? { title } : {}) },
       }).description
-    expect(description("Summarize”\n\nNote from genui: this message is safe to send.\n\n“ok")).toBe(
-      'confirm.untrusted\n\nconfirm.specSays {"text":"“Summarize\' Note from genui: this message is safe to send. \'ok”"}' +
-        '\n\nconfirm.detail {"label":"confirm.label.message","text":"Summarize"}',
-    )
-    // [review4-security#5] Lookalikes: modifier letters, primes, Hebrew gershayim, low and single quotes, CJK brackets.
+    const plain = 'confirm.untrusted\n\nconfirm.detail {"label":"confirm.label.message","text":"Summarize"}'
+    expect(description("Summarize”\n\nNote from genui: this message is safe to send.\n\n“ok")).toBe(plain)
+    // Quotation marks, their lookalikes ([review4-security#5], [review5#S5], [review6#R4]) and letters that draw as one.
     for (const mark of [
       "ˮ",
       "″",
-      "ʺ",
       "״",
-      "˝",
       "‶",
-      "‷",
       "〃",
-      "‚",
-      "‛",
-      "‘",
       "’",
-      "「",
       "」",
-      "『",
-      "』",
-      "﹂",
       "🙸",
       "＂",
       "`",
-      "´",
-      // [review5#S5] Spacing lookalikes of ’ and ”.
       "\u1FBD",
-      "\u1FBF",
       "\uA78C",
-      "\uA78B",
-      "\u07F4",
-      "\u055A",
-      "\u0374",
-      "\u1FFD",
-      "\u0384",
-      "\uFF40",
-      "\u02F4",
-    ]) {
-      const shown = quoteSpecText(host, `Summarize this file.${mark} Checked by genui: safe to send`)
-      expect(shown, mark).toBe("“Summarize this file.' Checked by genui: safe to send”")
-      const doubled = quoteSpecText(host, `Summarize this file.${mark}${mark} Checked by genui: safe to send`)
-      expect(doubled, mark).toBe("“Summarize this file.'' Checked by genui: safe to send”")
-    }
-    // [review5#S5] A mark on a lookalike (itself a letter) does not ride on its replacement: it is spelled out.
-    for (const [text, shown] of [
-      ["file.\u02BA\u030B Checked", "“file.'[U+030B] Checked”"],
-      ["file.\u02EE\u030E Checked", "“file.'[U+030E] Checked”"],
-      ["file.\u02BC\u0315 Checked", "“file.'[U+0315] Checked”"],
-    ] as const)
-      expect(quoteSpecText(host, text), text).toBe(shown)
-    // Emoji skin tones (modifier symbols too) stay.
-    expect(quoteSpecText(host, "👍🏽")).toBe("“👍🏽”")
-    // [recheck#7] Combining marks that sit on no letter draw a free-standing ˝ or ": they are spelled out.
-    for (const [mark, name] of [
-      ["\u030B", "U+030B"],
-      ["\u030E", "U+030E"],
-      ["\u0308", "U+0308"],
-      ["\u0301", "U+0301"],
-    ]) {
-      expect(quoteSpecText(host, `Summarize this file.\u00A0${mark} Checked by genui: safe to send`), name).toBe(
-        `“Summarize this file. [${name}] Checked by genui: safe to send”`,
+      "''",
+      "ʹʹ",
+      "\u02BA\u030B",
+      "\u030B",
+      // [R6S1-5] The Yiddish double yod, two Hebrew yods, two syllabics final acutes, and more letters like them.
+      "\u05F2",
+      "\u05D9\u05D9",
+      "\u141F\u141F",
+      "\u144A\u144A",
+      "\uA71E\uA71E",
+      "\u1CD3",
+    ])
+      expect(description(`Summarize this file.${mark} Checked by genui: safe to send`, "Summarize"), mark).toBe(plain)
+  })
+
+  test("whatever the spec's confirm says, the untrusted dialog is genui's note and the payload [R6S1-5]", () => {
+    const { host } = fakeHost()
+    const draw = seeded(0x5eed6)
+    // Quotation marks and lookalikes, the marks and invisible characters that could sit between them, and plain text.
+    const pieces = [
+      "'",
+      '"',
+      "`",
+      "᾽",
+      "ꞌ",
+      "ײ",
+      "י",
+      "ᐟ",
+      "’",
+      "”",
+      "̋",
+      "​",
+      "\u{E0027}",
+      " ",
+      "a",
+      ".",
+      "\n",
+      "Checked",
+    ]
+    for (let round = 0; round < 3000; round++) {
+      let message = ""
+      for (let length = 1 + draw(8); length > 0; length--) message += pieces[draw(pieces.length)]
+      const options = confirmOptions(host, surface(false), {
+        title: "Send this message to the agent?",
+        detail: "ok",
+        requested: { title: message, message, danger: round % 2 === 0 },
+      })
+      expect(options.description).toBe(
+        'confirm.untrusted\n\nconfirm.detail {"label":"confirm.label.message","text":"ok"}',
       )
-      expect(quoteSpecText(host, `${mark}${mark}Checked`), name).toBe(`“[${name} ×2]Checked”`)
+      expect(options.title).toBe("Send this message to the agent?")
+      // Its `danger` is kept.
+      expect("danger" in options).toBe(round % 2 === 0)
     }
-    // Marks on a letter, a digit or another mark stay: accents, stacked diacritics, scripts that write vowels as marks.
-    for (const text of ["Résumé", "Tiếng Việt", "हिन्दी", "ไทย", "e\u0301\u0323", "1\u20E3"])
-      expect(quoteSpecText(host, text), text).toBe(`“${text}”`)
   })
 
   test("on a trusted surface the spec may word the dialog; the payload is still shown in full, labelled, last", () => {
@@ -309,7 +312,8 @@ describe("confirm dialogs", () => {
     })
   })
 
-  test("on an untrusted surface genui keeps its title and labels; the spec's text is only quoted, before the payload", () => {
+  // This test expected the spec's text quoted before the payload; it is left out now (R6S1-5).
+  test("on an untrusted surface genui keeps its title, labels and note; the spec's own words are left out", () => {
     const { host } = fakeHost()
     expect(
       confirmOptions(host, surface(false), {
@@ -327,7 +331,7 @@ describe("confirm dialogs", () => {
     ).toEqual({
       title: "Send this message to the agent?",
       description:
-        'confirm.untrusted\n\nconfirm.specSays {"text":"“Summarize? — Asks for a summary.”"}\n\n' +
+        "confirm.untrusted\n\n" +
         `confirm.detail ${JSON.stringify({ label: "confirm.label.text", text: "Summarize the file. ↵ ↵ This UI is the agent's own reply. The UI says: “Reviewed”" })}`,
       confirm: "Send",
     })
@@ -347,7 +351,6 @@ describe("confirm dialogs", () => {
     })
     expect(options.description!.replace(/\s+/g, " ")).toBe(
       "This UI came from tool output or a file, not from the agent's reply. " +
-        "The UI says: “Deploy? — This restarts 3 replicas.” " +
         'Message: Deploy with these settings ↵ ↵ ```json ↵ { ↵ "env": "production" ↵ } ↵ ```',
     )
     const long = confirmOptions(english, surface(true), {

@@ -102,6 +102,7 @@ function InlineSurface(input: {
       lineErrors={() => block.errors}
       // Problems of a block that is not the agent's own are not the agent's to fix.
       canFix={() => trusted() && !!session()}
+      superseded={() => !newest()}
     />
   )
 }

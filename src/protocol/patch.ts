@@ -79,6 +79,42 @@ function setAt(doc: unknown, tokens: readonly string[], value: unknown, insert: 
   return { ...source, [head]: child }
 }
 
+// setAt for "replace", into containers of `owned` (made by this same run) in place: each container on the paths is
+// copied at most once, whatever number of values are set under it.
+function setOwned(doc: unknown, tokens: readonly string[], depth: number, value: unknown, owned: Set<object>): unknown {
+  const head = tokens[depth]
+  if (head === undefined) return value
+  if (Array.isArray(doc)) {
+    const index = arrayIndex(head, doc.length, true)
+    if (index < 0) return doc
+    const child = setOwned(doc[index], tokens, depth + 1, value, owned)
+    if (index < doc.length && Object.is(doc[index], child)) return doc
+    let target = doc
+    if (!owned.has(doc)) owned.add((target = doc.slice()))
+    target[index] = child
+    return target
+  }
+  const source = isObject(doc) ? doc : {}
+  const child = setOwned(source[head], tokens, depth + 1, value, owned)
+  if (isObject(doc) && Object.hasOwn(source, head) && Object.is(source[head], child)) return doc
+  let target = source
+  if (source !== doc || !owned.has(source)) owned.add((target = { ...source }))
+  target[head] = child
+  return target
+}
+
+/**
+ * `replace` operations applied in order, as many `applyPatch` calls would (the same result), copying each container
+ * on their paths once: one at a time, each copied every container on its path, so ten thousand values set under one
+ * object copied it ten thousand times. Each path must be a parsed pointer (see `parsePointer`).
+ */
+export function replaceAll<T>(doc: T, replacements: Iterable<readonly [tokens: readonly string[], value: unknown]>): T {
+  const owned = new Set<object>()
+  let next: unknown = doc
+  for (const [tokens, value] of replacements) next = setOwned(next, tokens, 0, value, owned)
+  return next as T
+}
+
 function removeAt(doc: unknown, tokens: readonly string[]): unknown {
   const [head, ...rest] = tokens
   if (head === undefined) return doc
@@ -104,36 +140,87 @@ function removeAt(doc: unknown, tokens: readonly string[]): unknown {
 }
 
 /**
+ * How much "copy" operations may add to a document in all, in characters of its strings plus entries of its lists and
+ * objects, counted as the copies read written out. A copy shares the value it copies (see `applyPatch`), so copying a
+ * list into a new one twice, and that one into the next, doubled what the document holds written out at each step: 24
+ * such steps, 4 KB, made a state of 800 million characters, and whatever turned it into text (a canvas's stored
+ * snapshot, an expression) froze the window for seconds. A copy past this is not applied (see `copiesRefused`).
+ */
+export const MAX_COPIED = 1_000_000
+
+// What copies added to each document so far (carried to the documents operations make from it), and whether one was
+// refused.
+const copies = new WeakMap<object, { readonly added: number; readonly refused: boolean }>()
+
+/** Whether a "copy" was left out of `doc`, or of a document it was made from, for MAX_COPIED. */
+export const copiesRefused = (doc: unknown): boolean =>
+  typeof doc === "object" && doc !== null && copies.get(doc)?.refused === true
+
+/** The size of a value written out (see MAX_COPIED), counting a shared part each time it is reached, up to past `max`. */
+export function writtenSize(value: unknown, max: number): number {
+  let size = 0
+  const stack: unknown[] = [value]
+  while (stack.length > 0 && size <= max) {
+    const item = stack.pop()
+    if (typeof item === "string") size += item.length
+    else if (item && typeof item === "object") {
+      const entries = Array.isArray(item) ? item : Object.values(item)
+      size += entries.length
+      for (const entry of entries) stack.push(entry)
+    }
+  }
+  return size
+}
+
+function applyOne(doc: unknown, patch: Patch, tokens: readonly string[], added: number) {
+  switch (patch.op) {
+    case "add":
+      return { next: setAt(doc, tokens, patch.value, true), added }
+    case "replace":
+      return { next: setAt(doc, tokens, patch.value, false), added }
+    case "remove":
+      return { next: removeAt(doc, tokens), added }
+    case "move":
+    case "copy": {
+      const from = patch.from === undefined ? undefined : parsePointer(patch.from)
+      if (!from) return { next: doc, added }
+      const value = getAt(doc, from)
+      if (value === undefined) return { next: doc, added }
+      // RFC 6902: moving a value to where it is changes nothing, and moving it into its own child is an error.
+      if (patch.op === "move" && from.length <= tokens.length && from.every((token, index) => token === tokens[index]))
+        return { next: doc, added }
+      if (patch.op === "move") return { next: setAt(removeAt(doc, from), tokens, value, true), added }
+      const size = writtenSize(value, MAX_COPIED - added)
+      if (added + size > MAX_COPIED) return undefined
+      return { next: setAt(doc, tokens, value, true), added: added + size }
+    }
+    default:
+      return { next: doc, added }
+  }
+}
+
+/**
  * Applies one operation without mutating `doc`: containers on the path are copied and everything else is shared, so a
  * renderer that compares by identity updates only what changed. It never throws. An operation that cannot apply (a bad
- * pointer, a missing source) returns `doc` itself; "replace" sets a missing target, as json-render's streams expect.
+ * pointer, a missing source) returns `doc` itself; "replace" sets a missing target, as json-render's streams expect. A
+ * "copy" that would take the document's copies past MAX_COPIED is not applied either.
  */
 export function applyPatch<T>(doc: T, patch: Patch): T {
   const tokens = parsePointer(patch.path)
   if (!tokens) return doc
-
-  switch (patch.op) {
-    case "add":
-      return setAt(doc, tokens, patch.value, true) as T
-    case "replace":
-      return setAt(doc, tokens, patch.value, false) as T
-    case "remove":
-      return removeAt(doc, tokens) as T
-    case "move":
-    case "copy": {
-      const from = patch.from === undefined ? undefined : parsePointer(patch.from)
-      if (!from) return doc
-      const value = getAt(doc, from)
-      if (value === undefined) return doc
-      // RFC 6902: moving a value to where it is changes nothing, and moving it into its own child is an error.
-      if (patch.op === "move" && from.length <= tokens.length && from.every((token, index) => token === tokens[index]))
-        return doc
-      const base = patch.op === "move" ? removeAt(doc, from) : doc
-      return setAt(base, tokens, value, true) as T
-    }
-    default:
-      return doc
+  const record = typeof doc === "object" && doc !== null ? copies.get(doc) : undefined
+  const result = applyOne(doc, patch, tokens, record?.added ?? 0)
+  if (!result) {
+    if (typeof doc !== "object" || doc === null) return doc
+    // A document of its own says so, rather than the one before this operation (still the result of the ones before).
+    const marked = Array.isArray(doc) ? [...doc] : { ...doc }
+    copies.set(marked, { added: record?.added ?? 0, refused: true })
+    return marked as T
   }
+  const next = result.next
+  if (next !== doc && typeof next === "object" && next !== null && (record || result.added > 0))
+    copies.set(next, { added: result.added, refused: record?.refused ?? false })
+  return next as T
 }
 
 /** Applies operations in order, starting at `from`, so a growing stream only pays for what is new. */

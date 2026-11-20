@@ -536,38 +536,66 @@ function seedState(
 const NO_SECRETS: readonly string[] = Object.freeze([])
 const secretCache = new WeakMap<object, readonly string[]>()
 
+/** How many item path patterns one element may have; past it, its items match at any depth (`/**`). */
+export const MAX_SECRET_BASES = 64
+
 /**
  * The state paths a spec's password Inputs (see isSecretInput) write to besides the secret root: an explicit
  * `{ "$bindState": "/form/pw" }`, or `{ "$bindItem": "pw" }` inside a repeat, as `/<repeat statePath>/*\/pw` (`*` is
  * any item; a repeat whose path is not known statically gives `**\/pw`, any depth). The state store never persists
  * what the user types there.
+ *
+ * Linear in the spec: each element's parents are kept once each, and each element's patterns are worked out once. An
+ * element that is its own ancestor (a cycle, whose rows nest without end) or has more than MAX_SECRET_BASES patterns
+ * (a lattice of repeats doubles them at every level) gets the any-depth pattern, which covers more paths, never fewer.
  */
 export function secretPaths(spec: Spec | null | undefined): readonly string[] {
   if (!isRecord(spec) || !isRecord(spec.elements)) return NO_SECRETS
   const cached = secretCache.get(spec)
   if (cached) return cached
   const elements = spec.elements as Record<string, UIElement>
-  const parents = new Map<string, string[]>()
+  const parents = new Map<string, Set<string>>()
   for (const [key, element] of Object.entries(elements))
     for (const child of Array.isArray(element?.children) ? element.children : [])
-      if (typeof child === "string") parents.set(child, [...(parents.get(child) ?? []), key])
+      if (typeof child === "string") {
+        let set = parents.get(child)
+        if (!set) parents.set(child, (set = new Set()))
+        set.add(key)
+      }
 
   // The state paths of the items of the repeats `key` renders inside, as patterns.
-  const itemBases = (key: string, seen: Set<string>): string[] => {
-    const result: string[] = []
+  const bases = new Map<string, readonly string[]>()
+  const open = new Set<string>()
+  const ANY: readonly string[] = ["/**"]
+  const itemBases = (key: string): readonly string[] => {
+    const known = bases.get(key)
+    if (known) return known
+    open.add(key)
+    const result = new Set<string>()
+    let any = false
     for (const parent of parents.get(key) ?? []) {
-      if (seen.has(parent)) continue
-      const next = new Set(seen).add(parent)
+      if (open.has(parent)) {
+        any = true
+        break
+      }
       const repeat: unknown = elements[parent]?.repeat
       const statePath = isRecord(repeat) ? repeat.statePath : undefined
-      if (typeof statePath === "string") result.push(`${statePath.startsWith("/") ? statePath : `/${statePath}`}/*`)
+      if (typeof statePath === "string") result.add(`${statePath.startsWith("/") ? statePath : `/${statePath}`}/*`)
       else if (isRecord(statePath) && typeof statePath.$item === "string") {
         const field = statePath.$item ? `/${statePath.$item}` : ""
-        const outer = itemBases(parent, next)
-        result.push(...(outer.length > 0 ? outer.map((base) => `${base}${field}/*`) : [`/**${field}/*`]))
-      } else result.push(...itemBases(parent, next))
+        const outer = itemBases(parent)
+        for (const base of outer.length > 0 ? outer.map((base) => `${base}${field}/*`) : [`/**${field}/*`])
+          result.add(base)
+      } else for (const base of itemBases(parent)) result.add(base)
+      if (result.size > MAX_SECRET_BASES) {
+        any = true
+        break
+      }
     }
-    return result
+    open.delete(key)
+    const list = any ? ANY : [...result]
+    bases.set(key, list)
+    return list
   }
 
   const paths = new Set<string>()
@@ -580,10 +608,10 @@ export function secretPaths(spec: Spec | null | undefined): readonly string[] {
       if (!path.startsWith(`/${UI_SECRET_ROOT}/`)) paths.add(path)
     } else if (typeof value.$bindItem === "string") {
       const field = value.$bindItem ? `/${value.$bindItem}` : ""
-      const bases = itemBases(key, new Set([key]))
+      const found = itemBases(key)
       // (Outside any repeat json-render writes nothing for it.)
-      if (bases.length === 0 && !field) continue
-      for (const base of bases.length > 0 ? bases : ["/**"]) paths.add(`${base}${field}`)
+      if (found.length === 0 && !field) continue
+      for (const base of found.length > 0 ? found : ["/**"]) paths.add(`${base}${field}`)
     }
   }
   const result = paths.size === 0 ? NO_SECRETS : Object.freeze([...paths].sort())

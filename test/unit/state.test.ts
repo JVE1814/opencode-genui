@@ -1,13 +1,22 @@
 import { describe, expect, test } from "bun:test"
 import {
   createTrackedStore,
+  groupEditsBy,
   isJsonValue,
   isSecretPath,
+  EVICTED_TOGETHER,
   MAX_EDIT_SIZE,
+  MAX_LIVE_EDITS,
+  MAX_LIVE_SIZE,
   MAX_OVERRIDES,
+  MAX_STORED_SIZE,
+  MAX_WINDOW_LIVE_SIZE,
   tooLarge,
 } from "../../src/runtime/state.ts"
 import { UI_SECRET_ROOT } from "../../src/shared/constants.ts"
+
+/** Resolves in a later task: edits made after it belong to another user action. */
+const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 function counter(subscribe: (listener: () => void) => () => void) {
   const calls = { count: 0 }
@@ -422,14 +431,227 @@ describe("createTrackedStore", () => {
     expect(store.overrides().map(([path]) => path)).toEqual(["/ok"])
   })
 
-  test("caps overrides at the newest 500", () => {
+  // This test used to expect `store.get("/k9")` to be undefined: the cap dropped the oldest edits from the live state
+  // too, not only from the stored copy, so a select-all over 600 rows lost its own click [review6#R7]. (It stored 500;
+  // a select-all over a whole UI writes up to 2,000 edits, and is stored with the edits after it now: R6F1-4.)
+  test("stores the newest MAX_OVERRIDES edits in whole actions; the live state keeps them all [review6#R7]", () => {
+    let work: object | undefined
+    groupEditsBy(() => work)
+    try {
+      const store = createTrackedStore()
+      // Each edit an action of its own.
+      for (let index = 0; index < MAX_OVERRIDES + 10; index++) {
+        work = {}
+        store.set(`/k${index}`, index)
+      }
+      const overrides = store.overrides()
+      expect(overrides).toHaveLength(MAX_OVERRIDES)
+      expect(overrides[0]![0]).toBe("/k10")
+      expect(store.get("/k9")).toBe(9)
+      expect(store.get("/k0")).toBe(0)
+      expect(store.get(`/k${MAX_OVERRIDES + 9}`)).toBe(MAX_OVERRIDES + 9)
+    } finally {
+      groupEditsBy(undefined)
+    }
+  })
+
+  test("a select-all over 600 rows, then unselect-all: the live state follows both, the stored copy is bounded [review6#R7]", async () => {
+    const rows = Array.from({ length: 600 }, (_, index) => ({ id: index, checked: false }))
     const store = createTrackedStore()
-    for (let index = 0; index < MAX_OVERRIDES + 10; index++) store.set(`/k${index}`, index)
-    const overrides = store.overrides()
-    expect(overrides).toHaveLength(MAX_OVERRIDES)
-    expect(overrides[0]![0]).toBe("/k10")
-    expect(store.get("/k9")).toBeUndefined()
-    expect(store.get(`/k${MAX_OVERRIDES + 9}`)).toBe(MAX_OVERRIDES + 9)
+    store.setBase({ all: false, rows })
+    const checked = () =>
+      (store.get("/rows") as { checked: boolean }[]).filter((row) => row.checked).length + (store.get("/all") ? 1 : 0)
+    // A click and the watches it wakes write in one task: one action of 601 edits.
+    store.set("/all", true)
+    for (let index = 0; index < rows.length; index++) store.set(`/rows/${index}/checked`, true)
+    expect(checked()).toBe(601)
+    // The newest action is stored whole: a reload brings back all of it, never half.
+    expect(store.overrides()).toHaveLength(601)
+    await nextTask()
+    store.set("/all", false)
+    for (let index = 0; index < rows.length; index++) store.set(`/rows/${index}/checked`, false)
+    expect(checked()).toBe(0)
+    expect(store.overrides().length).toBeLessThanOrEqual(601)
+    expect(store.overrides().every(([, value]) => value === false)).toBe(true)
+    // An older action that does not fit beside the newest (here by size) is left out of the stored copy, whole.
+    await nextTask()
+    const note = "n".repeat(MAX_STORED_SIZE - 1000)
+    store.set("/note", note)
+    expect(store.overrides().map(([path]) => path)).toEqual(["/note"])
+    expect(checked()).toBe(0)
+    expect(store.get("/note")).toBe(note)
+  })
+
+  test("an action's edits are stored together when another action's come between them [review6 integration]", () => {
+    // json-render's time slice sends the rest of a select-all to later tasks, and a key press can come in between: the
+    // two are kept apart by json-render's work (see groupEditsBy), not by task.
+    let work: object | undefined
+    groupEditsBy(() => work)
+    try {
+      const store = createTrackedStore()
+      const select = {}
+      const typing = {}
+      // 600 edits of about 370 bytes stored: the select-all fits alone, not beside a long note. (The bound is now the
+      // 262,080 bytes of the entry snapshot.ts writes, not 250,000 characters [review8#R6F2-1], so the note is longer.)
+      const value = "v".repeat(350)
+      const note = "n".repeat(50_000)
+      work = select
+      for (let index = 0; index < 300; index++) store.set(`/rows/${index}`, value)
+      work = typing
+      store.set("/note", note)
+      work = select
+      for (let index = 300; index < 600; index++) store.set(`/rows/${index}`, value)
+      // The newest action, the select-all, is stored whole; the key press does not fit beside it.
+      const stored = store.overrides().map(([path]) => path)
+      expect(stored).toHaveLength(600)
+      expect(stored).not.toContain("/note")
+      work = typing
+      store.set("/note", `${note}b`)
+      // Now the key press is the newest; the select-all does not fit beside it, and goes whole.
+      expect(store.overrides().map(([path]) => path)).toEqual(["/note"])
+      expect(store.get("/rows/599")).toBe(value)
+    } finally {
+      groupEditsBy(undefined)
+    }
+  })
+
+  test("a reload keeps the stored edits in their actions: never half of a select-all after the next edit [R6F1-4]", () => {
+    let work: object | undefined
+    groupEditsBy(() => work)
+    try {
+      const rows = Array.from({ length: 600 }, () => ({ checked: false }))
+      const first = createTrackedStore()
+      first.setBase({ all: false, rows })
+      work = {}
+      first.set("/all", true)
+      for (let index = 0; index < rows.length; index++) first.set(`/rows/${index}/checked`, true)
+      const saved = first.overrides()
+      expect(saved).toHaveLength(601)
+      // A reload: a new store loads the stored copy; then one more edit, and the copy is stored again.
+      const second = createTrackedStore()
+      second.setBase({ all: false, rows })
+      second.loadOverrides(saved)
+      work = {}
+      second.set("/rows/5/checked", false)
+      const again = second.overrides()
+      // Loaded edits came back as one action each, so this kept the newest 499 of them: rows 0-100 and the click went.
+      expect(again).toHaveLength(601)
+      const third = createTrackedStore()
+      third.setBase({ all: false, rows })
+      third.loadOverrides(again)
+      expect(third.get("/all")).toBe(true)
+      expect((third.get("/rows") as { checked: boolean }[]).filter((row) => row.checked)).toHaveLength(599)
+      // Where they do not fit beside a newer edit, all of them go, never part.
+      const big = createTrackedStore()
+      big.setBase({ all: false, rows })
+      big.loadOverrides(
+        saved.map(([path, value, recorded]) => [path, value === true ? "y".repeat(300) : value, recorded]),
+      )
+      work = {}
+      big.set("/note", "n".repeat(100_000))
+      expect(big.overrides().map(([path]) => path)).toEqual(["/note"])
+    } finally {
+      groupEditsBy(undefined)
+    }
+  })
+
+  test("the live edits of a store, and of the window, are bounded in size [R6S1-3]", async () => {
+    const warn = console.warn
+    const warnings: string[] = []
+    console.warn = (message: string) => void warnings.push(message)
+    const stores: ReturnType<typeof createTrackedStore>[] = []
+    try {
+      const text = "x".repeat(MAX_EDIT_SIZE)
+      const store = createTrackedStore()
+      stores.push(store)
+      // One action: it fills the store, and an edit past its bound is ignored (none of the action's own edits go).
+      const fill = MAX_LIVE_SIZE / MAX_EDIT_SIZE
+      for (let index = 0; index < fill + 1; index++) store.set(`/a${index}`, text)
+      expect(store.get(`/a${fill - 1}`)).toBe(text)
+      expect(store.get(`/a${fill}`)).toBeUndefined()
+      expect(warnings.filter((warning) => warning.includes("Ignored an edit")).length).toBe(1)
+      // A later action is refused too: none of the store's edits is dropped for it (pushing out the oldest undid what
+      // the user did, such as the press that built the long text the others copy).
+      await nextTask()
+      store.set("/b", text)
+      expect(store.get("/b")).toBeUndefined()
+      expect(store.get("/a0")).toBe(text)
+      // Replacing an edit frees its room first.
+      store.set("/a0", "short")
+      store.set("/b", text.slice(100))
+      expect(store.get("/b")).toBe(text.slice(100))
+      // The window holds MAX_WINDOW_LIVE_SIZE in all: other stores fill it, and then no store may grow.
+      let refused = 0
+      for (let round = 0; round < MAX_WINDOW_LIVE_SIZE / MAX_LIVE_SIZE + 1; round++) {
+        const other = createTrackedStore()
+        stores.push(other)
+        for (let index = 0; index < fill; index++) other.set(`/c${index}`, text)
+        if (other.get(`/c${fill - 1}`) === undefined) refused++
+      }
+      expect(refused).toBeGreaterThan(0)
+      // A store the window forgot gives its room back.
+      for (const other of stores.splice(1)) other.dispose()
+      const after = createTrackedStore()
+      stores.push(after)
+      after.set("/d", text)
+      expect(after.get("/d")).toBe(text)
+    } finally {
+      for (const store of stores) store.dispose()
+      console.warn = warn
+    }
+  })
+
+  test("rewriting thousands of edits stays cheap [review6#R7]", () => {
+    const store = createTrackedStore()
+    for (let index = 0; index < 2000; index++) store.set(`/rows/${index}`, index)
+    const started = performance.now()
+    // Unselect after select: each write replaces an edit. Past 500 edits, every write composed them all again (47 s
+    // for these 2,000 writes); a replaced edit is now found by its path.
+    for (let index = 0; index < 2000; index++) store.set(`/rows/${index}`, -index)
+    expect(performance.now() - started).toBeLessThan(3000)
+    expect(store.get("/rows/1999")).toBe(-1999)
+    expect(store.get("/rows/0")).toBe(-0)
+    // A parent's write still replaces the edits under it.
+    store.set("/rows", [])
+    expect(store.get("/rows/1")).toBeUndefined()
+    expect(store.overrides().map(([path]) => path)).toEqual(["/rows"])
+  })
+
+  // This test expected the two oldest edits to go for two new ones: each write at the bound composed the whole snapshot
+  // again, 13 s per key press with 10,000 edits under one object (R6S1-3). They go EVICTED_TOGETHER at a time now.
+  test("the live state keeps at most MAX_LIVE_EDITS edits, never dropping the current action's [review6#R7]", async () => {
+    const store = createTrackedStore()
+    // Paths spread over 100 objects, so each write copies little.
+    const path = (index: number) => `/old/${index % 100}/${Math.floor(index / 100)}`
+    for (let index = 0; index < MAX_LIVE_EDITS; index++) store.set(path(index), index)
+    await nextTask()
+    store.set("/new/a", 1)
+    store.set("/new/b", 2)
+    expect(store.get(path(0))).toBeUndefined()
+    expect(store.get(path(EVICTED_TOGETHER))).toBeUndefined()
+    expect(store.get(path(EVICTED_TOGETHER + 1))).toBe(EVICTED_TOGETHER + 1)
+    expect(store.get(path(MAX_LIVE_EDITS - 1))).toBe(MAX_LIVE_EDITS - 1)
+    expect(store.get("/new/a")).toBe(1)
+    expect(store.get("/new/b")).toBe(2)
+  })
+
+  test("writes past MAX_LIVE_EDITS stay cheap, also with every edit under one object [R6S1-3]", async () => {
+    // A key press whose 2,000 row watches each wrote a new path under /x: past the bound, each write composed the
+    // snapshot from all 10,000 edits, copying /x once per edit, and the window froze for 13 s per key press.
+    const store = createTrackedStore()
+    store.setBase({ x: {} })
+    // (Most edits spread over 100 objects, so filling the store copies little; the writes past the bound go under /x.)
+    for (let index = 0; index < MAX_LIVE_EDITS - 1000; index++)
+      store.set(`/old/${index % 100}/${Math.floor(index / 100)}`, index)
+    let key = 0
+    for (let index = 0; index < 1000; index++) store.set(`/x/k${key++}`, ".")
+    await nextTask()
+    const started = performance.now()
+    for (let index = 0; index < 1000; index++) store.set(`/x/k${key++}`, ".")
+    expect(performance.now() - started).toBeLessThan(1500)
+    const x = store.get("/x") as Record<string, unknown>
+    expect(Object.keys(x).length).toBeLessThanOrEqual(MAX_LIVE_EDITS)
+    expect(x[`k${key - 1}`]).toBe(".")
   })
 
   test("overrides() keeps its identity until edits change", () => {

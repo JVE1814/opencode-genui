@@ -223,7 +223,8 @@ export const componentDefinitions = {
       fit: z.enum(["cover", "contain"]).optional(),
       caption: z.string().optional(),
     }),
-    description: "An image from an https URL or a data:image URL. The user may need to click to load remote images.",
+    description:
+      "An image from an https URL or a raster data:image URL (no SVG). The user may need to click to load remote images.",
   },
   Avatar: {
     props: z.object({
@@ -407,7 +408,7 @@ export const componentDefinitions = {
     props: z.object({ title: z.string(), description: z.string().optional(), openPath: z.string() }),
     slots: ["default"],
     description:
-      'A modal dialog shown while the boolean at state path openPath is true. Open it with setState { "statePath": "/dialogOpen", "value": true }; it closes itself.',
+      'A modal dialog shown while the boolean at state path openPath is true. Open it from a press with setState {"statePath":"/dialogOpen","value":true}; it closes itself.',
   },
   Drawer: {
     props: z.object({ title: z.string(), description: z.string().optional(), openPath: z.string() }),

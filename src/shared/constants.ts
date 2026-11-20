@@ -35,3 +35,12 @@ export const UI_SECRET_ROOT = "__genui_secret"
  */
 export const RENDER_UNITS = 2000
 export const TEXT_PER_UNIT = 250
+
+/**
+ * How many child renderers one surface builds at most (src/runtime/budget.ts): each child of a rendered element, and
+ * rows × children for a repeat, whether the child then fits or not.
+ */
+export const SLOT_UNITS = 2 * RENDER_UNITS
+
+/** How many rows a repeat renders at most (the json-render patch in patches/ applies the same number). */
+export const MAX_REPEAT_ROWS = 2000

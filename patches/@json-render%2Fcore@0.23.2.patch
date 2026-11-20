@@ -1,0 +1,960 @@
+diff --git a/dist/index.js b/dist/index.js
+index 33cb8650ce36e5e58f5822f73e43a02f353639d3..cadc2e237ebef441bb8c2e09e771626c5bac5967 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -84,6 +84,9 @@ __export(index_exports, {
+   resolveDynamicValue: () => resolveDynamicValue,
+   resolveElementProps: () => resolveElementProps,
+   resolvePropValue: () => resolvePropValue,
++  withEvaluation: () => withEvaluation,
++  withExpansionAccount: () => withExpansionAccount,
++  chargeEvaluation: () => chargeEvaluation,
+   resolveRepeatItemStatePath: () => resolveRepeatItemStatePath,
+   resolveRepeatStatePath: () => resolveRepeatStatePath,
+   runValidation: () => runValidation,
+@@ -861,6 +864,7 @@ var VisibilityConditionStrictSchema = import_zod2.z.lazy(
+ function resolveComparisonValue(value, ctx) {
+   if (typeof value === "object" && value !== null) {
+     if ("$state" in value && typeof value.$state === "string") {
++      chargeEvaluation(lengthCost(value.$state));
+       return getByPath(ctx.stateModel, value.$state);
+     }
+   }
+@@ -883,6 +887,7 @@ function resolveConditionValue(cond, ctx) {
+   return getByPath(ctx.stateModel, cond.$state);
+ }
+ function evaluateCondition(cond, ctx) {
++  chargeEvaluation(1 + lengthCost(cond?.$state) + lengthCost(cond?.$item));
+   const value = resolveConditionValue(cond, ctx);
+   let result;
+   if (cond.eq !== void 0) {
+@@ -915,6 +920,8 @@ function isOrCondition(condition) {
+   return typeof condition === "object" && condition !== null && !Array.isArray(condition) && "$or" in condition;
+ }
+ function evaluateVisibility(condition, ctx) {
++  if (!evaluationRun) return withEvaluation(false, () => evaluateVisibility(condition, ctx));
++  chargeEvaluation(1);
+   if (condition === void 0) {
+     return true;
+   }
+@@ -1063,10 +1070,326 @@ function resolveBindItemPath(itemPath, ctx) {
+   if (itemPath === "") return ctx.repeatBasePath;
+   return ctx.repeatBasePath + "/" + itemPath;
+ }
++// opencode-genui patch: the work of resolving expressions is bounded, for the whole window (every row, every surface:
++// a remount or a second surface cannot reset a bound). Every row of a repeat resolves its element's props and
++// `visible` on its own, before any renderer can leave the row out, and again on every change of the state they read, so
++// a short expression repeated in two thousand rows, or a long one, froze the window for seconds: $format builds a new
++// formatter on every call, a condition can list thousands of terms, and String() of a list in state that holds one
++// long list many times over (a copy of a copy) built a hundred million characters from a block of 4 KB.
++//
++// What expressions build. A $template, $concat or $join copies every string it reads into its result. Each piece it adds
++// (a reference's text with the template's own text, a part, an item with its separator) is counted, in characters and
++// at least one per piece, and a value that is not a string is turned into text only as far as there is room for it
++// (see boundedText):
++// - one expression builds at most MAX_EXPANSION characters (more can be neither shown nor stored);
++// - all expressions resolved in one task build at most EXPANSION_PER_TASK, and those resolved for the actions of one
++//   change (a key press and the watches it wakes, also in the later tasks its lists wait for: see
++//   withExpansionAccount) at most EXPANSION_PER_WORK.
++// How much they evaluate. Every node evaluated (a prop value, a directive, a condition, a template's reference, an item
++// of a list turned into text) counts, and more for long paths and templates. One evaluation (an element's props, its
++// `visible`, an action's param: see withEvaluation) visits at most MAX_EVALUATION_NODES.
++// Past a bound, the expression throws an error with `expansionLimit` set, before doing more: the prop it is in
++// resolves to nothing, an action whose params hold it does not run, and the console says so once per task.
++// Time. An evaluation made for rendering (deferrable) does not start, or stops, once expressions have been evaluated
++// for EVALUATION_SLICE_MS in one task after at least one such evaluation finished in it (so each task makes progress):
++// it throws an error with `evaluationDeferred` set, which the renderer (patches/@json-render%2Fsolid) takes as "evaluate
++// again in the next task", keeping what the element showed until then. The console says so once per burst.
++// What one node costs is bounded as well (a node that parsed a long text cost milliseconds: Number(), new Date() and the
++// Intl formatters read a string whole, and a shared tree of copies holds thousands of such nodes in a block of 14 KB):
++// - every evaluation, the first of a task included, stops after MAX_EVALUATION_MS (deferring it would only repeat it);
++// - the evaluations of one task that are not for rendering (actions' params, validation) stop once that task has
++//   evaluated for EVALUATION_PER_TASK_MS in all;
++// past either, it throws `expansionLimit` as above. The time is read every few nodes, and genui's directives
++// (src/gui/directives.ts) and the validation checks below parse at most MAX_PARSED_TEXT characters, so a node costs
++// microseconds and the time is read often enough.
++var MAX_EXPANSION = 1e6;
++var EXPANSION_PER_TASK = 4e6;
++var EXPANSION_PER_WORK = 4e6;
++var MAX_EVALUATION_NODES = 1e5;
++var EVALUATION_SLICE_MS = 50;
++var MAX_EVALUATION_MS = 200;
++var EVALUATION_PER_TASK_MS = 400;
++var MAX_PARSED_TEXT = 512;
++var MAX_URL_TEXT = 8192;
++var expansionLedger = { timer: void 0, used: 0, warned: false, errors: /* @__PURE__ */ new Map(), start: 0, finished: 0, spent: 0, deferred: false };
++// The change whose actions are being resolved (see withExpansionAccount), and the evaluation running now.
++var expansionAccount;
++var evaluationRun;
++var evaluationTold = false;
++var EVALUATION_DEFERRED = new RangeError("[json-render] Evaluation deferred to the next task");
++EVALUATION_DEFERRED.evaluationDeferred = true;
++function evaluationNow() {
++  return typeof performance !== "undefined" ? performance.now() : Date.now();
++}
++function openExpansionLedger() {
++  const ledger = expansionLedger;
++  if (ledger.timer === void 0) {
++    ledger.start = evaluationNow();
++    ledger.timer = setTimeout(() => {
++      ledger.timer = void 0;
++      ledger.used = 0;
++      ledger.warned = false;
++      ledger.errors.clear();
++      ledger.finished = 0;
++      ledger.spent = 0;
++      // A burst of tasks that deferred evaluations is told once.
++      if (!ledger.deferred) evaluationTold = false;
++      ledger.deferred = false;
++    }, 0);
++  }
++  return ledger;
++}
++// One error per reason and task, made once (an element in each of two thousand rows may throw it).
++function expansionError(why) {
++  const ledger = openExpansionLedger();
++  if (!ledger.warned) {
++    ledger.warned = true;
++    console.warn(`[json-render] Left an expression unresolved: ${why} (a long text read many times, or in many rows).`);
++  }
++  let error = ledger.errors.get(why);
++  if (!error) {
++    error = new RangeError(`[json-render] ${why}`);
++    error.expansionLimit = true;
++    ledger.errors.set(why, error);
++  }
++  return error;
++}
++// The error that makes an evaluation for rendering wait for the next task, said once per burst of such tasks.
++function deferEvaluation(why) {
++  const ledger = openExpansionLedger();
++  ledger.deferred = true;
++  if (!evaluationTold) {
++    evaluationTold = true;
++    console.warn(`[json-render] Deferred evaluating expressions to the next task: ${why}.`);
++  }
++  return EVALUATION_DEFERRED;
++}
++// Whether an evaluation made for rendering waits for the next task: this task evaluated for its slice, and finished one.
++function evaluationWaits() {
++  const ledger = openExpansionLedger();
++  return ledger.finished > 0 && evaluationNow() - ledger.start > EVALUATION_SLICE_MS;
++}
++// opencode-genui patch: exported. Counts `cost` nodes against the evaluation running now (see withEvaluation), and
++// every few nodes reads the time.
++function chargeEvaluation(cost) {
++  const run = evaluationRun;
++  if (!run) return;
++  run.nodes += cost;
++  if (run.nodes > MAX_EVALUATION_NODES) throw expansionError(`it would evaluate more than ${MAX_EVALUATION_NODES} expressions`);
++  if (run.nodes >= run.check) {
++    run.check = run.nodes + 8;
++    const now = evaluationNow();
++    const elapsed = now - run.start;
++    const ledger = openExpansionLedger();
++    // One for rendering after another finished waits for the next task, where it is the first.
++    if (run.deferrable && ledger.finished > 0 && now - ledger.start > EVALUATION_SLICE_MS) throw deferEvaluation(`they ran for ${EVALUATION_SLICE_MS} ms without a break`);
++    if (elapsed > MAX_EVALUATION_MS) throw expansionError(`one evaluation would take more than ${MAX_EVALUATION_MS} ms`);
++    if (!run.deferrable && ledger.spent + elapsed > EVALUATION_PER_TASK_MS) throw expansionError(`expressions were evaluated for ${EVALUATION_PER_TASK_MS} ms in one task`);
++  }
++}
++// The extra cost of reading a long path or template (each read parses all of it).
++function lengthCost(text) {
++  return typeof text === "string" ? text.length >> 6 : 0;
++}
++// opencode-genui patch: exported. Runs `evaluate`, one evaluation: what it resolves is counted together (see above).
++// `deferrable`: made for rendering, so it may throw `evaluationDeferred`. Inside another evaluation, it is part of that.
++// Every evaluation's time counts in the task's (see EVALUATION_PER_TASK_MS).
++function withEvaluation(deferrable, evaluate) {
++  if (evaluationRun) return evaluate();
++  const ledger = openExpansionLedger();
++  if (deferrable && evaluationWaits()) throw deferEvaluation(`they ran for ${EVALUATION_SLICE_MS} ms without a break`);
++  if (!deferrable && ledger.spent > EVALUATION_PER_TASK_MS) throw expansionError(`expressions were evaluated for ${EVALUATION_PER_TASK_MS} ms in one task`);
++  const run = { nodes: 0, check: 8, deferrable: !!deferrable, start: evaluationNow() };
++  evaluationRun = run;
++  try {
++    const result = evaluate();
++    if (run.deferrable) ledger.finished++;
++    return result;
++  } finally {
++    evaluationRun = void 0;
++    ledger.spent += evaluationNow() - run.start;
++  }
++}
++// A string at most MAX_PARSED_TEXT long, as Number() reads it, else NaN; a list as Number() reads it without turning it
++// into text (two items or more have a comma, so NaN), and any other object as NaN.
++function parsedNumber(value) {
++  let current = value;
++  while (Array.isArray(current)) {
++    if (current.length === 0) return 0;
++    if (current.length > 1) return NaN;
++    current = current[0] ?? "";
++  }
++  if (typeof current === "string") return current.length > MAX_PARSED_TEXT ? NaN : Number(current);
++  return current !== null && typeof current === "object" ? NaN : Number(current);
++}
++// opencode-genui patch: exported. Runs `run` with what it builds also charged to `account` (an object of one change, which
++// json-render's renderer passes for the actions it runs: see patches/@json-render%2Fsolid), in its `expansion` field.
++function withExpansionAccount(account, run) {
++  const outer = expansionAccount;
++  expansionAccount = account;
++  try {
++    return run();
++  } finally {
++    expansionAccount = outer;
++  }
++}
++function takeExpansion(built, size) {
++  const ledger = openExpansionLedger();
++  if (built + size > MAX_EXPANSION) throw expansionError(`it would build more than ${MAX_EXPANSION} characters`);
++  const cost = Math.max(size, 1);
++  const account = expansionAccount;
++  if (account && (account.expansion ?? 0) + cost > EXPANSION_PER_WORK) throw expansionError(`expressions built ${EXPANSION_PER_WORK} characters for one change`);
++  if (ledger.used + cost > EXPANSION_PER_TASK) {
++    if (evaluationRun?.deferrable && ledger.finished > 0) throw deferEvaluation(`they built ${EXPANSION_PER_TASK} characters in one task`);
++    throw expansionError(`expressions built ${EXPANSION_PER_TASK} characters in one task`);
++  }
++  ledger.used += cost;
++  if (account) account.expansion = (account.expansion ?? 0) + cost;
++  return built + size;
++}
++// How many characters the next piece of an expression that built `built` may have (see takeExpansion).
++function expansionRoom(built) {
++  const ledger = openExpansionLedger();
++  let room = Math.min(MAX_EXPANSION - built, EXPANSION_PER_TASK - ledger.used);
++  if (expansionAccount) room = Math.min(room, EXPANSION_PER_WORK - (expansionAccount.expansion ?? 0));
++  return Math.max(room, 0);
++}
++// String(value), as far as there is room for it after `built` characters (see expansionRoom): a list is joined with ","
++// as String() does (an item that is null or undefined adds nothing, a list inside is joined too), item by item, each
++// item counting as an expression evaluated; past the room, it throws as takeExpansion does. The caller charges the text.
++function boundedText(value, built) {
++  if (value === null || value === void 0) return "";
++  if (!Array.isArray(value)) {
++    const text = String(value);
++    if (text.length > expansionRoom(built)) takeExpansion(built, text.length);
++    return text;
++  }
++  const room = expansionRoom(built);
++  let text = "";
++  const stack = [{ list: value, index: 0 }];
++  while (stack.length > 0) {
++    const top = stack[stack.length - 1];
++    if (top.index >= top.list.length) {
++      stack.pop();
++      continue;
++    }
++    if (top.index > 0) text += ",";
++    const item = top.list[top.index++];
++    chargeEvaluation(1);
++    if (Array.isArray(item)) stack.push({ list: item, index: 0 });
++    else if (item !== null && item !== void 0) text += String(item);
++    if (text.length > room) takeExpansion(built, text.length);
++  }
++  return text;
++}
++function resolveTemplateBounded(template, ctx) {
++  chargeEvaluation(lengthCost(template));
++  let built = -1;
++  return template.replace(
++    /\$\{([^}]+)\}/g,
++    (_match, rawPath) => {
++      if (built < 0) built = takeExpansion(0, template.length);
++      chargeEvaluation(1 + lengthCost(rawPath));
++      let value;
++      if (rawPath.startsWith("/")) value = getByPath(ctx.stateModel, rawPath);
++      else {
++        const fromItem = ctx.repeatItem !== void 0 ? getByPath(ctx.repeatItem, rawPath) : void 0;
++        value = fromItem != null ? fromItem : getByPath(ctx.stateModel, "/" + rawPath);
++      }
++      const text = boundedText(value, built);
++      built = takeExpansion(built, text.length);
++      return text;
++    }
++  );
++}
++// The standard $concat and $join directives (@json-render/directives), with the same results, built piece by piece.
++// Errors inside them now reach the prop rather than the directive's own resolve.
++function resolveConcatBounded(raw, ctx) {
++  let built = 0;
++  const parts = [];
++  for (const part of raw.$concat) {
++    const resolved = resolvePropValue(part, ctx);
++    const text = boundedText(resolved, built);
++    built = takeExpansion(built, text.length);
++    parts.push(text);
++  }
++  return parts.join("");
++}
++function resolveJoinBounded(raw, ctx) {
++  const resolved = resolvePropValue(raw.$join, ctx);
++  if (!Array.isArray(resolved)) {
++    const text = boundedText(resolved, 0);
++    takeExpansion(0, text.length);
++    return text;
++  }
++  const separator = boundedText(raw.separator ?? ", ", 0);
++  let built = 0;
++  const parts = [];
++  for (let index = 0; index < resolved.length; index++) {
++    const gap = index > 0 ? separator.length : 0;
++    const text = boundedText(resolved[index], built + gap);
++    built = takeExpansion(built, text.length + gap);
++    parts.push(text);
++  }
++  return parts.join(separator);
++}
++// opencode-genui patch: a prop value with no key starting with "$" anywhere in it (so no expression and no directive)
++// resolves to itself, not to a deep copy: each row of a repeat resolves its element's props, so a large static value was
++// copied once per row. Worked out once per object, without recursion (a deeply nested value cannot overflow the stack),
++// and remembered by identity: spec values are never changed in place.
++var staticValues = /* @__PURE__ */ new WeakMap();
++function isStaticValue(value) {
++  const known = staticValues.get(value);
++  if (known !== void 0) return known;
++  const open = /* @__PURE__ */ new Set([value]);
++  const stack = [value];
++  const entered = /* @__PURE__ */ new Set();
++  while (stack.length > 0) {
++    const node = stack[stack.length - 1];
++    if (staticValues.has(node)) {
++      stack.pop();
++      open.delete(node);
++      continue;
++    }
++    const children = Array.isArray(node) ? node : Object.values(node);
++    if (!entered.has(node)) {
++      entered.add(node);
++      if (!Array.isArray(node) && Object.keys(node).some((key) => key.charCodeAt(0) === 36)) {
++        staticValues.set(node, false);
++        stack.pop();
++        open.delete(node);
++        continue;
++      }
++      let cycle = false;
++      for (const child of children) {
++        if (child === null || typeof child !== "object" || staticValues.has(child)) continue;
++        if (open.has(child)) cycle = true;
++        else {
++          open.add(child);
++          stack.push(child);
++        }
++      }
++      if (cycle) {
++        staticValues.set(node, false);
++      }
++      continue;
++    }
++    stack.pop();
++    open.delete(node);
++    staticValues.set(node, children.every((child) => child === null || typeof child !== "object" || staticValues.get(child) === true));
++  }
++  return staticValues.get(value) === true;
++}
+ function resolvePropValue(value, ctx) {
++  if (!evaluationRun) return withEvaluation(false, () => resolvePropValue(value, ctx));
++  chargeEvaluation(1);
+   if (value === null || value === void 0) {
+     return value;
+   }
++  if (typeof value === "object" && isStaticValue(value)) {
++    return value;
++  }
++  if (typeof value === "object") chargeEvaluation(lengthCost(value.$state ?? value.$bindState ?? value.$item ?? value.$bindItem));
+   if (isStateExpression(value)) {
+     return getByPath(ctx.stateModel, value.$state);
+   }
+@@ -1109,21 +1432,7 @@ function resolvePropValue(value, ctx) {
+     return fn(resolvedArgs);
+   }
+   if (isTemplateExpression(value)) {
+-    return value.$template.replace(
+-      /\$\{([^}]+)\}/g,
+-      (_match, rawPath) => {
+-        if (rawPath.startsWith("/")) {
+-          const resolved2 = getByPath(ctx.stateModel, rawPath);
+-          return resolved2 != null ? String(resolved2) : "";
+-        }
+-        if (ctx.repeatItem !== void 0) {
+-          const fromItem = getByPath(ctx.repeatItem, rawPath);
+-          if (fromItem != null) return String(fromItem);
+-        }
+-        const resolved = getByPath(ctx.stateModel, "/" + rawPath);
+-        return resolved != null ? String(resolved) : "";
+-      }
+-    );
++    return resolveTemplateBounded(value.$template, ctx);
+   }
+   if (Array.isArray(value)) {
+     return value.map((item) => resolvePropValue(item, ctx));
+@@ -1134,6 +1443,8 @@ function resolvePropValue(value, ctx) {
+       ctx.directives
+     );
+     if (directive) {
++      if (directive.name === "$concat" && Array.isArray(value.$concat)) return resolveConcatBounded(value, ctx);
++      if (directive.name === "$join") return resolveJoinBounded(value, ctx);
+       return directive.resolve(value, ctx);
+     }
+     const resolved = {};
+@@ -1370,14 +1681,16 @@ var action = actionBinding;
+ 
+ // src/validation.ts
+ var import_zod4 = require("zod");
++// opencode-genui patch: the checks read at most MAX_PARSED_TEXT characters as a number (a longer text is not one), and
++// MAX_URL_TEXT as a URL: a Number(), RegExp test or URL parse of a long text cost milliseconds per check.
+ var toNumber = (value) => {
+   if (typeof value === "number") return value;
+-  if (typeof value === "string" && value.trim() !== "") return Number(value);
++  if (typeof value === "string" && value.length <= MAX_PARSED_TEXT && value.trim() !== "") return Number(value);
+   return NaN;
+ };
+ var toDecimalNumber = (value) => {
+   if (typeof value === "number") return value;
+-  if (typeof value !== "string") return NaN;
++  if (typeof value !== "string" || value.length > MAX_PARSED_TEXT) return NaN;
+   const text = value.trim();
+   if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) return NaN;
+   const number = Number(text);
+@@ -1471,7 +1784,7 @@ var builtInValidationFunctions = {
+    * Check if value is a valid URL
+    */
+   url: (value) => {
+-    if (typeof value !== "string") return false;
++    if (typeof value !== "string" || value.length > MAX_URL_TEXT) return false;
+     try {
+       new URL(value);
+       return true;
+@@ -1500,8 +1813,8 @@ var builtInValidationFunctions = {
+       return value < other;
+     if (typeof value === "string" && typeof other === "string")
+       return value < other;
+-    const numVal = Number(value);
+-    const numOther = Number(other);
++    const numVal = parsedNumber(value);
++    const numOther = parsedNumber(other);
+     if (!isNaN(numVal) && !isNaN(numOther)) return numVal < numOther;
+     return false;
+   },
+@@ -1518,8 +1831,8 @@ var builtInValidationFunctions = {
+       return value > other;
+     if (typeof value === "string" && typeof other === "string")
+       return value > other;
+-    const numVal = Number(value);
+-    const numOther = Number(other);
++    const numVal = parsedNumber(value);
++    const numOther = parsedNumber(other);
+     if (!isNaN(numVal) && !isNaN(numOther)) return numVal > numOther;
+     return false;
+   },
+@@ -1563,7 +1876,18 @@ function runValidationCheck(check2, ctx) {
+     message: check2.message
+   };
+ }
++// opencode-genui patch: one field's validation is one evaluation (see withEvaluation), each check a node. Past a bound the
++// field is left unchecked, so it counts as invalid, with its first check's message.
+ function runValidation(config, ctx) {
++  if (!evaluationRun) {
++    try {
++      return withEvaluation(false, () => runValidation(config, ctx));
++    } catch (error) {
++      if (!error?.expansionLimit) throw error;
++      const message = Array.isArray(config.checks) ? config.checks[0]?.message : void 0;
++      return { valid: false, errors: typeof message === "string" ? [message] : [], checks: [] };
++    }
++  }
+   const checks = [];
+   const errors = [];
+   if (config.enabled) {
+@@ -1576,6 +1900,7 @@ function runValidation(config, ctx) {
+   }
+   if (config.checks) {
+     for (const check2 of config.checks) {
++      chargeEvaluation(1);
+       const result = runValidationCheck(check2, ctx);
+       checks.push(result);
+       if (!result.valid) {
+@@ -4199,6 +4524,9 @@ function experimental_createEvaluator(options) {
+   resolveElementProps,
+   resolvePropValue,
+   resolveRepeatItemStatePath,
++  withEvaluation,
++  withExpansionAccount,
++  chargeEvaluation,
+   resolveRepeatStatePath,
+   runValidation,
+   runValidationCheck,
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 9dee77c008b7edf735950a0a65fa1fa9e5531978..5fd89990af705ea7edb59137435c0f975b78b8ad 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -116,6 +116,7 @@ var VisibilityConditionStrictSchema = z.lazy(
+ function resolveComparisonValue(value, ctx) {
+   if (typeof value === "object" && value !== null) {
+     if ("$state" in value && typeof value.$state === "string") {
++      chargeEvaluation(lengthCost(value.$state));
+       return getByPath(ctx.stateModel, value.$state);
+     }
+   }
+@@ -138,6 +139,7 @@ function resolveConditionValue(cond, ctx) {
+   return getByPath(ctx.stateModel, cond.$state);
+ }
+ function evaluateCondition(cond, ctx) {
++  chargeEvaluation(1 + lengthCost(cond?.$state) + lengthCost(cond?.$item));
+   const value = resolveConditionValue(cond, ctx);
+   let result;
+   if (cond.eq !== void 0) {
+@@ -170,6 +172,8 @@ function isOrCondition(condition) {
+   return typeof condition === "object" && condition !== null && !Array.isArray(condition) && "$or" in condition;
+ }
+ function evaluateVisibility(condition, ctx) {
++  if (!evaluationRun) return withEvaluation(false, () => evaluateVisibility(condition, ctx));
++  chargeEvaluation(1);
+   if (condition === void 0) {
+     return true;
+   }
+@@ -318,10 +322,326 @@ function resolveBindItemPath(itemPath, ctx) {
+   if (itemPath === "") return ctx.repeatBasePath;
+   return ctx.repeatBasePath + "/" + itemPath;
+ }
++// opencode-genui patch: the work of resolving expressions is bounded, for the whole window (every row, every surface:
++// a remount or a second surface cannot reset a bound). Every row of a repeat resolves its element's props and
++// `visible` on its own, before any renderer can leave the row out, and again on every change of the state they read, so
++// a short expression repeated in two thousand rows, or a long one, froze the window for seconds: $format builds a new
++// formatter on every call, a condition can list thousands of terms, and String() of a list in state that holds one
++// long list many times over (a copy of a copy) built a hundred million characters from a block of 4 KB.
++//
++// What expressions build. A $template, $concat or $join copies every string it reads into its result. Each piece it adds
++// (a reference's text with the template's own text, a part, an item with its separator) is counted, in characters and
++// at least one per piece, and a value that is not a string is turned into text only as far as there is room for it
++// (see boundedText):
++// - one expression builds at most MAX_EXPANSION characters (more can be neither shown nor stored);
++// - all expressions resolved in one task build at most EXPANSION_PER_TASK, and those resolved for the actions of one
++//   change (a key press and the watches it wakes, also in the later tasks its lists wait for: see
++//   withExpansionAccount) at most EXPANSION_PER_WORK.
++// How much they evaluate. Every node evaluated (a prop value, a directive, a condition, a template's reference, an item
++// of a list turned into text) counts, and more for long paths and templates. One evaluation (an element's props, its
++// `visible`, an action's param: see withEvaluation) visits at most MAX_EVALUATION_NODES.
++// Past a bound, the expression throws an error with `expansionLimit` set, before doing more: the prop it is in
++// resolves to nothing, an action whose params hold it does not run, and the console says so once per task.
++// Time. An evaluation made for rendering (deferrable) does not start, or stops, once expressions have been evaluated
++// for EVALUATION_SLICE_MS in one task after at least one such evaluation finished in it (so each task makes progress):
++// it throws an error with `evaluationDeferred` set, which the renderer (patches/@json-render%2Fsolid) takes as "evaluate
++// again in the next task", keeping what the element showed until then. The console says so once per burst.
++// What one node costs is bounded as well (a node that parsed a long text cost milliseconds: Number(), new Date() and the
++// Intl formatters read a string whole, and a shared tree of copies holds thousands of such nodes in a block of 14 KB):
++// - every evaluation, the first of a task included, stops after MAX_EVALUATION_MS (deferring it would only repeat it);
++// - the evaluations of one task that are not for rendering (actions' params, validation) stop once that task has
++//   evaluated for EVALUATION_PER_TASK_MS in all;
++// past either, it throws `expansionLimit` as above. The time is read every few nodes, and genui's directives
++// (src/gui/directives.ts) and the validation checks below parse at most MAX_PARSED_TEXT characters, so a node costs
++// microseconds and the time is read often enough.
++var MAX_EXPANSION = 1e6;
++var EXPANSION_PER_TASK = 4e6;
++var EXPANSION_PER_WORK = 4e6;
++var MAX_EVALUATION_NODES = 1e5;
++var EVALUATION_SLICE_MS = 50;
++var MAX_EVALUATION_MS = 200;
++var EVALUATION_PER_TASK_MS = 400;
++var MAX_PARSED_TEXT = 512;
++var MAX_URL_TEXT = 8192;
++var expansionLedger = { timer: void 0, used: 0, warned: false, errors: /* @__PURE__ */ new Map(), start: 0, finished: 0, spent: 0, deferred: false };
++// The change whose actions are being resolved (see withExpansionAccount), and the evaluation running now.
++var expansionAccount;
++var evaluationRun;
++var evaluationTold = false;
++var EVALUATION_DEFERRED = new RangeError("[json-render] Evaluation deferred to the next task");
++EVALUATION_DEFERRED.evaluationDeferred = true;
++function evaluationNow() {
++  return typeof performance !== "undefined" ? performance.now() : Date.now();
++}
++function openExpansionLedger() {
++  const ledger = expansionLedger;
++  if (ledger.timer === void 0) {
++    ledger.start = evaluationNow();
++    ledger.timer = setTimeout(() => {
++      ledger.timer = void 0;
++      ledger.used = 0;
++      ledger.warned = false;
++      ledger.errors.clear();
++      ledger.finished = 0;
++      ledger.spent = 0;
++      // A burst of tasks that deferred evaluations is told once.
++      if (!ledger.deferred) evaluationTold = false;
++      ledger.deferred = false;
++    }, 0);
++  }
++  return ledger;
++}
++// One error per reason and task, made once (an element in each of two thousand rows may throw it).
++function expansionError(why) {
++  const ledger = openExpansionLedger();
++  if (!ledger.warned) {
++    ledger.warned = true;
++    console.warn(`[json-render] Left an expression unresolved: ${why} (a long text read many times, or in many rows).`);
++  }
++  let error = ledger.errors.get(why);
++  if (!error) {
++    error = new RangeError(`[json-render] ${why}`);
++    error.expansionLimit = true;
++    ledger.errors.set(why, error);
++  }
++  return error;
++}
++// The error that makes an evaluation for rendering wait for the next task, said once per burst of such tasks.
++function deferEvaluation(why) {
++  const ledger = openExpansionLedger();
++  ledger.deferred = true;
++  if (!evaluationTold) {
++    evaluationTold = true;
++    console.warn(`[json-render] Deferred evaluating expressions to the next task: ${why}.`);
++  }
++  return EVALUATION_DEFERRED;
++}
++// Whether an evaluation made for rendering waits for the next task: this task evaluated for its slice, and finished one.
++function evaluationWaits() {
++  const ledger = openExpansionLedger();
++  return ledger.finished > 0 && evaluationNow() - ledger.start > EVALUATION_SLICE_MS;
++}
++// opencode-genui patch: exported. Counts `cost` nodes against the evaluation running now (see withEvaluation), and
++// every few nodes reads the time.
++function chargeEvaluation(cost) {
++  const run = evaluationRun;
++  if (!run) return;
++  run.nodes += cost;
++  if (run.nodes > MAX_EVALUATION_NODES) throw expansionError(`it would evaluate more than ${MAX_EVALUATION_NODES} expressions`);
++  if (run.nodes >= run.check) {
++    run.check = run.nodes + 8;
++    const now = evaluationNow();
++    const elapsed = now - run.start;
++    const ledger = openExpansionLedger();
++    // One for rendering after another finished waits for the next task, where it is the first.
++    if (run.deferrable && ledger.finished > 0 && now - ledger.start > EVALUATION_SLICE_MS) throw deferEvaluation(`they ran for ${EVALUATION_SLICE_MS} ms without a break`);
++    if (elapsed > MAX_EVALUATION_MS) throw expansionError(`one evaluation would take more than ${MAX_EVALUATION_MS} ms`);
++    if (!run.deferrable && ledger.spent + elapsed > EVALUATION_PER_TASK_MS) throw expansionError(`expressions were evaluated for ${EVALUATION_PER_TASK_MS} ms in one task`);
++  }
++}
++// The extra cost of reading a long path or template (each read parses all of it).
++function lengthCost(text) {
++  return typeof text === "string" ? text.length >> 6 : 0;
++}
++// opencode-genui patch: exported. Runs `evaluate`, one evaluation: what it resolves is counted together (see above).
++// `deferrable`: made for rendering, so it may throw `evaluationDeferred`. Inside another evaluation, it is part of that.
++// Every evaluation's time counts in the task's (see EVALUATION_PER_TASK_MS).
++function withEvaluation(deferrable, evaluate) {
++  if (evaluationRun) return evaluate();
++  const ledger = openExpansionLedger();
++  if (deferrable && evaluationWaits()) throw deferEvaluation(`they ran for ${EVALUATION_SLICE_MS} ms without a break`);
++  if (!deferrable && ledger.spent > EVALUATION_PER_TASK_MS) throw expansionError(`expressions were evaluated for ${EVALUATION_PER_TASK_MS} ms in one task`);
++  const run = { nodes: 0, check: 8, deferrable: !!deferrable, start: evaluationNow() };
++  evaluationRun = run;
++  try {
++    const result = evaluate();
++    if (run.deferrable) ledger.finished++;
++    return result;
++  } finally {
++    evaluationRun = void 0;
++    ledger.spent += evaluationNow() - run.start;
++  }
++}
++// A string at most MAX_PARSED_TEXT long, as Number() reads it, else NaN; a list as Number() reads it without turning it
++// into text (two items or more have a comma, so NaN), and any other object as NaN.
++function parsedNumber(value) {
++  let current = value;
++  while (Array.isArray(current)) {
++    if (current.length === 0) return 0;
++    if (current.length > 1) return NaN;
++    current = current[0] ?? "";
++  }
++  if (typeof current === "string") return current.length > MAX_PARSED_TEXT ? NaN : Number(current);
++  return current !== null && typeof current === "object" ? NaN : Number(current);
++}
++// opencode-genui patch: exported. Runs `run` with what it builds also charged to `account` (an object of one change, which
++// json-render's renderer passes for the actions it runs: see patches/@json-render%2Fsolid), in its `expansion` field.
++function withExpansionAccount(account, run) {
++  const outer = expansionAccount;
++  expansionAccount = account;
++  try {
++    return run();
++  } finally {
++    expansionAccount = outer;
++  }
++}
++function takeExpansion(built, size) {
++  const ledger = openExpansionLedger();
++  if (built + size > MAX_EXPANSION) throw expansionError(`it would build more than ${MAX_EXPANSION} characters`);
++  const cost = Math.max(size, 1);
++  const account = expansionAccount;
++  if (account && (account.expansion ?? 0) + cost > EXPANSION_PER_WORK) throw expansionError(`expressions built ${EXPANSION_PER_WORK} characters for one change`);
++  if (ledger.used + cost > EXPANSION_PER_TASK) {
++    if (evaluationRun?.deferrable && ledger.finished > 0) throw deferEvaluation(`they built ${EXPANSION_PER_TASK} characters in one task`);
++    throw expansionError(`expressions built ${EXPANSION_PER_TASK} characters in one task`);
++  }
++  ledger.used += cost;
++  if (account) account.expansion = (account.expansion ?? 0) + cost;
++  return built + size;
++}
++// How many characters the next piece of an expression that built `built` may have (see takeExpansion).
++function expansionRoom(built) {
++  const ledger = openExpansionLedger();
++  let room = Math.min(MAX_EXPANSION - built, EXPANSION_PER_TASK - ledger.used);
++  if (expansionAccount) room = Math.min(room, EXPANSION_PER_WORK - (expansionAccount.expansion ?? 0));
++  return Math.max(room, 0);
++}
++// String(value), as far as there is room for it after `built` characters (see expansionRoom): a list is joined with ","
++// as String() does (an item that is null or undefined adds nothing, a list inside is joined too), item by item, each
++// item counting as an expression evaluated; past the room, it throws as takeExpansion does. The caller charges the text.
++function boundedText(value, built) {
++  if (value === null || value === void 0) return "";
++  if (!Array.isArray(value)) {
++    const text = String(value);
++    if (text.length > expansionRoom(built)) takeExpansion(built, text.length);
++    return text;
++  }
++  const room = expansionRoom(built);
++  let text = "";
++  const stack = [{ list: value, index: 0 }];
++  while (stack.length > 0) {
++    const top = stack[stack.length - 1];
++    if (top.index >= top.list.length) {
++      stack.pop();
++      continue;
++    }
++    if (top.index > 0) text += ",";
++    const item = top.list[top.index++];
++    chargeEvaluation(1);
++    if (Array.isArray(item)) stack.push({ list: item, index: 0 });
++    else if (item !== null && item !== void 0) text += String(item);
++    if (text.length > room) takeExpansion(built, text.length);
++  }
++  return text;
++}
++function resolveTemplateBounded(template, ctx) {
++  chargeEvaluation(lengthCost(template));
++  let built = -1;
++  return template.replace(
++    /\$\{([^}]+)\}/g,
++    (_match, rawPath) => {
++      if (built < 0) built = takeExpansion(0, template.length);
++      chargeEvaluation(1 + lengthCost(rawPath));
++      let value;
++      if (rawPath.startsWith("/")) value = getByPath(ctx.stateModel, rawPath);
++      else {
++        const fromItem = ctx.repeatItem !== void 0 ? getByPath(ctx.repeatItem, rawPath) : void 0;
++        value = fromItem != null ? fromItem : getByPath(ctx.stateModel, "/" + rawPath);
++      }
++      const text = boundedText(value, built);
++      built = takeExpansion(built, text.length);
++      return text;
++    }
++  );
++}
++// The standard $concat and $join directives (@json-render/directives), with the same results, built piece by piece.
++// Errors inside them now reach the prop rather than the directive's own resolve.
++function resolveConcatBounded(raw, ctx) {
++  let built = 0;
++  const parts = [];
++  for (const part of raw.$concat) {
++    const resolved = resolvePropValue(part, ctx);
++    const text = boundedText(resolved, built);
++    built = takeExpansion(built, text.length);
++    parts.push(text);
++  }
++  return parts.join("");
++}
++function resolveJoinBounded(raw, ctx) {
++  const resolved = resolvePropValue(raw.$join, ctx);
++  if (!Array.isArray(resolved)) {
++    const text = boundedText(resolved, 0);
++    takeExpansion(0, text.length);
++    return text;
++  }
++  const separator = boundedText(raw.separator ?? ", ", 0);
++  let built = 0;
++  const parts = [];
++  for (let index = 0; index < resolved.length; index++) {
++    const gap = index > 0 ? separator.length : 0;
++    const text = boundedText(resolved[index], built + gap);
++    built = takeExpansion(built, text.length + gap);
++    parts.push(text);
++  }
++  return parts.join(separator);
++}
++// opencode-genui patch: a prop value with no key starting with "$" anywhere in it (so no expression and no directive)
++// resolves to itself, not to a deep copy: each row of a repeat resolves its element's props, so a large static value was
++// copied once per row. Worked out once per object, without recursion (a deeply nested value cannot overflow the stack),
++// and remembered by identity: spec values are never changed in place.
++var staticValues = /* @__PURE__ */ new WeakMap();
++function isStaticValue(value) {
++  const known = staticValues.get(value);
++  if (known !== void 0) return known;
++  const open = /* @__PURE__ */ new Set([value]);
++  const stack = [value];
++  const entered = /* @__PURE__ */ new Set();
++  while (stack.length > 0) {
++    const node = stack[stack.length - 1];
++    if (staticValues.has(node)) {
++      stack.pop();
++      open.delete(node);
++      continue;
++    }
++    const children = Array.isArray(node) ? node : Object.values(node);
++    if (!entered.has(node)) {
++      entered.add(node);
++      if (!Array.isArray(node) && Object.keys(node).some((key) => key.charCodeAt(0) === 36)) {
++        staticValues.set(node, false);
++        stack.pop();
++        open.delete(node);
++        continue;
++      }
++      let cycle = false;
++      for (const child of children) {
++        if (child === null || typeof child !== "object" || staticValues.has(child)) continue;
++        if (open.has(child)) cycle = true;
++        else {
++          open.add(child);
++          stack.push(child);
++        }
++      }
++      if (cycle) {
++        staticValues.set(node, false);
++      }
++      continue;
++    }
++    stack.pop();
++    open.delete(node);
++    staticValues.set(node, children.every((child) => child === null || typeof child !== "object" || staticValues.get(child) === true));
++  }
++  return staticValues.get(value) === true;
++}
+ function resolvePropValue(value, ctx) {
++  if (!evaluationRun) return withEvaluation(false, () => resolvePropValue(value, ctx));
++  chargeEvaluation(1);
+   if (value === null || value === void 0) {
+     return value;
+   }
++  if (typeof value === "object" && isStaticValue(value)) {
++    return value;
++  }
++  if (typeof value === "object") chargeEvaluation(lengthCost(value.$state ?? value.$bindState ?? value.$item ?? value.$bindItem));
+   if (isStateExpression(value)) {
+     return getByPath(ctx.stateModel, value.$state);
+   }
+@@ -364,21 +684,7 @@ function resolvePropValue(value, ctx) {
+     return fn(resolvedArgs);
+   }
+   if (isTemplateExpression(value)) {
+-    return value.$template.replace(
+-      /\$\{([^}]+)\}/g,
+-      (_match, rawPath) => {
+-        if (rawPath.startsWith("/")) {
+-          const resolved2 = getByPath(ctx.stateModel, rawPath);
+-          return resolved2 != null ? String(resolved2) : "";
+-        }
+-        if (ctx.repeatItem !== void 0) {
+-          const fromItem = getByPath(ctx.repeatItem, rawPath);
+-          if (fromItem != null) return String(fromItem);
+-        }
+-        const resolved = getByPath(ctx.stateModel, "/" + rawPath);
+-        return resolved != null ? String(resolved) : "";
+-      }
+-    );
++    return resolveTemplateBounded(value.$template, ctx);
+   }
+   if (Array.isArray(value)) {
+     return value.map((item) => resolvePropValue(item, ctx));
+@@ -389,6 +695,8 @@ function resolvePropValue(value, ctx) {
+       ctx.directives
+     );
+     if (directive) {
++      if (directive.name === "$concat" && Array.isArray(value.$concat)) return resolveConcatBounded(value, ctx);
++      if (directive.name === "$join") return resolveJoinBounded(value, ctx);
+       return directive.resolve(value, ctx);
+     }
+     const resolved = {};
+@@ -625,14 +933,16 @@ var action = actionBinding;
+ 
+ // src/validation.ts
+ import { z as z3 } from "zod";
++// opencode-genui patch: the checks read at most MAX_PARSED_TEXT characters as a number (a longer text is not one), and
++// MAX_URL_TEXT as a URL: a Number(), RegExp test or URL parse of a long text cost milliseconds per check.
+ var toNumber = (value) => {
+   if (typeof value === "number") return value;
+-  if (typeof value === "string" && value.trim() !== "") return Number(value);
++  if (typeof value === "string" && value.length <= MAX_PARSED_TEXT && value.trim() !== "") return Number(value);
+   return NaN;
+ };
+ var toDecimalNumber = (value) => {
+   if (typeof value === "number") return value;
+-  if (typeof value !== "string") return NaN;
++  if (typeof value !== "string" || value.length > MAX_PARSED_TEXT) return NaN;
+   const text = value.trim();
+   if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) return NaN;
+   const number = Number(text);
+@@ -726,7 +1036,7 @@ var builtInValidationFunctions = {
+    * Check if value is a valid URL
+    */
+   url: (value) => {
+-    if (typeof value !== "string") return false;
++    if (typeof value !== "string" || value.length > MAX_URL_TEXT) return false;
+     try {
+       new URL(value);
+       return true;
+@@ -755,8 +1065,8 @@ var builtInValidationFunctions = {
+       return value < other;
+     if (typeof value === "string" && typeof other === "string")
+       return value < other;
+-    const numVal = Number(value);
+-    const numOther = Number(other);
++    const numVal = parsedNumber(value);
++    const numOther = parsedNumber(other);
+     if (!isNaN(numVal) && !isNaN(numOther)) return numVal < numOther;
+     return false;
+   },
+@@ -773,8 +1083,8 @@ var builtInValidationFunctions = {
+       return value > other;
+     if (typeof value === "string" && typeof other === "string")
+       return value > other;
+-    const numVal = Number(value);
+-    const numOther = Number(other);
++    const numVal = parsedNumber(value);
++    const numOther = parsedNumber(other);
+     if (!isNaN(numVal) && !isNaN(numOther)) return numVal > numOther;
+     return false;
+   },
+@@ -818,7 +1128,18 @@ function runValidationCheck(check2, ctx) {
+     message: check2.message
+   };
+ }
++// opencode-genui patch: one field's validation is one evaluation (see withEvaluation), each check a node. Past a bound the
++// field is left unchecked, so it counts as invalid, with its first check's message.
+ function runValidation(config, ctx) {
++  if (!evaluationRun) {
++    try {
++      return withEvaluation(false, () => runValidation(config, ctx));
++    } catch (error) {
++      if (!error?.expansionLimit) throw error;
++      const message = Array.isArray(config.checks) ? config.checks[0]?.message : void 0;
++      return { valid: false, errors: typeof message === "string" ? [message] : [], checks: [] };
++    }
++  }
+   const checks = [];
+   const errors = [];
+   if (config.enabled) {
+@@ -831,6 +1152,7 @@ function runValidation(config, ctx) {
+   }
+   if (config.checks) {
+     for (const check2 of config.checks) {
++      chargeEvaluation(1);
+       const result = runValidationCheck(check2, ctx);
+       checks.push(result);
+       if (!result.valid) {
+@@ -3453,6 +3775,9 @@ export {
+   resolveElementProps,
+   resolvePropValue,
+   resolveRepeatItemStatePath,
++  withEvaluation,
++  withExpansionAccount,
++  chargeEvaluation,
+   resolveRepeatStatePath,
+   runValidation,
+   runValidationCheck,

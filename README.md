@@ -142,8 +142,10 @@ Specs are written by a model and treated as data:
 - **Text is text.** Markdown goes through the app's renderer, but genui writes every link, image, autolink and bare
   address in it as a link it opens itself, and shows raw HTML as text: nothing in it loads remote content (the app would
   otherwise fetch a favicon for each web link as soon as it renders) or adds markup, whatever the text is built from.
-  Links open only http, https and mailto URLs; images load only http(s) and base64 `data:image` URLs, and remote images
-  wait for a click (which asks first, with the full address, where outward actions ask) unless you allow them.
+  Links open only http, https and mailto URLs; images load only http(s) and base64 `data:image` URLs of raster formats
+  (never SVG, which the window draws on its main thread: a few hundred bytes of nested shapes froze it for 43 s), and
+  remote images wait for a click (which asks first, with the full address, where outward actions ask) unless you allow
+  them.
 - **Outward actions need your activation.** Sending a message, filling the composer, opening a link and copying run
   only when you deliberately activate a control of that UI: pressing a Button or Link, picking from a DropdownMenu or
   Table, Enter in an Input, or a choice in a Select, Radio, Checkbox, Switch, Toggle, ToggleGroup, ButtonGroup,
@@ -151,28 +153,78 @@ Specs are written by a model and treated as data:
   handler read from state. One activation may run up to 3 of them (copy a code, then open a page); the next activation
   of that UI needs a second's gap, and a choice made sooner is sent once the second has passed (only the control's
   latest). Arrow keys in a Radio or Tabs only move the choice; Space, Enter or a click sends it (nothing, when the
-  arrows brought it back to where it started). On a closed Select, arrow keys and letters do nothing (the app's select
-  would choose with them): its list opens with ArrowDown, Enter or Space.
+  arrows brought it back to where it started). On a closed Select, arrow keys and typed characters (with Alt too) do
+  nothing (the app's select would choose with them): its list opens with ArrowDown, Enter or Space.
 - **Confirms show everything.** genui asks first when your setting says so, or when the spec asks. The dialog shows the
   whole payload (the full message with its data, the URL, the copied text) last and labelled, with line breaks shown as
   ↵ (the app's dialog runs its text together), invisible and blank characters spelled out, long runs counted, its
   length when it is long, and text hidden in Unicode tag characters decoded.
 - **Blocks outside the agent's reply are untrusted.** A ` ```spec ` block in tool output or a previewed file is marked as
-  such and asks before every outward action (by default), keeping genui's own wording; the spec's text appears only
-  quoted. It gets state of its own (it cannot read or change the agent's UI with the same `id`), cannot open a Dialog or
-  Drawer by itself (also not while another of its choices waits for the gap), and has no "Ask agent to fix". Trust is decided by the block's exact text.
+  such and asks before every outward action (by default), in genui's own words only: the spec's own title and message
+  for the confirm are not shown (in one run of plain text, nothing could keep them from passing for genui's words). It
+  gets state of its own (it cannot read or change the agent's UI with the same `id`), and has no "Ask agent to fix". It opens a Dialog or
+  Drawer only during an activation of one of its controls: not by itself, and not while another of its choices waits for
+  the gap, a message it sent is still on its way, or the actions of an activation wait for a later task (see below). A
+  Dialog that an activation opened still opens when the render budget's task slice mounts it in a later task, within the
+  activation's 5 s. Trust is decided by the block's exact text.
 - **Passwords stay in memory.** What you type into a password Input is never written to stored UI state, also after
-  the agent's next version of the UI drops that Input. Other edits are
-  stored per session (up to 50 surfaces) so they survive reloads, until **Clear stored UI state**.
-- **Bounded work.** Validation patterns run on a linear-time matcher (no backreferences or lookarounds) with a shared work
-  budget, and Markdown is prepared in time linear in its length. State actions in a row (setState, pushState,
-  removeState), and the first actions of the watches one change wakes, run in one batch, so the UI re-evaluates once
-  instead of once per write. A watch is not woken by its own writes, and watches set off by other watches stop after 64
-  actions without a break (in all, also across remounts), while one change may still wake a watch in every row. A
-  Dialog or Drawer opens at most once per task and not in a task in which it closed, so it cannot loop on a field's
-  focus and blur, or be re-opened by a watch as you close it. A UI shows at most about 2,000 elements or 500,000
-  characters of text in all (a repeat inside a repeat renders the product of both lists; the rest is reported as an
-  issue), a repeat at most 2,000 rows, and one edit of its state holds at most a million characters.
+  the agent's next version of the UI drops that Input. Other edits are stored per session (up to 50 surfaces) so they
+  survive reloads, until **Clear stored UI state**: per surface as many of its newest whole user actions (a click or
+  key press with everything it sets off, also what runs in later tasks) as fit in 256 KB as stored and 4,000 edits
+  (the newest whatever its number of edits); the stored edits record their actions, so a reload never restores half
+  of a select-all, and an older action that no longer fits beside the newer ones is left out whole. The live UI keeps
+  up to 10,000 edits (the oldest go a thousand at a time), holding up to 8 million characters (32 million for all UIs
+  in the window); an edit past that is ignored.
+- **Bounded work.** The work a spec can give the window, with or without your clicks, is bounded in these ways:
+  - Validation patterns run on a linear-time matcher (no backreferences or lookarounds) with a shared work budget, and
+    the other checks read at most 512 characters as a number (8,192 as a URL); Markdown is prepared, and where a spec's
+    password fields write is found, in time linear in their size.
+  - What the app's Markdown renderer does with a text is bounded too: past a budget per text (in proportion to its
+    length), emphasis markers (`*`, `_`, `~`) that marked would search a paragraph for show as plain characters, and so
+    does math past about 20,000 characters; a text shows its first 40,000 characters.
+  - State actions in a row (setState, pushState, removeState), and the first actions of the watches one change wakes,
+    run in one batch, so the UI re-evaluates once instead of once per write; a write calls only the watches of its own
+    path, and a watch is not woken by its own writes. `validateForm` checks every field and writes all results at once;
+    each field shows only its own result, a hundred fields per frame. After the agent's patch, the edits you made in a
+    list follow their items by looking them up, not by searching the list.
+  - One change (a key press, a click, or anything else in one task) with all it sets off runs at most 4,000 watch
+    wakes, 8,000 state actions (a select-all over a full UI whose rows write four times each) and 64 awaited actions
+    (validateForm, custom actions) or actions of watches woken by other watches, counted across every UI in the
+    window; the rest is skipped, the console says so and the UI shows an issue. Each of your input events counts
+    afresh.
+  - Once actions have run for 50 ms in one task, the rest of a list woken directly waits for the next task, so the
+    window answers in between (40 tasks in a row at most, then the rest is skipped), and watches set off by other
+    watches stop. While an activation's actions wait so, its permission to act outward or open a modal is set aside.
+  - `$template`, `$concat` and `$join` build at most a million characters each, 4 million per task in all, and 4
+    million for the actions of one change (also in its later tasks); past that the prop is left empty and an action
+    using it does not run. A list in state is turned into text only as far as there is room; `$truncate`, `$math`,
+    `$pluralize` and `$format` read it only as far as their result needs, and `$format` makes one formatter per
+    directive. A requested confirm's text reads at most a million characters from state, and stops once its shown
+    length is reached.
+  - Evaluating expressions is bounded too: one evaluation (an element's props or `visible`, an action's param, a field's
+    validation) visits at most 100,000 expression nodes and stops after 200 ms, the first of a task included; once
+    expressions have been evaluated for 50 ms in one task, the elements left are evaluated in the next tasks (each task
+    evaluates at least one), and evaluations that are not for rendering stop once a task has evaluated for 400 ms.
+    Until then an element shows nothing, or keeps what it showed; past a bound the prop is left empty, the action does
+    not run, and the field counts as invalid. Numbers and dates are read from at most 512 characters.
+  - A UI shows at most about 2,000 elements or 500,000 characters of text in all, and builds at most 4,000 child
+    elements (a repeat counts its rows times its children, so a repeat inside a repeat is the product of both lists);
+    a repeat shows at most 2,000 rows, its first ones as far as they fit, and its rows share their element's values
+    that hold no expression instead of copying them. A Table counts its cells and a Chart its points (drawn and
+    listed for screen readers), ten to an element, and a Table shows at most 500 rows, 50 columns and 10,000 cells,
+    saying what it leaves out. The UIs in the window also share one bound per kind: about 6,000 for the agent's inline
+    UIs (of which the newest one, mounted last, always keeps 2,000), 4,000 for canvases, 2,000 for older copies of a UI
+    the agent sent again, and 2,000 for blocks in tool output or files, so twenty copies of a large block render once
+    and never take the newest copy's room. What does not fit is reported as an issue and comes back once room is freed. Rendering more than about 1,000
+    elements or 100 ms in one task continues in the next tasks. One edit of state holds at most a million characters,
+    and `copy` operations add at most a million characters to a spec in all (a copy shares what it copies, so copies
+    of copies doubled the state at each step); a copy past that is left out and reported.
+  - A Dialog or Drawer never opens from focus, blur, a slider or a browsed choice, and the focus moves it makes as it
+    opens and closes do not run a field's `on.focus` or `on.blur`. It opens at most once per task at its path (a second
+    one bound to the same path stays closed while the first shows), never again in a task in which it closed, and at
+    most 8 modals open per task in the whole window, counted per UI state, so a remounted Dialog counts too. Once you
+    dismiss one (Escape, its close button, its backdrop), only a press or another activation opens a modal of that UI,
+    until you activate one of its controls or the agent sends a new version of it; for 1.5 s that holds in every UI.
 
 ## Development
 
@@ -219,9 +271,23 @@ playground/        fake desktop host for development and end-to-end tests
   their address shows in their tooltip rather than the status bar.
 - The app's confirm dialog cannot be selected or copied from, and runs its text together: genui shows line breaks in
   the payload as ↵.
-- Expressions that repeat a long text are not bounded while they resolve: a `$template` or `$concat` that reads one
-  long string from state many times builds the whole result before the UI's size limit leaves it out, so a very large
-  block built for it can still exhaust memory.
+- What the bounds above send to later tasks still runs there: a spec at the bounds can keep the window busy in short
+  tasks for a few seconds, while it answers in between. Some work within one task is not split: an element's first
+  evaluation in a task (up to 200 ms), re-rendering what one batch of a select-all changed, and one element's own
+  rendering (a Table of 10,000 cells, a Markdown text of 40,000 characters). Measured in the playground: under 0.3 s
+  per task for each.
+- A remote image you load (with a click, or by the setting that allows remote images) is whatever its server sends,
+  an SVG one too, whose drawing genui cannot bound: a page cannot learn an image's type before the browser draws it,
+  and cross-origin reads to check it first are refused. Load images only from addresses you trust.
+- A UI whose edits hold 8 million characters (32 million for all UIs in the window) ignores edits that would add to
+  them, typing included, until some go (the agent's next version changes their values, or **Clear stored UI state**);
+  the console says so.
+- A watch acts once its element has rendered: a select-all pressed while a long list is still rendering misses the rows
+  that render after it.
+- A focused, closed Select stops typed keys, Alt+letter included, so the app's Alt shortcuts do not fire while it has
+  focus (the app's select acts on a key even when its default was prevented). After you dismiss a modal, a watch cannot
+  open one in that UI until you activate one of its controls or the agent sends a new version (and for 1.5 s, the
+  agent's patch cannot either, in any UI); it is closed again quietly.
 - Messages a UI sends use the model picked in the composer but the session's current agent: the plugin API does not
   expose the composer's agent.
 - In windows narrower than 768 px the app has no side region: canvases show in the session's Canvas view (in the More

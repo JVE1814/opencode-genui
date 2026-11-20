@@ -1,6 +1,7 @@
 // Copy added by the data and chart components (src/gui/components/data.tsx, src/gui/components/chart.tsx).
 export default {
   "c.table.empty": "No data",
+  "c.table.cut": "Showing {{rows}} of {{totalRows}} rows and {{columns}} of {{totalColumns}} columns",
 
   "c.skeleton.loading": "Loading",
   "c.spinner.loading": "Loading",

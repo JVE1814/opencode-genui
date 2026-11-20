@@ -3,12 +3,17 @@ import type { Spec } from "@json-render/core"
 import {
   applyPatch,
   applyPatches,
+  copiesRefused,
   EMPTY_SPEC,
   getAt,
+  MAX_COPIED,
   parsePointer,
+  replaceAll,
   setsRoot,
+  writtenSize,
   type Patch,
 } from "../../src/protocol/patch.ts"
+import { compileSpec } from "../../src/protocol/compile.ts"
 
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
@@ -240,6 +245,90 @@ describe("applyPatch", () => {
       { op: "copy", from: "/root", path: "/state/r" },
     ])
     expect(JSON.stringify(before)).toBe(snapshot)
+  })
+})
+
+describe("replaceAll [R6S1-3]", () => {
+  test("gives what replace operations applied one at a time give, copying each container once", () => {
+    let seed = 7
+    const draw = (n: number) => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n
+    const tokens = ["a", "b", "0", "1", "2", "-", "x"]
+    for (let round = 0; round < 3000; round++) {
+      const base: unknown =
+        draw(3) === 0 ? { a: [1, { b: 2 }], x: "s" } : draw(2) === 0 ? [0, [1]] : { a: { b: { x: 1 } } }
+      const replacements: Array<[string[], unknown]> = []
+      for (let count = 1 + draw(6); count > 0; count--) {
+        const path = Array.from({ length: 1 + draw(3) }, () => tokens[draw(tokens.length)]!)
+        replacements.push([path, draw(4) === 0 ? { nested: [draw(3)] } : draw(5)])
+      }
+      const frozen = JSON.stringify(base)
+      const expected = replacements.reduce(
+        (doc, [path, value]) => applyPatch(doc, { op: "replace", path: `/${path.join("/")}`, value }),
+        base,
+      )
+      expect(replaceAll(base, replacements), JSON.stringify(replacements)).toEqual(expected as never)
+      // The document it started from is not changed.
+      expect(JSON.stringify(base)).toBe(frozen)
+    }
+    // Ten thousand values under one object: one copy of it, not ten thousand.
+    const many = Array.from({ length: 10_000 }, (_, index) => [["x", `k${index}`], index] as const)
+    const started = performance.now()
+    const result = replaceAll({ x: {} as Record<string, number> }, many)
+    expect(performance.now() - started).toBeLessThan(200)
+    expect(Object.keys(result.x)).toHaveLength(10_000)
+  })
+})
+
+describe("copies are bounded [R6S1-2]", () => {
+  // `a_k = [a_(k-1), a_(k-1)]` by copy: the state shares each level twice, so what it holds written out doubles at each
+  // step. 21 steps, 4 KB of patches, made 100 million characters, and anything that turned it into text (a canvas's
+  // stored snapshot, an expression) froze the window for seconds.
+  const doubling = (levels: number): Patch[] => {
+    const patches: Patch[] = [{ op: "add", path: "/state", value: { a0: ["-2.2250738585072014e-308", "x"] } }]
+    for (let k = 1; k <= levels; k++)
+      patches.push(
+        { op: "add", path: `/state/a${k}`, value: [] },
+        { op: "copy", from: `/state/a${k - 1}`, path: `/state/a${k}/0` },
+        { op: "copy", from: `/state/a${k - 1}`, path: `/state/a${k}/1` },
+      )
+    return patches
+  }
+
+  test("copies add at most MAX_COPIED to a document written out; the copy past it is left out and reported", () => {
+    const spec = applyPatches(EMPTY_SPEC, doubling(21))
+    expect(copiesRefused(spec)).toBe(true)
+    expect(writtenSize(spec, 10 * MAX_COPIED)).toBeLessThanOrEqual(MAX_COPIED + 1000)
+    const started = performance.now()
+    JSON.stringify(spec)
+    expect(performance.now() - started).toBeLessThan(200)
+    // The levels that fit are there, whole.
+    expect(getAt(spec, ["state", "a10", "1", "0"])).toEqual(getAt(spec, ["state", "a9", "0"]))
+    // The spec says so.
+    const compiled = compileSpec({
+      ...spec,
+      root: "t",
+      elements: { t: { type: "Text", props: { text: "x" }, children: [] } },
+    } as Spec)
+    expect(compiled.issues.map((issue) => issue.code)).not.toContain("copy_too_large")
+    expect(
+      compileSpec(applyPatches(spec, [{ op: "add", path: "/root", value: "t" }])).issues.map((issue) => issue.code),
+    ).toContain("copy_too_large")
+  })
+
+  test("copies within the bound apply as before, and a document before a refused copy says nothing", () => {
+    const before = applyPatches(EMPTY_SPEC, doubling(8))
+    expect(copiesRefused(before)).toBe(false)
+    expect(getAt(before, ["state", "a8", "0"])).toBe(getAt(before, ["state", "a7"]))
+    const big = applyPatch(before, { op: "add", path: "/state/big", value: "x".repeat(MAX_COPIED) })
+    const refused = applyPatch(big, { op: "copy", from: "/state/big", path: "/state/again" })
+    expect(copiesRefused(refused)).toBe(true)
+    expect(getAt(refused, ["state", "again"])).toBeUndefined()
+    // The document the refused copy was applied to is unchanged, and not marked.
+    expect(copiesRefused(big)).toBe(false)
+    // A move adds nothing: it is not counted.
+    const moved = applyPatch(big, { op: "move", from: "/state/big", path: "/state/moved" })
+    expect(getAt(moved, ["state", "moved"])).toBe("x".repeat(MAX_COPIED))
+    expect(copiesRefused(moved)).toBe(false)
   })
 })
 

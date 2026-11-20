@@ -11,9 +11,9 @@ import {
   useContext,
   type JSX,
 } from "solid-js"
-import { useStateBinding } from "@json-render/solid"
+import { useStateBinding, useStateStore } from "@json-render/solid"
 import { QuietWriteContext, useHost, useSurface } from "../host.ts"
-import { hasIntent } from "../outward.ts"
+import { asModalFocusMove, modalRefusal, noteModal, noteModalShown, warnModalRefusal } from "../outward.ts"
 import { MarkdownText } from "./content.tsx"
 import { GuardedImage, statePath } from "./data.tsx"
 import { list, str, uid, type GenuiComponent } from "./shared.tsx"
@@ -49,21 +49,26 @@ interface ModalContext {
  * button write false there; writing false from elsewhere (a setState action) closes it. The path is reactive: when the
  * spec changes it, the modal follows the new path's value.
  *
- * On an untrusted surface (a block in tool output or a previewed file) a modal opens only while the surface dispatches
- * an activation of one of its controls (a press, a pick, Enter in a field, a choice; see `withIntent` in
- * src/gui/outward.ts): never from the spec's initial state, a watch, focus or blur (tabbing through a field), since a
- * model-written modal over the whole window is a phishing tool. An open it refuses writes false back, so the user's own
- * press can open it later; that write bypasses the surface's watches (a watch that wrote true again would otherwise
- * loop with the refusal, see QuietWriteContext). The modal then says where it comes from.
- *
- * On any surface a modal opens at most once per task, and not in a task in which it closed: such an open is refused the
- * same way. Opening a modal moves focus into it and closing it gives focus back, so a spec that opens it on a field's
- * focus and closes it on blur looped within one task until the stack overflowed; and a watch that re-opened it as the
- * user closed it (Escape, the close button, the backdrop) kept the whole window behind it.
+ * Whether it may open is decided by `modalRefusal` (src/gui/outward.ts), from a record kept per state store, open path
+ * and window rather than in this component, so a spec that remounts the Dialog cannot start it afresh:
+ * - never from a passive dispatch (focus, blur, a slider, a browsed choice), on any surface;
+ * - on an untrusted surface (a block in tool output or a previewed file) only while the surface dispatches an activation
+ *   of one of its controls (a press, a pick, Enter in a field, a choice; see `withIntent`): never from the spec's initial
+ *   state, a watch or typing, since a model-written modal over the whole window is a phishing tool;
+ * - at most once per task at its path, not in a task in which it closed, and a few modals per task in all: opening a
+ *   modal moves focus into it and closing it gives focus back, so a spec that opens it on a field's focus and closes it
+ *   on blur looped within one task;
+ * - once the user dismissed a modal (Escape, the close button, the backdrop), only from an activation, until the user
+ *   activates a control of the UI or the agent sends a new version of its state (and for a moment, any modal), so a
+ *   watch cannot re-open it as the user closes it and keep the whole window behind it.
+ * An open it refuses writes false back, so the user's own press can open it later; that write bypasses the surface's
+ * watches (a watch that wrote true again would otherwise loop with the refusal, see QuietWriteContext). On an untrusted
+ * surface the modal says where it comes from.
  */
 function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
   const host = useHost()
   const surface = useSurface()
+  const store = useStateStore()
   const untrusted = surface?.trusted === false
   const id = uid(kind)
   const title = () => str(ctx.props.title)
@@ -91,16 +96,19 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
   let dialog: HTMLDialogElement | undefined
   let disposed = false
   let downOnBackdrop = false
+  // Set while this component closes the element itself, so its close event is not taken for the user's.
+  let closing = false
   onCleanup(() => {
     disposed = true
   })
 
-  // Whether the modal opened or closed in the current task (cleared by the next timer task).
-  let toggled = false
-  const markToggled = () => {
-    if (toggled) return
-    toggled = true
-    setTimeout(() => (toggled = false))
+  const note = (change: "opened" | "closed" | "dismissed") => {
+    const target = path()
+    if (target) noteModal(store, target, change, surface)
+  }
+  const closeElement = (element: HTMLDialogElement) => {
+    closing = true
+    asModalFocusMove(() => element.close())
   }
 
   // showModal() needs the element in the document; an inline surface may render before the host attaches it.
@@ -112,13 +120,20 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
       }
       return
     }
-    if (toggled || (untrusted && !hasIntent(surface))) {
+    const target = path()
+    if (!target) return
+    const refusal = modalRefusal(store, target, surface)
+    // Another element bound to this path opened in this task and shows it: the state is right as it is.
+    if (refusal === "shown") return
+    if (refusal) {
+      warnModalRefusal(refusal, target)
       refuse()
       return
     }
-    markToggled()
+    note("opened")
     try {
-      element.showModal()
+      asModalFocusMove(() => element.showModal())
+      noteModalShown(store, target, element)
     } catch {
       // Already open without being modal, or the document refuses another modal; it stays as it is.
     }
@@ -130,15 +145,16 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
     if (!element) return
     if (want) show(element)
     else if (element.open) {
-      markToggled()
-      element.close()
+      note("closed")
+      closeElement(element)
     }
   })
 
+  // The user's own close: the close button, or a click on the backdrop.
   const close = () => {
-    markToggled()
+    note("dismissed")
     setOpen(false)
-    if (dialog?.open) dialog.close()
+    if (dialog?.open) closeElement(dialog)
   }
 
   // Clicks on the ::backdrop target the dialog itself, outside its box. A press that starts inside (selecting text
@@ -160,8 +176,19 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
         [description() ? `${id}-description` : "", untrusted ? `${id}-untrusted` : ""].filter(Boolean).join(" ") ||
         undefined
       }
+      // Escape (a close request): the user's dismissal, closed here like the close button, so the focus it gives back
+      // is genui's move (see asModalFocusMove). The close event comes in a later task, also for a close this component
+      // made (`closing`), and for one the platform made without a cancel event first: that one is the user's too.
+      onCancel={(event) => {
+        event.preventDefault()
+        close()
+      }}
       onClose={() => {
-        markToggled()
+        const ours = closing
+        closing = false
+        // The close event of an earlier close, after the modal opened again: there is nothing to follow.
+        if (dialog?.open) return
+        if (!ours) note("dismissed")
         if (!disposed && open()) setOpen(false)
       }}
       onPointerDown={(event) => {

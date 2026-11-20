@@ -101,7 +101,7 @@ ${indent(sentExample)}
 
 The UI always takes the app's design and follows the user's theme and light or dark mode, so there are no color, style or className props: choose components and variants, not looks.
 
-- Keep it compact: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all. Prefer Card, Stack and Grid for layout, Card titles or Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
+- Keep it compact: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
 - Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.`
@@ -183,7 +183,7 @@ export const PROMPT_FIXES: readonly { readonly from: string; readonly to: string
   },
   {
     from: "Use `watch` for cascading dependencies where changing one field should trigger side effects (loading data, resetting dependent fields, computing derived values).",
-    to: "Use `watch` for cascading dependencies where changing one field should change others (resetting dependent fields, computing derived values) with setState, pushState or removeState. sendPrompt, insertPrompt, openLink and copyText never run from watch.",
+    to: "Use `watch` where changing one field should change others (resetting dependent fields, deriving values) with setState, pushState or removeState, at most 8,000 of them per change. sendPrompt, insertPrompt, openLink and copyText never run from watch.",
   },
 ]
 

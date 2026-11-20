@@ -25,6 +25,7 @@
     },
   },
   "patchedDependencies": {
+    "@json-render/core@0.23.2": "patches/@json-render%2Fcore@0.23.2.patch",
     "@json-render/solid@0.23.2": "patches/@json-render%2Fsolid@0.23.2.patch",
   },
   "packages": {

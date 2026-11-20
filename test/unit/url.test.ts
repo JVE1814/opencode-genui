@@ -59,9 +59,20 @@ describe("safeUrl for images", () => {
     expect(safeUrl("http://example.com/a.png", "image")).toBe("http://example.com/a.png")
   })
 
-  test.each(["png", "jpeg", "jpg", "gif", "webp", "avif", "svg+xml", "PNG"])("allows base64 data:image/%s", (type) => {
+  test.each(["png", "jpeg", "jpg", "gif", "webp", "avif", "PNG"])("allows base64 data:image/%s", (type) => {
     const url = `data:image/${type};base64,AAAA`
     expect(safeUrl(url, "image")).toBe(url)
+  })
+
+  // An SVG image is drawn on the window's main thread, and a data: image shows without a click: 1.9 KB of nested <use>
+  // elements froze the window for 43 s [review8#R6S2-1]. Base64 SVG used to be allowed (and this list held svg+xml).
+  test.each(["svg+xml", "SVG+XML", "svg"])("refuses base64 data:image/%s", (type) => {
+    let defs = '<rect id="l0" width="1" height="1"/>'
+    for (let level = 1; level <= 18; level++)
+      defs += `<g id="l${level}"><use href="#l${level - 1}"/><use href="#l${level - 1}" x="1"/></g>`
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg"><defs>${defs}</defs><use href="#l18"/></svg>`
+    expect(safeUrl(`data:image/${type};base64,${Buffer.from(svg).toString("base64")}`, "image")).toBeUndefined()
+    expect(safeUrl(`data:image/${type};base64,AAAA`, "image")).toBeUndefined()
   })
 
   test("allows a real base64 png", () => {

@@ -124,6 +124,82 @@ describe("foldCanvases", () => {
     expect(fixed.settled).toBeDefined()
   })
 
+  test("a new canvas started with a `replace` of /root settles once its root element arrives [review6#R9]", () => {
+    const switched = { op: "replace", path: "/root", value: "main" }
+    const first = block("msg_05", json({ canvas: "main" }, switched, { op: "add", path: "/state/x", value: 1 }))
+    // Alone, the switch may belong to a canvas in messages not loaded: its base is looked for.
+    expect(only(foldCanvases({}, [first])).missingBase).toBe(true)
+    // Once the spec holds its root element, nothing is missing: it renders, settles and is saved. Before, it waited
+    // for a base that does not exist, behind "Part of this canvas is missing", for good.
+    const state = only(foldCanvases({}, [first, block("msg_06", json(element("main", "hi")))]))
+    expect(state.missingBase).toBe(false)
+    expect(state.spec).toEqual({
+      root: "main",
+      elements: { main: { type: "Text", props: { text: "hi" } } },
+      state: { x: 1 },
+    } as never)
+    expect(state.settled?.spec).toBe(state.spec!)
+    // A root element whose children are not all there still waits for its base.
+    const partial = only(
+      foldCanvases({}, [
+        first,
+        block(
+          "msg_06",
+          json({ op: "add", path: "/elements/main", value: { type: "Card", props: {}, children: ["body"] } }),
+        ),
+      ]),
+    )
+    expect(partial.missingBase).toBe(true)
+    expect(partial.settled).toBeUndefined()
+    const whole = only(
+      foldCanvases({}, [
+        first,
+        block(
+          "msg_06",
+          json(
+            { op: "add", path: "/elements/main", value: { type: "Card", props: {}, children: ["body"] } },
+            element("body", "text"),
+          ),
+        ),
+      ]),
+    )
+    expect(whole.missingBase).toBe(false)
+    expect(whole.settled).toBeDefined()
+  })
+
+  test("a root switch with a prop edit on an unknown base keeps looking for the base [R6F1-3]", () => {
+    // The edit makes an element of that prop alone (no type): not the root element the switch points at.
+    const state = only(
+      foldCanvases({}, [
+        block(
+          "msg_08",
+          json(
+            { canvas: "main" },
+            { op: "replace", path: "/root", value: "done" },
+            { op: "replace", path: "/elements/done/props/text", value: "done v3" },
+          ),
+        ),
+      ]),
+    )
+    expect(state.missingBase).toBe(true)
+    expect(state.settled).toBeUndefined()
+    // An element without props is not whole either; one with a type and props is.
+    const typeOnly = only(
+      foldCanvases({}, [
+        block("msg_08", json({ canvas: "main" }, { op: "replace", path: "/root", value: "done" })),
+        block("msg_09", json({ op: "add", path: "/elements/done", value: { type: "Text" } })),
+      ]),
+    )
+    expect(typeOnly.missingBase).toBe(true)
+    const typed = only(
+      foldCanvases({}, [
+        block("msg_08", json({ canvas: "main" }, { op: "replace", path: "/root", value: "done" })),
+        block("msg_09", json({ op: "add", path: "/elements/done", value: { type: "Text", props: {} } })),
+      ]),
+    )
+    expect(typed.missingBase).toBe(false)
+  })
+
   test("starts from a snapshot and skips blocks up to its position", () => {
     const snapshot: CanvasSnapshot = {
       title: "Saved",

@@ -225,6 +225,34 @@ function replaces(block: ParsedBlock, current: Spec | null, streaming: boolean):
 }
 
 /**
+ * Whether a spec holds its root element and every element that root reaches through `children` (a repeat's template
+ * included), each whole (a component type and props): nothing it renders is missing. A canvas whose base is unknown
+ * stops waiting for it then (see `step`). A patch of a prop of an element in the unknown base (`replace
+ * /elements/done/props/text`) makes an element of that prop alone, which is not whole.
+ */
+function holdsWholeTree(spec: Spec | null): boolean {
+  const elements = spec?.elements
+  const root = spec?.root
+  if (typeof root !== "string" || !root || typeof elements !== "object" || elements === null) return false
+  const seen = new Set<string>([root])
+  const stack = [root]
+  while (stack.length > 0) {
+    const element = own(elements, stack.pop()!)
+    if (typeof element !== "object" || element === null) return false
+    const whole = element as { readonly type?: unknown; readonly props?: unknown }
+    if (typeof whole.type !== "string" || typeof whole.props !== "object" || whole.props === null) return false
+    const children: unknown = element.children
+    if (!Array.isArray(children)) continue
+    for (const child of children)
+      if (typeof child === "string" && !seen.has(child)) {
+        seen.add(child)
+        stack.push(child)
+      }
+  }
+  return true
+}
+
+/**
  * A memoized `foldCanvases`. Per canvas it remembers the state after each block, keyed by the block object and the
  * state before it, so when only the streaming block changed only that block is applied again, and only its new
  * patches when the block merely grew. A canvas whose blocks did not change keeps its `CanvasState` object, and specs
@@ -319,7 +347,9 @@ export function createCanvasFolder(): Fold {
         missingBase = before?.missingBase ?? false
       } else {
         spec = extend(applied, false, input, patches) ?? applyPatches(input ?? EMPTY_SPEC, patches)
-        missingBase = (before?.missingBase ?? false) || input === null
+        // Built on an unknown base, until the spec holds all it renders: a new canvas started with a `replace` of
+        // `/root` whose root element came in a later block waited for a base that does not exist, and never settled.
+        missingBase = ((before?.missingBase ?? false) || input === null) && !holdsWholeTree(spec)
       }
 
       const generation = replace ? prev.generation + 1 : prev.generation

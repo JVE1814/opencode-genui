@@ -79,7 +79,7 @@ Inputs keep what the user enters. Bind each input you want back to a state path 
 
 The UI always takes the app's design and follows the user's theme and light or dark mode, so there are no color, style or className props: choose components and variants, not looks.
 
-- Keep it compact: a UI shows at most about 2,000 elements, or 500,000 characters of text, in all. Prefer Card, Stack and Grid for layout, Card titles or Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
+- Keep it compact: a UI shows at most about 2,000 elements, or 500,000 characters of text, in all. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
 - Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.
@@ -163,7 +163,7 @@ AVAILABLE COMPONENTS (42):
 - Stat: { label: string, value: string | number, change?: string, trend?: "up" | "down" | "neutral", description?: string, icon?: string } - A key metric. change is a short delta like "+12%"; trend colors it. Put several in a Grid.
 - Icon: { name: string, size?: "small" | "normal" | "large", tone?: "neutral" | "info" | "success" | "warning" | "danger" } - One of the app's icons. Common names: check, circle-check, circle-x, circle-exclamation, warning, info, help, plus, minus, close, edit, trash, copy, download, cloud-upload, refresh, magnifying-glass, settings-gear, sliders, folder, file-document, code, terminal, branch, github, globe, link, lock, shield, eye, comment, speech-bubble, notifications, status, task, checklist, bullet-list, server, monitor, cube, brain, flask, arrow-right, arrow-up-right, chevron-right, chevron-down, stop, share.
 - Keybind: { keys: Array<string> } - A keyboard shortcut, e.g. { "keys": ["Mod", "K"] }.
-- Image: { src: string, alt: string, width?: number, height?: number, fit?: "cover" | "contain", caption?: string } - An image from an https URL or a data:image URL. The user may need to click to load remote images.
+- Image: { src: string, alt: string, width?: number, height?: number, fit?: "cover" | "contain", caption?: string } - An image from an https URL or a raster data:image URL (no SVG). The user may need to click to load remote images.
 - Avatar: { name: string, src?: string, size?: "small" | "normal" | "large" } - A person or entity avatar; shows initials when there is no image.
 - Chart: { type?: "bar" | "line" | "area" | "donut", labels: Array<string>, series: Array<{ name: string, values: Array<number> }>, title?: string, height?: number, stacked?: boolean, unit?: string } - A simple chart in the app's colors. labels are the x-axis categories; each series has one value per label. donut uses the first series. Keep to at most 6 series.
 - Input: { label: string, name?: string, type?: "text" | "email" | "password" | "number" | "search" | "url", placeholder?: string, description?: string, value?: string | number, disabled?: boolean, checks?: Array<{ type: string, message: string, args?: Record<string, unknown> }>, validateOn?: "change" | "blur" | "submit" } - Single-line text field. Bind value with { "$bindState": "/form/name" }. Enter fires on.submit. checks validate it (e.g. [{ "type": "required", "message": "Required" }]). [events: submit, focus, blur]
@@ -180,7 +180,7 @@ AVAILABLE COMPONENTS (42):
 - ButtonGroup: { buttons: Array<{ label: string, value: string }>, selected?: string } - A segmented control to pick one option. Bind selected with { $bindState }. [events: change]
 - DropdownMenu: { label: string, items: Array<{ label: string, value: string, icon?: string }>, value?: string } - A button that opens a menu. Choosing an item writes its value to the bound value ({ $bindState }) and fires on.select. [events: select]
 - Pagination: { totalPages: number, page?: number } - Page navigation (pages start at 1). Bind page with { $bindState }. [events: change]
-- Dialog: { title: string, description?: string, openPath: string } - A modal dialog shown while the boolean at state path openPath is true. Open it with setState { "statePath": "/dialogOpen", "value": true }; it closes itself. [accepts children]
+- Dialog: { title: string, description?: string, openPath: string } - A modal dialog shown while the boolean at state path openPath is true. Open it from a press with setState {"statePath":"/dialogOpen","value":true}; it closes itself. [accepts children]
 - Drawer: { title: string, description?: string, openPath: string } - Like Dialog, but slides in from the side for longer content. [accepts children]
 - Tooltip: { content: string, text?: string } - Shows content on hover over its children, or over text when it has no children. [accepts children]
 - Popover: { trigger: string, content?: string } - A button labelled trigger that opens a small panel with content (Markdown) and/or children. [accepts children]
@@ -292,7 +292,7 @@ Maps state paths (JSON Pointers) to action bindings. When the value at a watched
 Example (cascading select — changing the country resets the city):
   {"type":"Select","props":{"label":"Country","value":{"$bindState":"/form/country"},"options":["US","Canada","UK"]},"watch":{"/form/country":{"action":"setState","params":{"statePath":"/form/city","value":""}}},"children":[]}
 
-Use `watch` for cascading dependencies where changing one field should change others (resetting dependent fields, computing derived values) with setState, pushState or removeState. sendPrompt, insertPrompt, openLink and copyText never run from watch.
+Use `watch` where changing one field should change others (resetting dependent fields, deriving values) with setState, pushState or removeState, at most 8,000 of them per change. sendPrompt, insertPrompt, openLink and copyText never run from watch.
 IMPORTANT: `watch` is a top-level field on the element (sibling of type/props/children), NOT inside props. Watchers only fire when the value changes, not on initial render.
 
 RULES:

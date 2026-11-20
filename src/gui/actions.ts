@@ -19,6 +19,7 @@ import {
   hasIntent,
   hasUserGesture,
   openLink,
+  whileAway,
   type RequestedConfirm,
 } from "./outward.ts"
 
@@ -81,16 +82,42 @@ const text = (value: unknown): string =>
 
 const clip = (value: string, max: number) => (value.length > max ? `${value.slice(0, max - 1)}…` : value)
 
-function interpolate(template: string, read: HandlerOptions["read"]): string {
+/** How many characters one confirm text reads from its template and from state at most (see `interpolate`). */
+export const MAX_INTERPOLATED = 1_000_000
+
+/**
+ * Fills a requested confirm's `${/path}` placeholders from state, for a text that is then trimmed and clipped to `max`
+ * characters. It stops as soon as what follows cannot change that result (the text holds a character other than white
+ * space past `max`), and after reading MAX_INTERPOLATED characters in all: a template that repeats a long value
+ * thousands of times built gigabytes before the clip.
+ */
+function interpolate(template: string, read: HandlerOptions["read"], max: number): string {
   if (!read || !template.includes("${")) return template
-  return template.replace(/\$\{([^}]+)\}/g, (_, path: string) => {
-    const value = read(path.trim())
-    return value === undefined || value === null
-      ? ""
-      : typeof value === "object"
-        ? JSON.stringify(value)
-        : String(value)
-  })
+  // The text so far without its leading white space, how many characters it took, and the index of its last character
+  // other than white space.
+  let text = ""
+  let taken = 0
+  let last = -1
+  const add = (piece: string) => {
+    taken += piece.length
+    const kept = text ? piece : piece.trimStart()
+    const content = kept.trimEnd().length
+    if (content > 0) last = text.length + content - 1
+    text += kept
+  }
+  const done = () => last >= max || taken > MAX_INTERPOLATED
+  const placeholder = /\$\{([^}]+)\}/g
+  let from = 0
+  for (let match = placeholder.exec(template); match; match = placeholder.exec(template)) {
+    add(template.slice(from, match.index))
+    from = placeholder.lastIndex
+    if (done()) return text
+    const value = read(match[1]!.trim())
+    add(value === undefined || value === null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value))
+    if (done()) return text
+  }
+  add(template.slice(from))
+  return text
 }
 
 /**
@@ -101,14 +128,14 @@ function interpolate(template: string, read: HandlerOptions["read"]): string {
 export function readConfirm(value: unknown, read?: HandlerOptions["read"]): RequestedConfirm | undefined {
   if (value === true) return {}
   if (typeof value === "string") {
-    const message = clip(interpolate(value, read).trim(), MAX_MESSAGE)
+    const message = clip(interpolate(value, read, MAX_MESSAGE).trim(), MAX_MESSAGE)
     return message ? { message } : {}
   }
   if (!isRecord(value)) return undefined
   const field = (key: string, max: number) => {
     const raw = value[key]
     if (typeof raw !== "string") return undefined
-    const result = clip(interpolate(raw, read).trim(), max)
+    const result = clip(interpolate(raw, read, max).trim(), max)
     return result || undefined
   }
   const title = field("title", MAX_TITLE)
@@ -166,6 +193,8 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
  *   needs an activation.
  * - A handler that does not run throws `ActionRefused`; onSuccess runs after a success, onError after a genuine failure
  *   (which it then handles, so the binding's chain goes on, as in json-render).
+ * - While a handler waits for the host (a message being sent, the clipboard) its activation's intent is set aside
+ *   (`whileAway`), so a write in another task meanwhile (typing) cannot open a modal or act outward with it.
  */
 export function createHandlers(host: Host, surface: SurfaceContext, options: HandlerOptions = {}): Handlers {
   const toastTimes: number[] = []
@@ -261,7 +290,8 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
       })
       if (!ok) refuse("sendPrompt")
       try {
-        await send(message)
+        // The host's request may take seconds: meanwhile this activation lends its intent to nothing else.
+        await whileAway(surface, () => send(message))
       } catch (error) {
         const description = errorText(error)
         host.toast({ title: host.t("action.sendFailed"), ...(description ? { description } : {}), variant: "error" })
@@ -311,7 +341,7 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
       })
       if (!ok) refuse("copyText")
       try {
-        await host.copy(value)
+        await whileAway(surface, () => host.copy(value))
       } catch (error) {
         host.toast({ title: host.t("action.copyFailed"), variant: "error" })
         throw error

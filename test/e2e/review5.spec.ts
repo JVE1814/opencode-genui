@@ -193,7 +193,7 @@ test.describe("modals", () => {
     await surface.getByLabel("Search").click()
     await answerTime(page)
     expect(Date.now() - started).toBeLessThan(2000)
-    // The modal opened and closed once in that task; opening it again in the same task was refused.
+    // Focus is no activation: the modal does not open at all.
     await expect(surface.locator('dialog[data-gu="dialog"]')).toHaveJSProperty("open", false)
     await expect(surface.getByLabel("Search")).toBeFocused()
   })

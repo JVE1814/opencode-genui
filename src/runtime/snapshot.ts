@@ -20,7 +20,12 @@ export interface PersistedSession {
 
 export const EMPTY_PERSISTED: PersistedSession = { v: 1, canvases: {}, surfaces: {} }
 
-/** Entries bigger than this are not written; the previous entry stays. */
+let tooLargeTold = false
+
+/**
+ * Entries bigger than this, in UTF-8 bytes, are not written: a canvas's previous entry stays, and a surface's edits are
+ * removed (see writeSurfaceOverrides). TrackedStore.overrides chooses no more than fits (see MAX_STORED_SIZE).
+ */
 export const MAX_ENTRY_BYTES = 256 * 1024
 
 /** How many surfaces keep their edits; the least recently saved go first. */
@@ -79,7 +84,8 @@ const recordOf = (record: unknown): Readonly<Record<string, string>> => (isRecor
 const ownString = (record: unknown, key: string): string | undefined =>
   isRecord(record) && Object.hasOwn(record, key) && typeof record[key] === "string" ? record[key] : undefined
 
-const utf8Length = (text: string) => {
+/** The length of a text in UTF-8 bytes. */
+export const utf8Length = (text: string) => {
   let bytes = text.length
   for (let index = 0; index < text.length; index++) {
     const code = text.charCodeAt(index)
@@ -206,7 +212,16 @@ export function writeSurfaceOverrides(
   const previous = toSurfaceEntry(parse(existing))
   if (previous && existing === stringify({ t: previous.t, o: entries })) return current
   const json = stringify({ t: now, o: entries })
-  if (json === undefined) return current
+  if (json === undefined) {
+    // Keeping the previous entry would bring back, on a reload, what the user has changed since, and store nothing
+    // they do later: the entry goes instead (TrackedStore.overrides chooses edits that fit, so this is a last resort).
+    if (!tooLargeTold) {
+      tooLargeTold = true
+      console.warn(`[genui] Removed a UI's stored edits: they would take more than ${MAX_ENTRY_BYTES} bytes.`)
+    }
+    if (existing === undefined) return current
+    return { ...current, v: 1, surfaces: withEntry(surfaces, surfaceId, undefined) }
+  }
 
   let next = withEntry(surfaces, surfaceId, json)
   const ids = Object.keys(next)

@@ -1,4 +1,14 @@
-import { createContext, createEffect, createSignal, onCleanup, useContext, type Accessor } from "solid-js"
+import {
+  createContext,
+  createEffect,
+  createRoot,
+  createSignal,
+  onCleanup,
+  untrack,
+  useContext,
+  type Accessor,
+  type Setter,
+} from "solid-js"
 import type { ValidationConfig } from "@json-render/core"
 import {
   useRepeatScope,
@@ -122,15 +132,105 @@ export function useRemembered<T>(
   ]
 }
 
+type Validation = ReturnType<typeof useValidation>
+type FieldState = Validation["fieldStates"][string] | undefined
+
+/**
+ * How many fields' results one frame shows (see ErrorView): the browser restyles what changed at the next frame, about
+ * 60 µs per element under the app's stylesheets, so a hundred fields cost it a few tens of milliseconds.
+ */
+const ERRORS_PER_FRAME = 100
+
+// The next frame, or a later task where there are no frames.
+const nextFrame = (run: () => void) =>
+  typeof requestAnimationFrame === "function" ? requestAnimationFrame(() => run()) : setTimeout(run, 0)
+
+/**
+ * What each field of one form (one ValidationProvider) shows, from json-render's validation results, path by path.
+ * json-render keeps every field's result in one signal, so every field's error re-read it on every validation: one
+ * `validateForm` over 2,000 fields updated all of them in one task of a second, most of it restyling the 6,000
+ * elements that changed. Here one effect per form follows that signal and hands each field only its own result,
+ * through a signal of its own; when many results change at once, ERRORS_PER_FRAME of them show per frame (in field
+ * order), so the window answers in between. A form's view lives while one of its fields does.
+ */
+interface ErrorView {
+  readonly state: (path: string) => FieldState
+  readonly release: () => void
+}
+
+const errorViews = new WeakMap<Validation, ErrorView & { users: number }>()
+
+function errorView(validation: Validation): ErrorView {
+  let view = errorViews.get(validation)
+  if (!view) {
+    const signals = new Map<string, [Accessor<FieldState>, Setter<FieldState>]>()
+    // What each path shows now, and what waits to be shown.
+    const shown = new Map<string, FieldState>()
+    const waiting = new Map<string, FieldState>()
+    let scheduled = false
+    const show = () => {
+      scheduled = false
+      let count = 0
+      for (const [path, state] of waiting) {
+        waiting.delete(path)
+        shown.set(path, state)
+        signals.get(path)?.[1](() => state)
+        if (++count >= ERRORS_PER_FRAME && waiting.size > 0) {
+          scheduled = true
+          nextFrame(show)
+          return
+        }
+      }
+    }
+    let dispose: () => void = () => {}
+    createRoot((done) => {
+      dispose = done
+      createEffect(() => {
+        const states = validation.fieldStates
+        untrack(() => {
+          for (const path of new Set([...Object.keys(states), ...shown.keys(), ...waiting.keys()])) {
+            const state = states[path]
+            if ((waiting.has(path) ? waiting.get(path) : shown.get(path)) !== state) waiting.set(path, state)
+          }
+          if (!scheduled && waiting.size > 0) show()
+        })
+      })
+    })
+    const created: ErrorView & { users: number } = {
+      users: 0,
+      state: (path) => {
+        let signal = signals.get(path)
+        if (!signal) {
+          signal = createSignal<FieldState>(shown.get(path), { equals: false })
+          signals.set(path, signal)
+        }
+        return signal[0]()
+      },
+      release: () => {
+        if (--created.users > 0) return
+        errorViews.delete(validation)
+        dispose()
+      },
+    }
+    errorViews.set(validation, created)
+    view = created
+  }
+  view.users++
+  return view
+}
+
 /**
  * Validation for a bound form field: the `checks` prop, run on `validateOn` (blur by default). Returns the first error
  * message, and `validate` to call from the component's change/blur handlers.
  *
  * Reactive on purpose: in a streaming canvas a field can mount before its `checks` (or its binding) arrive, so the field
- * is (re)registered with the current config whenever it changes, and `validate` always uses the current config.
+ * is (re)registered with the current config whenever it changes, and `validate` always uses the current config. Its
+ * error follows its own result only (see ErrorView).
  */
 export function useChecks(ctx: BaseComponentProps<Record<string, unknown>>, prop: string) {
   const validation = useValidation()
+  const view = errorView(validation)
+  onCleanup(view.release)
   const path = () => ctx.bindings?.[prop] ?? ""
   const checks = () => list<{ type: string; message: string; args?: Record<string, unknown> }>(ctx.props.checks)
   const validateOn = () => oneOf(ctx.props.validateOn, ["change", "blur", "submit"] as const, "blur")
@@ -145,8 +245,7 @@ export function useChecks(ctx: BaseComponentProps<Record<string, unknown>>, prop
   return {
     error: (): string | undefined => {
       if (!enabled()) return undefined
-      const state = validation.fieldStates[path()]
-      return state?.result?.errors[0]
+      return view.state(path())?.result?.errors[0]
     },
     validate: (on: "change" | "blur") => {
       if (enabled() && validateOn() === on) validation.validate(path(), config())
@@ -199,9 +298,12 @@ export function reserveToolbar(element: HTMLElement): void {
   let widest = 0
   const resize =
     typeof ResizeObserver === "function"
-      ? new ResizeObserver(() => {
-          // The toolbar shows on hover; never shrink, so hovering does not move the UI.
-          const width = Math.ceil(toolbar?.getBoundingClientRect().width ?? 0)
+      ? new ResizeObserver((entries) => {
+          // The toolbar shows on hover; never shrink, so hovering does not move the UI. Its width comes from the
+          // observer's entry: reading the layout here, after the previous surface's write, forced a layout per surface
+          // (900 small blocks in one tool output: a second of frozen window).
+          const entry = entries.at(-1)
+          const width = Math.ceil(entry?.borderBoxSize?.[0]?.inlineSize ?? entry?.contentRect.width ?? 0)
           if (width <= widest) return
           widest = width
           element.style.setProperty("--_toolbar", `${width + 8}px`)

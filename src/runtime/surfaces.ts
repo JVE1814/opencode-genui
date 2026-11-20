@@ -47,9 +47,10 @@ export function getSurface(key: string): SurfaceRuntime {
   }
   const created: SurfaceRuntime = { key, store: createTrackedStore(), memory: new Map() }
   surfaces.set(key, created)
-  for (const oldest of surfaces.keys()) {
+  for (const [oldest, runtime] of surfaces) {
     if (surfaces.size <= MAX_SURFACES) break
     surfaces.delete(oldest)
+    runtime.store.dispose()
   }
   return created
 }
@@ -61,9 +62,9 @@ export function peekSurface(key: string): SurfaceRuntime | undefined {
 
 /** Forgets every surface, or those whose key matches. */
 export function clearSurfaces(predicate?: (key: string) => boolean): void {
-  if (!predicate) {
-    surfaces.clear()
-    return
+  for (const [key, runtime] of [...surfaces]) {
+    if (predicate && !predicate(key)) continue
+    surfaces.delete(key)
+    runtime.store.dispose()
   }
-  for (const key of [...surfaces.keys()]) if (predicate(key)) surfaces.delete(key)
 }

@@ -1,6 +1,6 @@
 import type { Spec } from "@json-render/core"
 import { normalizeSpec } from "./normalize.ts"
-import { applyPatches, EMPTY_SPEC } from "./patch.ts"
+import { applyPatches, copiesRefused, EMPTY_SPEC, MAX_COPIED } from "./patch.ts"
 import type { ParsedBlock } from "./surface.ts"
 import { validateSurface, type SurfaceIssue } from "./validate.ts"
 
@@ -31,9 +31,17 @@ interface Entry {
 const specCache = new WeakMap<object, Entry>()
 const blockCache = new WeakMap<object, Entry>()
 
+// A "copy" operation the spec's patches made was left out (see MAX_COPIED in ./patch.ts).
+const COPY_TOO_LARGE: SurfaceIssue = Object.freeze({
+  severity: "warning",
+  code: "copy_too_large",
+  message: `a "copy" operation was not applied: copies may add at most ${MAX_COPIED.toLocaleString("en-US")} characters (and list entries) to a spec in all; write the values out instead`,
+})
+
 function compile(raw: Spec, streaming: boolean): CompiledSurface {
   const spec = normalizeSpec(raw)
-  const { issues, fatal } = validateSurface(spec)
+  const { issues: found, fatal } = validateSurface(spec)
+  const issues = copiesRefused(raw) ? [...found, COPY_TOO_LARGE] : found
   const shown = streaming ? issues.filter((issue) => !MID_STREAM.has(issue.code)) : issues
   return Object.freeze({
     spec: fatal ? null : spec,

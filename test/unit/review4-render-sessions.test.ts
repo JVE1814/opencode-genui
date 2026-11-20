@@ -345,6 +345,30 @@ describe("a canvas's base and its check, when they are not loaded [review5#F2, r
     expect(run.snapshots()).toEqual(["plan@msg_08"])
   })
 
+  test("a root switch with a prop edit, whose canvas was created before the loaded messages, loads them too [R6F1-3]", async () => {
+    // The skill's "switch the view" with a prop update: the edit made an element of that prop alone, and the canvas
+    // counted as whole, so nothing was loaded, and a spec with no component type was settled and saved.
+    const switchAndEdit = fence(
+      "canvas",
+      lines(
+        { canvas: "plan" },
+        { op: "replace", path: "/root", value: "done" },
+        { op: "replace", path: "/elements/done/props/text", value: "done v3" },
+      ),
+    )
+    const run = setup([user("msg_07"), assistant("msg_08", switchAndEdit)], EMPTY_PERSISTED, {
+      older: [user("msg_01"), assistant("msg_02", createWithDone)],
+    })
+    await settle()
+    await settle()
+    expect(run.lists.length).toBeGreaterThan(0)
+    expect(run.canvases()).toEqual(["plan:main+done"])
+    const canvas = run.entry.index.canvas("plan")
+    expect(canvas?.spec?.root).toBe("done")
+    expect(canvas?.spec?.elements.done).toEqual({ type: "Text", props: { text: "done v3" } } as never)
+    expect(run.snapshots()).toEqual(["plan@msg_08"])
+  })
+
   test("a check that failed for a passing reason is asked again, later and when the connection changes", async () => {
     // msg_02 is gone from the server, but the first check fails offline: the canvas stays for now.
     const offline = setup(

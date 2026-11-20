@@ -5,7 +5,7 @@ import { isIconName } from "../../catalog/icons.ts"
 import { safeUrl } from "../../protocol/url.ts"
 import { useHost, useSurface, type Host } from "../host.ts"
 import { openLink } from "../outward.ts"
-import { JOINER, linkTarget, neutralizeMarkdown, splitMarkdown, stripJoiners, type MarkdownPart } from "./markdown.ts"
+import { JOINER, linkTarget, prepareMarkdown, stripJoiners, type MarkdownPart } from "./markdown.ts"
 import { list, oneOf, str, type GenuiComponent } from "./shared.tsx"
 
 // Content components: Heading, Text, Markdown, Code, Badge, Alert, Keybind, Icon. Styles: src/gui/styles/content.css.
@@ -32,7 +32,8 @@ const TONES = ["neutral", "info", "success", "warning", "danger"] as const
 export function MarkdownText(props: { readonly text: string }) {
   const host = useHost()
   const surface = useSurface()
-  const parts = createMemo(() => splitMarkdown(props.text))
+  // Prose neutralized, all parts sharing the text's budget for the renderer's work (see MarkdownBudget).
+  const parts = createMemo(() => prepareMarkdown(props.text, host.t("c.markdown.image")))
 
   const intercept = (event: MouseEvent) => {
     if (event.defaultPrevented) return
@@ -73,14 +74,7 @@ export function MarkdownText(props: { readonly text: string }) {
         {(part) => (
           <Show
             when={part().kind === "code" ? (part() as Extract<MarkdownPart, { kind: "code" }>) : undefined}
-            fallback={
-              <host.ui.Markdown
-                text={neutralizeMarkdown(
-                  (part() as Extract<MarkdownPart, { kind: "markdown" }>).text ?? "",
-                  host.t("c.markdown.image"),
-                )}
-              />
-            }
+            fallback={<host.ui.Markdown text={(part() as Extract<MarkdownPart, { kind: "markdown" }>).text ?? ""} />}
           >
             {(code) => <host.ui.Code content={code().code} language={code().language} />}
           </Show>
