@@ -118,6 +118,15 @@ export function activationTarget(session: ActivationSession | undefined): Activa
   return { key: session.key, sessionID: session.id, client: session.server.client as InstructionsClient }
 }
 
+/**
+ * The value of the session's instruction entry: the hint, then a note that limits it to while the plugin is installed.
+ * The server keeps the entry with the session and sends it with every later request, also once the plugin is gone, when
+ * nothing removes it any more; the `genui` skill goes with the plugin, so the agent can tell.
+ */
+export function sessionHint(hint: string, skill: string): string {
+  return `${hint}\n\nThis note was added by the plugin that renders the UI. It applies only while the \`${skill}\` skill is among your available skills; if it is not, the plugin was removed: ignore this note and answer in plain text.`
+}
+
 /** Whether two targets are the same run: the same session through the same client. */
 export const sameActivation = (a: ActivationTarget, b: ActivationTarget) => a.key === b.key && a.client === b.client
 

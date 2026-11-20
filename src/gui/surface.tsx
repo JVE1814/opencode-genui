@@ -14,11 +14,12 @@ import type { CompiledSurface } from "../protocol/compile.ts"
 import { secretPaths } from "../protocol/normalize.ts"
 import type { LineError } from "../protocol/surface.ts"
 import { formatIssuesForAgent, type SurfaceIssue } from "../protocol/validate.ts"
+import { itemKeys } from "../runtime/item-keys.ts"
 import type { SurfaceRuntime } from "../runtime/surfaces.ts"
 import { VALIDATION_FUNCTIONS } from "../protocol/pattern.ts"
 import { createHandlers, type ChainLink } from "./actions.ts"
 import { ChainBridge } from "./chain.ts"
-import { reserveToolbar } from "./components/shared.tsx"
+import { reserveToolbar, SurfaceMemoryContext } from "./components/shared.tsx"
 import { ErrorCard, IssuesFooter } from "./fallback.tsx"
 import { HostContext, QuietWriteContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
 import { allowOutward } from "./outward.ts"
@@ -40,6 +41,9 @@ export interface SurfaceViewProps {
 }
 
 const NO_LINES: readonly LineError[] = Object.freeze([])
+
+/** How long a remounted inline surface keeps its last height at most while its content settles. */
+export const HEIGHT_RESERVE_MS = 1000
 
 /**
  * Sends a surface's problems to the agent as the user (the "Ask agent to fix" button), through the outward gate.
@@ -97,24 +101,50 @@ function Frame(props: SurfaceViewProps) {
   const hasProblems = () => issues().length > 0 || lineErrors().length > 0
 
   // Inline surfaces keep their last height while they remount (timeline rows unmount off screen), so the transcript
-  // does not jump; the reservation ends with the first measurement.
+  // does not jump while content that lays out late (charts, images, Markdown) settles. The reservation ends once the
+  // content is as tall again, when the user interacts with the surface, or after HEIGHT_RESERVE_MS.
   let root: HTMLDivElement | undefined
   const [reserved, setReserved] = createSignal(
     props.info.kind === "inline" ? untrack(() => props.runtime().height) : undefined,
   )
   onMount(() => {
+    const element = root
     // In place of a code block: keep clear of its toolbar.
-    if (root && props.info.kind === "inline") reserveToolbar(root)
-    if (!root || typeof ResizeObserver === "undefined") return
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[entries.length - 1]
-      const height = entry?.borderBoxSize?.[0]?.blockSize ?? entry?.contentRect.height ?? 0
-      if (height <= 0) return
-      const runtime = untrack(props.runtime)
+    if (element && props.info.kind === "inline") reserveToolbar(element)
+    if (!element || typeof ResizeObserver === "undefined") return void setReserved(undefined)
+    const release = () => {
       if (untrack(reserved) !== undefined) setReserved(undefined)
-      else runtime.height = height
+    }
+    if (untrack(reserved) !== undefined) {
+      const timer = setTimeout(release, HEIGHT_RESERVE_MS)
+      element.addEventListener("pointerdown", release, { capture: true })
+      element.addEventListener("keydown", release, { capture: true })
+      onCleanup(() => {
+        clearTimeout(timer)
+        element.removeEventListener("pointerdown", release, { capture: true })
+        element.removeEventListener("keydown", release, { capture: true })
+      })
+    }
+    // The content's own height: while reserved, the box is at least the reserved height.
+    const measure = () => {
+      const held = element.style.minHeight
+      if (!held) return element.getBoundingClientRect().height
+      element.style.minHeight = ""
+      const height = element.getBoundingClientRect().height
+      element.style.minHeight = held
+      return height
+    }
+    const observer = new ResizeObserver(() => {
+      const height = measure()
+      if (height <= 0) return
+      const target = untrack(reserved)
+      if (target !== undefined) {
+        if (height < target - 0.5) return
+        setReserved(undefined)
+      }
+      untrack(props.runtime).height = height
     })
-    observer.observe(root)
+    observer.observe(element)
     onCleanup(() => observer.disconnect())
   })
 
@@ -147,14 +177,16 @@ function Frame(props: SurfaceViewProps) {
       >
         <Show when={props.runtime()} keyed>
           {(runtime) => (
-            <Render
-              host={host}
-              info={props.info}
-              runtime={runtime}
-              compiled={props.compiled}
-              streaming={streaming}
-              canFix={canFix}
-            />
+            <SurfaceMemoryContext.Provider value={runtime.memory}>
+              <Render
+                host={host}
+                info={props.info}
+                runtime={runtime}
+                compiled={props.compiled}
+                streaming={streaming}
+                canFix={canFix}
+              />
+            </SurfaceMemoryContext.Provider>
           )}
         </Show>
         <Show when={!streaming() && hasProblems()}>
@@ -174,10 +206,15 @@ function Render(props: {
   readonly canFix: Accessor<boolean>
 }) {
   const store = props.runtime.store
-  // What password Inputs are bound to is never persisted (the secret root never is either).
-  createComputed(() => store.setSecrets(secretPaths(props.compiled().spec)))
-  // The agent's state is the store's base; the user's edits stay on top of it as the spec streams and changes.
-  createComputed(() => store.setBase(props.compiled().spec?.state))
+  createComputed(() => {
+    const spec = props.compiled().spec
+    // What password Inputs are bound to is never persisted (the secret root never is either).
+    store.setSecrets(secretPaths(spec))
+    // Edits of list items follow their item by its repeat.key.
+    store.setItemKeys(itemKeys(spec))
+    // The agent's state is the store's base; the user's edits stay on top of it as the spec streams and changes.
+    store.setBase(spec?.state)
+  })
   // json-render reads its handlers once, so they are bound to this surface for the provider's lifetime.
   // onSuccess/onError handlers run through json-render's own execute, connected by ChainBridge inside the provider.
   const link: ChainLink = {}

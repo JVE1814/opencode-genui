@@ -13,6 +13,16 @@ export interface SurfaceRuntime {
   height?: number
   /** The canvas generation the store's edits belong to; a new generation resets them. */
   generation?: number
+  /**
+   * UI state components keep per element besides the state store (which sections of an Accordion or Collapsible are
+   * open), so a remount shows what the user left. In memory only; a new canvas generation clears it.
+   */
+  readonly memory: Map<string, unknown>
+  /**
+   * For the shared runtime of an agent block id: the content id (`contentId`) of the block that drives it now, so a
+   * re-sent block that takes over can hand the edits to the copy it replaces (see handOverInline in src/gui/persist.ts).
+   */
+  driver?: string
 }
 
 export const MAX_SURFACES = 200
@@ -35,7 +45,7 @@ export function getSurface(key: string): SurfaceRuntime {
     surfaces.set(key, existing)
     return existing
   }
-  const created: SurfaceRuntime = { key, store: createTrackedStore() }
+  const created: SurfaceRuntime = { key, store: createTrackedStore(), memory: new Map() }
   surfaces.set(key, created)
   for (const oldest of surfaces.keys()) {
     if (surfaces.size <= MAX_SURFACES) break

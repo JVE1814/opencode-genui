@@ -2,8 +2,19 @@ import { children, createMemo, createSignal, For, Index, Show, type JSX } from "
 import type { ComponentName } from "../../catalog/components.ts"
 import { useHost } from "../host.ts"
 import { MarkdownText } from "./content.tsx"
-import { useActivation } from "./inputs.tsx"
-import { bool, list, num, oneOf, str, trackOverflow, uid, useBound, type GenuiComponent } from "./shared.tsx"
+import { isCommitKey, useChoice } from "./inputs.tsx"
+import {
+  bool,
+  list,
+  num,
+  oneOf,
+  str,
+  trackOverflow,
+  uid,
+  useBound,
+  useRemembered,
+  type GenuiComponent,
+} from "./shared.tsx"
 
 // Layout components: Stack, Grid, Card, Separator, Tabs, Accordion, Collapsible. Styles: src/gui/styles/layout.css.
 
@@ -159,7 +170,7 @@ function tabItems(value: unknown): TabItem[] {
 
 const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
   const base = uid("tabs")
-  const activate = useActivation(ctx)
+  const choice = useChoice(ctx)
   const tabs = createMemo(() => tabItems(ctx.props.tabs))
   const [value, setValue] = useBound(ctx, "value", "", (next) => (typeof next === "string" ? next : undefined))
   const panels = useChildList(() => ctx.children)
@@ -192,16 +203,26 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
   const tabId = (index: number) => `${base}-tab-${index}`
   const panelId = (index?: number) => (index === undefined ? `${base}-panel` : `${base}-panel-${index}`)
 
-  const select = (index: number) => {
+  // A click chooses a tab; arrow keys, Home and End only browse (see useChoice), and Space, Enter or a click then sends
+  // the tab they reached.
+  const select = (index: number, how: "choose" | "browse" = "choose") => {
     const tab = tabs()[index]
-    if (!tab || tab.value === active()) return
+    if (!tab) return
+    if (tab.value === active()) {
+      if (how === "choose") choice.commit("change")
+      return
+    }
     setValue(tab.value)
-    void activate("change")
+    choice[how]("change")
   }
 
   const onKeyDown = (event: KeyboardEvent, index: number) => {
     const count = tabs().length
     if (count === 0) return
+    if (isCommitKey(event)) {
+      if (index === activeIndex() && choice.commit("change")) event.preventDefault()
+      return
+    }
     const rtl = !!listRef && getComputedStyle(listRef).direction === "rtl"
     let next: number
     switch (event.key) {
@@ -222,7 +243,7 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
     }
     event.preventDefault()
     next = (next + count) % count
-    select(next)
+    select(next, "browse")
     listRef?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus()
   }
 
@@ -314,8 +335,8 @@ const Accordion: GenuiComponent<"Accordion"> = (ctx) => {
       .filter((index) => Number.isInteger(index) && index >= 0)
     return new Set(multiple() ? indexes : indexes.slice(0, 1))
   })
-  // Follows defaultOpen until the user opens or closes a section.
-  const [chosen, setChosen] = createSignal<ReadonlySet<number>>()
+  // Follows defaultOpen until the user opens or closes a section; what the user chose survives a remount.
+  const [chosen, setChosen] = useRemembered<ReadonlySet<number>>(ctx, "open")
   const open = () => chosen() ?? initial()
 
   const toggle = (index: number, next: boolean) => {
@@ -364,8 +385,8 @@ const Accordion: GenuiComponent<"Accordion"> = (ctx) => {
 
 const Collapsible: GenuiComponent<"Collapsible"> = (ctx) => {
   const { ui } = useHost()
-  // Follows defaultOpen until the user opens or closes it.
-  const [chosen, setChosen] = createSignal<boolean>()
+  // Follows defaultOpen until the user opens or closes it; what the user chose survives a remount.
+  const [chosen, setChosen] = useRemembered<boolean>(ctx, "open")
   const open = () => chosen() ?? bool(ctx.props.defaultOpen, false)
 
   return (

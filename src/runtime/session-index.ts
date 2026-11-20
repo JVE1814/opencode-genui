@@ -32,6 +32,8 @@ export interface SessionIndexInput {
    * revert is committed but are no longer part of the transcript, so the index ignores them.
    */
   readonly revert?: Accessor<string | undefined>
+  /** Messages the server no longer has (see `unverified`): the snapshots taken after one of them are gone. */
+  readonly deleted?: Accessor<ReadonlySet<string>>
 }
 
 export interface SessionIndex {
@@ -66,6 +68,19 @@ export interface SessionIndex {
    * message (a revert). Older messages should be loaded with `backfill`.
    */
   readonly needsBackfill: Accessor<boolean>
+  /**
+   * Canvases whose stored snapshot was taken after a message that is gone: its id is inside the loaded messages' range
+   * (or newer than all of them) but no such message is loaded, as after a committed revert. Their snapshots should be
+   * deleted. Empty while a revert is staged or the transcript is empty.
+   */
+  readonly staleSnapshots: Accessor<readonly string[]>
+  /**
+   * The messages of stored snapshots that are older than every loaded message, so the loaded messages cannot tell
+   * whether they still exist (a revert committed while no window had the session open deleted them, and nothing
+   * older is left). The server should be asked, and the ones it no longer has passed as `deleted`. Empty while a
+   * revert is staged or the transcript is empty.
+   */
+  readonly unverified: Accessor<readonly string[]>
   readonly ready: Accessor<boolean>
 }
 
@@ -84,11 +99,14 @@ interface PartScan {
 
 interface Scan {
   readonly blocks: readonly CanvasBlock[]
+  /** Every loaded message id, also those a staged revert hides, and the oldest and newest of them. */
+  readonly ids: ReadonlySet<string>
+  readonly first?: string
+  readonly last?: string
   /** The normalized texts of every block in assistant text. */
   readonly texts: ReadonlySet<string>
   /** Inline header id -> the normalized text of the newest closed block with that id. */
   readonly latest: ReadonlyMap<string, string>
-  readonly newest?: string
   /** The newest message that is not a reply still being written. */
   readonly settled?: string
   /** Whether each assistant message has completed. */
@@ -208,14 +226,19 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     const complete = new Map<string, boolean>()
     const seenParts = new Set<string>()
     const seenBlocks = new Set<string>()
-    let newest: string | undefined
+    const ids = new Set<string>()
+    let first: string | undefined
+    let last: string | undefined
     let settled: string | undefined
     let sorted = true
 
     for (const message of merged()) {
       const id = message?.id
-      if (typeof id !== "string" || (revert !== undefined && id >= revert)) continue
-      if (newest === undefined || id > newest) newest = id
+      if (typeof id !== "string") continue
+      ids.add(id)
+      if (first === undefined || id < first) first = id
+      if (last === undefined || id > last) last = id
+      if (revert !== undefined && id >= revert) continue
       const done = message.type !== "assistant" || !!message.time?.completed
       if (done && (settled === undefined || id > settled)) settled = id
       if (message.type !== "assistant") continue
@@ -274,25 +297,42 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     if (!sorted) blocks.sort((a, b) => compareRefs(a.ref, b.ref))
     return {
       blocks,
+      ids,
+      ...(first !== undefined ? { first } : {}),
+      ...(last !== undefined ? { last } : {}),
       texts,
       latest,
-      ...(newest !== undefined ? { newest } : {}),
       ...(settled !== undefined ? { settled } : {}),
       complete,
     }
   })
 
-  const newest = createMemo(() => scan().newest)
   const known = createMemo(() => scan().texts, undefined, { equals: sameSet })
   const latest = createMemo(() => scan().latest, undefined, { equals: sameMap })
 
-  // A snapshot is from after a revert when it is past the staged revert point, or newer than the newest message. An
-  // empty transcript says nothing (a restarted server's store before it syncs): its snapshots stand.
+  // A snapshot describes messages that are gone when its message is newer than every loaded message, or inside their
+  // range but not among them (the loaded messages are the newest ones, without gaps, so it was deleted: a committed
+  // revert), or the server said it no longer has it (older than every loaded message, see `unverified`). An empty
+  // transcript says nothing (a restarted server's store before it syncs): its snapshots stand.
+  const range = createMemo(
+    () => {
+      const { ids, first, last } = scan()
+      return { ids, first, last }
+    },
+    undefined,
+    { equals: (a, b) => a.first === b.first && a.last === b.last && sameSet(a.ids, b.ids) },
+  )
+  const gone = (snapshot: CanvasSnapshot) => {
+    const { ids, first, last } = range()
+    const after = snapshot.after.messageID
+    if (input.deleted?.().has(after)) return true
+    if (first === undefined || last === undefined) return false
+    return after > last || (after >= first && !ids.has(after))
+  }
+  // A snapshot from after a revert: past the staged revert point, or gone.
   const reverted = (snapshot: CanvasSnapshot) => {
     const cut = input.revert?.()
-    if (cut !== undefined && snapshot.after.messageID >= cut) return true
-    const last = newest()
-    return last !== undefined && snapshot.after.messageID > last
+    return (cut !== undefined && snapshot.after.messageID >= cut) || gone(snapshot)
   }
 
   // A snapshot from after a revert describes messages that are gone, so the fold ignores it. A snapshot that is the
@@ -392,6 +432,38 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     { equals: sameArray },
   )
 
+  const staleSnapshots = createMemo(
+    () => {
+      if (!ready() || input.revert?.() !== undefined) return NO_IDS
+      const snapshots = input.snapshots() ?? {}
+      const ids = Object.keys(snapshots).filter((id) => {
+        const snapshot = snapshots[id]
+        return snapshot !== undefined && gone(snapshot)
+      })
+      return ids.length === 0 ? NO_IDS : ids
+    },
+    undefined,
+    { equals: sameArray },
+  )
+
+  const unverified = createMemo(
+    () => {
+      if (!ready() || input.revert?.() !== undefined) return NO_IDS
+      const { ids, first } = range()
+      if (first === undefined) return NO_IDS
+      const deleted = input.deleted?.()
+      const snapshots = input.snapshots() ?? {}
+      const messages = new Set<string>()
+      for (const id of Object.keys(snapshots)) {
+        const after = snapshots[id]?.after.messageID
+        if (after !== undefined && after < first && !ids.has(after) && !deleted?.has(after)) messages.add(after)
+      }
+      return messages.size === 0 ? NO_IDS : [...messages].sort()
+    },
+    undefined,
+    { equals: sameArray },
+  )
+
   const needsBackfill = createMemo(() => {
     if (!ready()) return false
     if (canvases().some((state) => state.missingBase)) return true
@@ -417,6 +489,8 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
       setConsumedVersion((version) => version + 1)
     },
     needsBackfill,
+    staleSnapshots,
+    unverified,
     ready,
   }
 }

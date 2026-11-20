@@ -78,6 +78,9 @@ type Fold = (base: Readonly<Record<string, CanvasSnapshot>>, blocks: readonly Ca
  * Folds canvas blocks, in transcript order, onto the canvases' snapshots: a block that sets `/root` (or says
  * `"mode":"replace"`) starts a new generation from scratch, any other block patches the current spec, and
  * `"close":true` removes the canvas. Pure.
+ *
+ * A block that only points `/root` at an element the canvas already has, without adding that element itself, switches
+ * the view and patches (see `replaces`): it keeps the canvas's elements, state and the user's edits.
  */
 export function foldCanvases(
   base: Readonly<Record<string, CanvasSnapshot>>,
@@ -148,6 +151,37 @@ interface CanvasCache {
 }
 
 const refKey = (ref: BlockRef) => `${ref.messageID}\u0000${ref.part}\u0000${ref.ordinal}`
+
+const pointer = (key: string) => key.replace(/~/g, "~0").replace(/\//g, "~1")
+
+/**
+ * Whether a block replaces the canvas rather than patching it. The header's `mode` decides when there is one;
+ * otherwise a block that sets `/root` replaces, unless the canvas already has the element it points at and the block
+ * does not add that element itself: a patch that switches the view (`{"op":"replace","path":"/root","value":"done"}`).
+ * Adding it is an `add`, `copy` or `move` to `/elements/<root>`, or an `/elements` map that holds it; a `replace` of
+ * that element (which RFC 6902 allows only on a member that exists) updates it as part of the patch. While a whole
+ * canvas streams with the same root key, its first lines patch (the old canvas stays in view) until the root element
+ * arrives.
+ */
+function replaces(block: ParsedBlock, current: Spec | null): boolean {
+  if (block.header.mode !== undefined) return block.header.mode === "replace"
+  if (!block.hasRoot) return false
+  if (current === null) return true
+  let root: unknown
+  for (const patch of block.patches)
+    if ((patch.op === "add" || patch.op === "replace") && patch.path === "/root") root = patch.value
+  if (typeof root !== "string" || !Object.hasOwn(current.elements ?? {}, root)) return true
+  const own = `/elements/${pointer(root)}`
+  return block.patches.some(
+    (patch) =>
+      ((patch.op === "add" || patch.op === "copy" || patch.op === "move") && patch.path === own) ||
+      ((patch.op === "add" || patch.op === "replace") &&
+        patch.path === "/elements" &&
+        typeof patch.value === "object" &&
+        patch.value !== null &&
+        Object.hasOwn(patch.value, root)),
+  )
+}
 
 /**
  * A memoized `foldCanvases`. Per canvas it remembers the state after each block, keyed by the block object and the
@@ -231,9 +265,9 @@ export function createCanvasFolder(): Fold {
       cache.applied.set(key, { input: null, replace: false, patches: [], output: null, node: next })
     } else {
       const { header, patches } = item.block
-      const replace = header.mode !== undefined ? header.mode === "replace" : item.block.hasRoot
       const before = prev.state
       const input = before?.spec ?? null
+      const replace = replaces(item.block, input)
       let spec: Spec | null
       let missingBase: boolean
       if (replace) {

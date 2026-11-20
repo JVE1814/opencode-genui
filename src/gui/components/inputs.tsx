@@ -1,7 +1,7 @@
 import { createEffect, createMemo, For, Show, type Accessor, type JSX } from "solid-js"
 import { normalizeOptions, type Option } from "../../catalog/components.ts"
 import { useHost, useSurface } from "../host.ts"
-import { withIntent } from "../outward.ts"
+import { withIntent, withoutIntent } from "../outward.ts"
 import { bool, list, num, oneOf, str, uid, useBound, useChecks, type GenuiComponent } from "./shared.tsx"
 
 // Form fields: Input, Textarea, Select, Checkbox, Radio, Switch, Slider. Buttons and choice controls are in
@@ -17,8 +17,8 @@ const INPUT_TYPES = ["text", "email", "password", "number", "search", "url"] as 
  * Fires a component event and resolves once its actions have run. The renderer's `emit` is async although it is typed
  * void; a failing action is logged here so it never becomes an unhandled rejection.
  *
- * This grants no outward intent: use it for events the user does not mean as an activation (focus, blur, a slider's
- * movement). Activations go through `useActivation`.
+ * This grants no outward intent of its own. Events the user does not mean as an activation (focus, blur, a slider's
+ * movement) go through `usePassive`, activations through `useActivation`.
  */
 export function fire(ctx: { emit: (event: string) => void }, event: string): Promise<void> {
   const report = (error: unknown) => {
@@ -47,11 +47,83 @@ export function useActivation(ctx: {
   emit: (event: string) => void
 }): (event: string, first?: () => Promise<boolean>) => Promise<void> {
   const surface = useSurface()
+  // A "change" activation is a choice: outward.ts sends it after the gap rather than refusing it (see withIntent).
+  const control = {}
   return (event, first) =>
-    withIntent(surface, async () => {
-      if (first && !(await first())) return
-      await fire(ctx, event)
-    })
+    withIntent(
+      surface,
+      async () => {
+        if (first && !(await first())) return
+        await fire(ctx, event)
+      },
+      event === "change" ? { choice: control } : {},
+    )
+}
+
+/**
+ * For an event the user does not mean as an activation: focus, blur, a slider's movement, a choice moved with the
+ * arrow keys. Call it while the component is created (it reads the surface). The function it returns fires the event
+ * with outward actions refused while it runs (see `withoutIntent` in src/gui/outward.ts), even if another activation of
+ * the surface is being dispatched at the same time, or a choice made earlier waits for the gap.
+ */
+export function usePassive(ctx: { emit: (event: string) => void }): (event: string) => Promise<void> {
+  const surface = useSurface()
+  return (event) => withoutIntent(surface, () => fire(ctx, event))
+}
+
+/** Keys that move a selection that follows focus, in a radio group or a tab list. */
+const NAVIGATION_KEYS: ReadonlySet<string> = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+])
+
+/** Whether a key event moves a selection that follows focus (see `useChoice`). */
+export const isNavigationKey = (event: KeyboardEvent) =>
+  NAVIGATION_KEYS.has(event.key) && !event.altKey && !event.ctrlKey && !event.metaKey
+
+/** Whether a key event confirms the current choice of a choice control (see `useChoice`). */
+export const isCommitKey = (event: KeyboardEvent) => (event.key === "Enter" || event.key === " ") && !event.isComposing
+
+/**
+ * For a choice control whose selection follows focus (Radio, Tabs). Call it while the component is created.
+ *
+ * - `browse(event)`: arrow keys, Home or End moved the choice. The event fires as a passive one (see `usePassive`): its
+ *   state actions run, but nothing leaves the surface for a choice the user may only be passing through.
+ * - `commit(event)`: Space, Enter or a click on the current choice. If the last change came from browsing, the event
+ *   fires again, now as an activation, and it returns true (the caller then prevents the key's default); otherwise it
+ *   does nothing.
+ * - `choose(event)`: a click, or Space on another option: an activation.
+ */
+export function useChoice(ctx: { emit: (event: string) => void }): {
+  browse: (event: string) => void
+  commit: (event: string) => boolean
+  choose: (event: string) => void
+} {
+  const activate = useActivation(ctx)
+  const passive = usePassive(ctx)
+  let browsed = false
+  return {
+    browse: (event) => {
+      browsed = true
+      void passive(event)
+    },
+    commit: (event) => {
+      if (!browsed) return false
+      browsed = false
+      void activate(event)
+      return true
+    },
+    choose: (event) => {
+      browsed = false
+      void activate(event)
+    },
+  }
 }
 
 /**
@@ -153,6 +225,7 @@ function validateEdit(checks: ReturnType<typeof useChecks>) {
 const Input: GenuiComponent<"Input"> = (ctx) => {
   const id = uid("input")
   const activate = useActivation(ctx)
+  const passive = usePassive(ctx)
   const [value, setValue] = useBound<string | number>(ctx, "value", "", asText)
   const checks = useChecks(ctx, "value")
   const type = () => oneOf(ctx.props.type, INPUT_TYPES, "text")
@@ -212,10 +285,10 @@ const Input: GenuiComponent<"Input"> = (ctx) => {
             event.preventDefault()
             void activate("submit")
           }}
-          onFocus={() => void fire(ctx, "focus")}
+          onFocus={() => void passive("focus")}
           onBlur={() => {
             checks.validate("blur")
-            void fire(ctx, "blur")
+            void passive("blur")
           }}
         />
       </div>
@@ -401,10 +474,13 @@ const Checkbox: GenuiComponent<"Checkbox"> = (ctx) => {
 // ---------------------------------------------------------------------------------------------------------------------
 
 // Native radios (arrow keys move the selection) behind the app's radio control (forms/radio). The group name is our
-// own id: two surfaces may use the same `name`, and radios with one name in a document form a single group.
+// own id: two surfaces may use the same `name`, and radios with one name in a document form a single group. Moving the
+// selection with the keyboard is browsing, not a choice (see useChoice): Space or Enter on it sends it, as a click does.
 const Radio: GenuiComponent<"Radio"> = (ctx) => {
   const id = uid("radio")
-  const activate = useActivation(ctx)
+  const choice = useChoice(ctx)
+  // Set while a navigation key's default action (the browser checks the next radio, which fires `change`) runs.
+  let navigating = false
   const options = useOptions(() => ctx.props.options)
   const [value, setValue] = useBound<string>(ctx, "value", "", asOptionValue)
   const checks = useChecks(ctx, "value")
@@ -450,11 +526,24 @@ const Radio: GenuiComponent<"Radio"> = (ctx) => {
                   value={option.value}
                   checked={selected()}
                   disabled={disabled()}
+                  onKeyDown={(event) => {
+                    if (isNavigationKey(event)) {
+                      navigating = true
+                      // After the key's default action, which is part of this task.
+                      setTimeout(() => (navigating = false))
+                    } else if (isCommitKey(event) && event.currentTarget.checked && choice.commit("change"))
+                      event.preventDefault()
+                  }}
                   onChange={(event) => {
                     if (!event.currentTarget.checked) return
                     setValue(option.value)
                     validateEdit(checks)
-                    void activate("change")
+                    if (navigating) choice.browse("change")
+                    else choice.choose("change")
+                  }}
+                  // A click on the option already chosen fires no change: it sends a choice the arrow keys moved to.
+                  onClick={() => {
+                    if (!navigating && selected()) choice.commit("change")
                   }}
                 />
                 <label data-slot="box" for={optionId()}>
@@ -536,6 +625,7 @@ function withUnit(text: string, unit: string): string {
 // A native range, so keyboard, pointer and assistive tech work as everywhere; the visible track is drawn behind it.
 const Slider: GenuiComponent<"Slider"> = (ctx) => {
   const id = uid("slider")
+  const passive = usePassive(ctx)
   const [stored, setValue] = useBound<number | undefined>(ctx, "value", undefined, asNumber)
   const min = () => num(ctx.props.min, 0)
   const max = () => {
@@ -589,7 +679,7 @@ const Slider: GenuiComponent<"Slider"> = (ctx) => {
           aria-valuetext={text()}
           onInput={(event) => setValue(Number(event.currentTarget.value))}
           // Moving a slider is not an activation: its actions run without an outward intent.
-          onChange={() => void fire(ctx, "change")}
+          onChange={() => void passive("change")}
         />
       </div>
     </div>

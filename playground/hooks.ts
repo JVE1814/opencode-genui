@@ -14,6 +14,8 @@ export interface GenuiHooks {
   readonly bundle?: string
   /** `client.session.prompt` calls (what `sendPrompt` sends): `{ sessionID, text, input }`. */
   readonly prompts: readonly { readonly sessionID: string; readonly text: string; readonly input: unknown }[]
+  /** `client.session.switchModel` calls: `{ sessionID, model }`. */
+  readonly modelSwitches: readonly { readonly sessionID: string; readonly model: unknown }[]
   /** `ctx.toast.show` options (action buttons as their labels). */
   readonly toasts: readonly unknown[]
   /** `ctx.dialogs.confirm` options with the answer given. */
@@ -79,6 +81,7 @@ export function installHooks(input: {
     mode: input.mode,
     bundle: input.bundle,
     prompts: app.server.log.prompts,
+    modelSwitches: app.server.log.modelSwitches,
     toasts: app.records.toasts,
     confirms: app.records.confirms,
     alerts: app.records.alerts,

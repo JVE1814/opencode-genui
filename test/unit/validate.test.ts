@@ -258,7 +258,7 @@ describe("validateSurface: actions", () => {
     const result = validateSurface(
       spec({ b: { type: "Button", props: { label: "B" }, on: { press: actions.map((action) => ({ action })) } } }),
     )
-    expect(result.issues).toEqual([])
+    expect(result.issues.filter((issue) => issue.code === "unknown_action")).toEqual([])
   })
 
   test("unknown actions in on, watch, onSuccess and onError are warnings", () => {
@@ -268,7 +268,11 @@ describe("validateSurface: actions", () => {
           type: "Button",
           props: { label: "B" },
           on: {
-            press: { action: "deploy", onSuccess: { action: "celebrate" }, onError: { action: "showToast" } },
+            press: {
+              action: "deploy",
+              onSuccess: { action: "celebrate" },
+              onError: { action: "showToast", params: { title: "Failed" } },
+            },
             focus: [{ action: "setState" }, { action: "fetchData" }],
           },
           watch: { "/env": { action: "loadCities" } },
@@ -344,12 +348,15 @@ describe("validateSurface: actions", () => {
         on: {
           submit: { action: "sendPrompt", params: { text: "ok" } },
           blur: { action: "sendPrompt", params: { text: "x" } },
-          focus: [{ action: "setState", params: { statePath: "/f", value: true } }, { action: "copyText" }],
+          focus: [
+            { action: "setState", params: { statePath: "/f", value: true } },
+            { action: "copyText", params: { text: "x" } },
+          ],
         },
         watch: {
           "/q": [
             { action: "showToast", params: { title: "t" } },
-            { action: "showToast", params: { title: "t" }, onSuccess: { action: "openLink" } },
+            { action: "showToast", params: { title: "t" }, onSuccess: { action: "openLink", params: { url: "x" } } },
             { action: "openCanvas", params: { canvas: "main" }, confirm: true },
           ],
         },

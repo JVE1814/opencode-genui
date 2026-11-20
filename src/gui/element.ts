@@ -8,6 +8,15 @@ import type { BaseComponentProps, ComponentRegistry, ComponentRenderProps } from
 /** A genui component as written in src/gui/components (the context json-render's defineRegistry would pass). */
 export type ElementImpl = (ctx: BaseComponentProps<any>) => JSX.Element
 
+const ELEMENT_KEY = Symbol("genui.elementKey")
+
+/**
+ * The spec key of the element a component renders (json-render passes it with the patch in patches/), for UI state a
+ * component keeps per element outside the state store (see useRemembered in components/shared.tsx).
+ */
+export const elementKeyOf = (ctx: BaseComponentProps<any>): string | undefined =>
+  (ctx as { readonly [ELEMENT_KEY]?: string })[ELEMENT_KEY]
+
 /**
  * An element's rendered children that keep their identity while the element changes.
  *
@@ -48,7 +57,10 @@ export function createElementRenderer(
   return function GenuiElement(props: ComponentRenderProps): JSX.Element {
     const kids = stableChildren(props)
     const impl = createMemo(() => lookup(props.element?.type))
-    const ctx: BaseComponentProps = {
+    const ctx: BaseComponentProps & { readonly [ELEMENT_KEY]?: string } = {
+      get [ELEMENT_KEY]() {
+        return (props as { readonly elementKey?: string }).elementKey
+      },
       get props() {
         return props.element.props as Record<string, unknown>
       },

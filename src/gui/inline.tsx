@@ -1,10 +1,10 @@
-import { createMemo, Show, untrack, type JSX } from "solid-js"
+import { createComputed, createMemo, Show, untrack, type JSX } from "solid-js"
 import type { CodeBlockProps } from "@opencode/plugin/gui"
 import { compileBlock } from "../protocol/compile.ts"
 import { blockKind, canvasIdOf, isMeaningful, parseBlock, type ParsedBlock } from "../protocol/surface.ts"
 import { getSurface, surfaceKey } from "../runtime/surfaces.ts"
 import { reserveToolbar } from "./components/shared.tsx"
-import { inlineSurfaceId, persistSurface, surfaceEntry } from "./persist.ts"
+import { handOverInline, inlineSurfaceId, persistSurface, surfaceEntry } from "./persist.ts"
 import type { GuiEnv } from "./setup.tsx"
 import { SurfaceView } from "./surface.tsx"
 
@@ -59,6 +59,22 @@ function InlineSurface(input: {
   const surfaceId = createMemo(() => inlineSurfaceId(block, trusted(), newest()))
   const runtime = createMemo(() => getSurface(surfaceKey(session()?.key, "inline", surfaceId())))
   const compiled = () => compileBlock(block)
+
+  // The newest block of an id drives its shared state; the copy it replaces keeps what the user entered in it.
+  // (A computed of this component runs before the surface below sets the new block's state.)
+  createComputed(() => {
+    if (block.header.id === undefined || !trusted() || !newest()) return
+    const shared = runtime()
+    const current = session()
+    untrack(() =>
+      handOverInline({
+        shared,
+        keyOf: (id) => surfaceKey(current?.key, "inline", id),
+        block,
+        store: current ? env.store(current) : undefined,
+      }),
+    )
+  })
 
   persistSurface({
     runtime,

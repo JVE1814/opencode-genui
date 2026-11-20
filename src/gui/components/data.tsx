@@ -3,7 +3,8 @@ import { getByPath } from "@json-render/core"
 import { useStateStore } from "@json-render/solid"
 import { isIconName } from "../../catalog/icons.ts"
 import { isRemoteImage, safeUrl, urlHost } from "../../protocol/url.ts"
-import { useHost, type Host } from "../host.ts"
+import { useHost, useSurface, type Host } from "../host.ts"
+import { askOutward } from "../outward.ts"
 import { useActivation } from "./inputs.tsx"
 import { bool, display, list, num, oneOf, str, trackOverflow, uid, type GenuiComponent } from "./shared.tsx"
 
@@ -474,10 +475,31 @@ export interface GuardedImageProps {
  * An image under the surface's URL policy, filling its parent: a refused URL (not https or data:image) shows an inert
  * placeholder with the alt text; a remote image waits for a click on "Load image from <host>" unless the settings
  * allow remote images; a failed load shows the placeholder again. Never renders model text as HTML.
+ *
+ * Loading sends the whole URL, which a spec may build from what the user typed, so the click goes through the same
+ * confirm policy as outward actions (by default: a confirm with the full address on untrusted surfaces), and the button
+ * shows the full address on hover.
  */
 export function GuardedImage(props: GuardedImageProps) {
   const host = useHost()
+  const surface = useSurface()
   const url = createMemo(() => safeUrl(props.src, "image"))
+  let asking = false
+  const load = async (src: string) => {
+    if (asking) return
+    asking = true
+    try {
+      const ok = await askOutward(host, surface, {
+        title: host.t("confirm.loadImage", { host: urlHost(src) }),
+        detail: src,
+        detailLabel: host.t("confirm.label.address"),
+        confirmLabel: host.t("confirm.load"),
+      })
+      if (ok) approveImage(src)
+    } finally {
+      asking = false
+    }
+  }
   const [failed, setFailed] = createSignal<string>()
   const state = () => {
     const current = url()
@@ -522,7 +544,7 @@ export function GuardedImage(props: GuardedImageProps) {
       </Match>
       <Match when={state() === "ask" && url()}>
         {(src) => (
-          <button type="button" data-gu-image="load" onClick={() => approveImage(src())}>
+          <button type="button" data-gu-image="load" title={src()} onClick={() => void load(src())}>
             <span data-slot="icon" aria-hidden="true">
               <host.ui.Icon name="outline-photo" size="normal" />
             </span>

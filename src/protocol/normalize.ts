@@ -81,6 +81,40 @@ export const isSecretInput = (element: { readonly type: string; readonly props?:
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Notes: what the normalizer removed or ignored because it cannot render or run. The validator reports them
+// (validateSurface reads normalizeNotes), so a model's mistake reaches the issues footer and "Ask agent to fix" instead of
+// silently disappearing.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Something normalizeSpec removed or ignored, as a validation issue (src/protocol/validate.ts, SurfaceIssue). */
+export interface NormalizeNote {
+  readonly severity: "error" | "warning"
+  readonly code: string
+  /** Relative to the element when `elementKey` is set. */
+  readonly message: string
+  readonly elementKey?: string
+}
+
+/** A note about one element, before it knows the element's key. */
+type LocalNote = Omit<NormalizeNote, "elementKey">
+
+const NO_NOTES: readonly NormalizeNote[] = Object.freeze([])
+const notesBySpec = new WeakMap<object, readonly NormalizeNote[]>()
+const notesByElement = new WeakMap<object, readonly LocalNote[]>()
+
+/** What normalizeSpec removed or ignored in the spec it returned (empty for any other spec). */
+export const normalizeNotes = (spec: unknown): readonly NormalizeNote[] =>
+  (isRecord(spec) && notesBySpec.get(spec)) || NO_NOTES
+
+const typeName = (value: unknown) => (value === null ? "null" : Array.isArray(value) ? "array" : typeof value)
+
+/** The validator's wording for a binding that is not one. */
+export const notABinding = (where: string) => `${where} is not an action binding ({ "action": "...", "params": {...} })`
+
+/** The validator's wording for an invalid `repeat`. */
+export const INVALID_REPEAT = 'has an invalid "repeat" (expected { "statePath": "/path/to/array" })'
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Element-local steps. They depend only on the element, so results are cached by the element's identity: the patch
 // applier shares untouched elements between versions of a spec, and so do we, which keeps the renderer's updates small
 // while a canvas streams.
@@ -98,21 +132,40 @@ function relocate(element: UIElement): UIElement {
   }
 }
 
-function sanitizeChildren(element: UIElement): UIElement {
+function sanitizeChildren(element: UIElement, notes: LocalNote[]): UIElement {
   const children: unknown = element.children
-  if (!Array.isArray(children)) return { ...element, children: [] }
+  if (!Array.isArray(children)) {
+    // (Leaving `children` out is fine for a leaf.)
+    if (children !== undefined)
+      notes.push({
+        severity: "error",
+        code: "invalid_children",
+        message: `"children" should be an array of element keys, got ${typeName(children)}: its children do not render`,
+      })
+    return { ...element, children: [] }
+  }
   if (children.every((child) => typeof child === "string")) return element
+  notes.push({
+    severity: "error",
+    code: "invalid_children",
+    message: `"children" should hold element keys (strings): ${children.filter((child) => typeof child !== "string").length} entries are not, and do not render`,
+  })
   return { ...element, children: children.filter((child): child is string => typeof child === "string") }
 }
 
 // json-render iterates slots and reads `repeat.statePath`; shapes it does not expect would throw in the validator.
-function sanitizeStructure(element: UIElement): UIElement {
+function sanitizeStructure(element: UIElement, notes: LocalNote[]): UIElement {
   let next = element
   const repeat: unknown = next.repeat
   if (repeat !== undefined) {
     const statePath = isRecord(repeat) ? repeat.statePath : undefined
     const valid = typeof statePath === "string" || (isRecord(statePath) && typeof statePath.$item === "string")
     if (!valid) {
+      notes.push({
+        severity: "error",
+        code: "invalid_repeat",
+        message: `${INVALID_REPEAT}: it renders its children once`,
+      })
       const { repeat: _repeat, ...rest } = next
       next = rest as UIElement
     }
@@ -162,14 +215,28 @@ const isDynamicHandler = (handler: Record<string, unknown>) =>
 
 // An onSuccess/onError handler: an action binding (rewritten like any binding), or `{ set }`. A handler written as an
 // expression becomes IGNORED_HANDLER (reported by the validator); anything else (`navigate`: genui has no navigation) is
-// dropped.
-function rewriteHandler(handler: unknown, passive: string | undefined, depth: number): unknown {
-  if (!isRecord(handler) || depth > MAX_CHAIN_DEPTH) return undefined
+// dropped, with a note.
+function rewriteHandler(
+  handler: unknown,
+  passive: string | undefined,
+  depth: number,
+  where: string,
+  notes: LocalNote[] | undefined,
+): unknown {
+  const drop = (why: string) => {
+    notes?.push({ severity: "warning", code: "invalid_chain", message: `${where} is ignored: ${why}` })
+    return undefined
+  }
+  if (handler === undefined || handler === null) return undefined
+  if (depth > MAX_CHAIN_DEPTH) return drop(`onSuccess/onError chains nest at most ${MAX_CHAIN_DEPTH} deep`)
+  if (!isRecord(handler)) return drop('write it as { "action": "...", "params": {...} } or { "set": {...} }')
   if (handler[IGNORED_CHAIN] === true && Object.keys(handler).length === 1) return handler
   if (handler[IGNORED_CHAIN] === true || isDynamicHandler(handler)) return IGNORED_HANDLER
-  if (typeof handler.action === "string") return rewriteBinding(handler, passive, depth)
+  if (typeof handler.action === "string") return rewriteBinding(handler, passive, depth, where, notes)
   if (isRecord(handler.set)) return Object.keys(handler).length === 1 ? handler : { set: handler.set }
-  return undefined
+  return drop(
+    'genui runs only { "action": "...", "params": {...} } or { "set": {...} } handlers (there is no navigation)',
+  )
 }
 
 /**
@@ -179,7 +246,7 @@ function rewriteHandler(handler: unknown, passive: string | undefined, depth: nu
  */
 export function normalizeChained(handler: unknown, passive: string | undefined): Record<string, unknown> | undefined {
   if (!isRecord(handler) || handler[IGNORED_CHAIN] === true || isDynamicHandler(handler)) return undefined
-  if (typeof handler.action === "string") return rewriteBinding(handler, passive, 1)
+  if (typeof handler.action === "string") return rewriteBinding(handler, passive, 1, "", undefined)
   return isRecord(handler.set) ? { set: handler.set } : undefined
 }
 
@@ -200,12 +267,20 @@ export function normalizeChained(handler: unknown, passive: string | undefined):
 function rewriteBinding(
   binding: Record<string, unknown>,
   passive: string | undefined,
-  depth = 0,
+  depth: number,
+  where: string,
+  notes: LocalNote[] | undefined,
 ): Record<string, unknown> {
   const action = binding.action
   if (typeof action !== "string" || BUILTIN_ACTIONS.has(action)) {
     if (!("confirm" in binding)) return binding
-    const { confirm: _confirm, ...rest } = binding
+    const { confirm, ...rest } = binding
+    if (typeof action === "string" && confirm !== undefined && confirm !== null && confirm !== false)
+      notes?.push({
+        severity: "warning",
+        code: "confirm_on_builtin",
+        message: `${where} runs ${action} without asking: "confirm" works on the custom actions only`,
+      })
     return rest
   }
 
@@ -227,7 +302,7 @@ function rewriteBinding(
       delete rest[field]
       changed = true
     } else if (!(param in params)) continue
-    const rewritten = rewriteHandler(handler, passive, depth + 1)
+    const rewritten = rewriteHandler(handler, passive, depth + 1, `${where}.${field}`, notes)
     if (rewritten === undefined) {
       if (param in params) changed = true
       delete params[param]
@@ -248,37 +323,56 @@ function rewriteBinding(
   return changed ? { ...rest, params } : binding
 }
 
-// Rewrites each binding of an `on` or `watch` map. Bindings that are not objects are dropped: the renderer reads
-// fields of every binding when an event fires and would throw on them.
-function rewriteBindings(element: UIElement, field: "on" | "watch"): UIElement {
+// Rewrites each binding of an `on` or `watch` map. Bindings that are not objects are dropped, with a note: the renderer
+// reads fields of every binding when an event fires and would throw on them.
+function rewriteBindings(element: UIElement, field: "on" | "watch", notes: LocalNote[]): UIElement {
   const map: unknown = element[field]
   if (map === undefined) return element
   if (!isRecord(map)) {
+    notes.push({
+      severity: "warning",
+      code: "invalid_binding",
+      message:
+        field === "on"
+          ? `"on" should map events to action bindings, e.g. { "press": { "action": "...", "params": {...} } }, got ${typeName(map)}`
+          : `"watch" should map state paths to action bindings, got ${typeName(map)}`,
+    })
     const { [field]: _dropped, ...rest } = element
     return rest as UIElement
   }
   let changed = false
   const next: Record<string, unknown> = {}
   for (const [name, value] of Object.entries(map)) {
+    const where = field === "on" ? `on.${name}` : `watch[${JSON.stringify(name)}]`
     if (FORBIDDEN_KEYS.has(name)) {
+      notes.push({
+        severity: "warning",
+        code: "invalid_binding",
+        message: `${where} is ignored: "${name}" is reserved`,
+      })
       changed = true
       continue
     }
-    const passive =
-      field === "watch" ? `watch[${JSON.stringify(name)}]` : isActivation(element.type, name) ? undefined : `on.${name}`
-    const rewrite = (binding: Record<string, unknown>) => rewriteBinding(binding, passive)
+    const passive = field === "watch" || !isActivation(element.type, name) ? where : undefined
     if (Array.isArray(value)) {
-      const bindings = value.filter(isRecord)
-      const rewritten = bindings.map(rewrite)
-      if (bindings.length !== value.length || rewritten.some((binding, index) => binding !== bindings[index])) {
+      const kept: [Record<string, unknown>, number][] = []
+      value.forEach((binding: unknown, index) => {
+        if (isRecord(binding)) kept.push([binding, index])
+        else notes.push({ severity: "warning", code: "invalid_binding", message: notABinding(`${where}[${index}]`) })
+      })
+      const rewritten = kept.map(([binding, index]) => rewriteBinding(binding, passive, 0, `${where}[${index}]`, notes))
+      if (kept.length !== value.length || rewritten.some((binding, index) => binding !== kept[index]![0])) {
         changed = true
         if (rewritten.length > 0) next[name] = rewritten
       } else next[name] = value
     } else if (isRecord(value)) {
-      const rewritten = rewrite(value)
+      const rewritten = rewriteBinding(value, passive, 0, where, notes)
       if (rewritten !== value) changed = true
       next[name] = rewritten
-    } else changed = true
+    } else {
+      notes.push({ severity: "warning", code: "invalid_binding", message: notABinding(where) })
+      changed = true
+    }
   }
   return changed ? ({ ...element, [field]: next } as UIElement) : element
 }
@@ -317,15 +411,17 @@ function normalizeElement(raw: unknown): UIElement | undefined {
   const cached = localCache.get(raw)
   if (cached) return cached
 
+  const notes: LocalNote[] = []
   let element = raw as unknown as UIElement
   if (!isRecord(element.props)) element = { ...element, props: {} }
   element = relocate(element)
-  element = sanitizeChildren(element)
-  element = sanitizeStructure(element)
+  element = sanitizeChildren(element, notes)
+  element = sanitizeStructure(element, notes)
   element = sanitizeChecks(element)
-  element = rewriteBindings(element, "on")
-  element = rewriteBindings(element, "watch")
+  element = rewriteBindings(element, "on", notes)
+  element = rewriteBindings(element, "watch", notes)
 
+  if (notes.length > 0) notesByElement.set(element, Object.freeze(notes))
   localCache.set(raw, element)
   // Normalizing a normalized element is a no-op; remember that so a second pass keeps identity too.
   if ((element as unknown) !== raw) localCache.set(element, element)
@@ -504,7 +600,9 @@ export function secretPaths(spec: Spec | null | undefined): readonly string[] {
  * 1. json-render's autoFixSpec moves `visible`/`on`/`repeat`/`watch` out of `props` (lossless fixes only: dangling
  *    children stay, so the validator can report them).
  * 2. Every element gets an object `props` and a string-array `children`; elements that are not objects or have no
- *    string `type` are removed, with the references to them.
+ *    string `type` are removed, with the references to them. What is removed or ignored this way (elements, children,
+ *    an invalid `repeat`, bindings and onSuccess/onError handlers that are not bindings, a built-in's `confirm`) is
+ *    recorded for the validator (see normalizeNotes).
  * 3. `pattern` and `email` validation checks become genui's safe checks (src/protocol/pattern.ts); checks written as
  *    expressions are replaced by one that always passes (see sanitizeChecks).
  * 4. Custom actions' `confirm`, `onSuccess` and `onError` move into reserved params, `{ "$item": ... }` params resolve
@@ -522,25 +620,42 @@ export function normalizeSpec(spec: Spec): Spec {
   const rawState = isRecord(source.state) ? source.state : undefined
 
   let changed = root !== source.root || rawElements !== source.elements || rawState !== source.state
+  const notes: NormalizeNote[] = []
   const elements: Record<string, UIElement> = {}
   const removed = new Set<string>()
   for (const [key, raw] of Object.entries(rawElements)) {
     const element = key === "__proto__" ? undefined : normalizeElement(raw)
     if (!element) {
+      notes.push(
+        key === "__proto__"
+          ? { severity: "error", code: "invalid_element", message: 'the key "__proto__" cannot name an element' }
+          : isRecord(raw)
+            ? { severity: "error", code: "missing_type", message: "has no component type", elementKey: key }
+            : { severity: "error", code: "invalid_element", message: "is not an element object", elementKey: key },
+      )
       removed.add(key)
       changed = true
       continue
     }
     if ((element as unknown) !== raw) changed = true
     elements[key] = element
+    for (const note of notesByElement.get(element) ?? []) notes.push({ ...note, elementKey: key })
   }
 
-  // References to removed elements go, and so do references that would resolve to an inherited property
-  // ("toString") instead of an element.
+  // References to removed elements go (their own note says why), and so do references that would resolve to an
+  // inherited property ("toString") instead of an element.
   const dangling = (child: string) => removed.has(child) || (!Object.hasOwn(elements, child) && child in elements)
   for (const [key, element] of Object.entries(elements)) {
     const children = element.children ?? []
     if (!children.some(dangling)) continue
+    for (const child of children)
+      if (!removed.has(child) && dangling(child))
+        notes.push({
+          severity: "error",
+          code: "missing_child",
+          message: `child "${child.length > 60 ? `${child.slice(0, 57)}...` : child}" is not defined`,
+          elementKey: key,
+        })
     elements[key] = { ...element, children: children.filter((child) => !dangling(child)) }
     changed = true
   }
@@ -558,8 +673,11 @@ export function normalizeSpec(spec: Spec): Spec {
 
   const state = seedState(rawState, seeds)
   if (state !== source.state) changed = true
+  // (A spec that needed no change has nothing to note: a normalized spec passed again keeps its notes.)
   if (!changed) return spec
 
   const { state: _state, ...rest } = source
-  return { ...rest, root, elements, ...(state ? { state } : {}) } as Spec
+  const result = { ...rest, root, elements, ...(state ? { state } : {}) } as Spec
+  if (notes.length > 0) notesBySpec.set(result, Object.freeze(notes))
+  return result
 }

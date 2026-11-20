@@ -177,14 +177,14 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
 
   // A confirm the binding asked for on an action that does not leave the surface. A dialog that pops up on its own is
   // hostile, so it needs an activation of this surface too.
-  const confirmRequested = async (reserved: Reserved, title: string, detail?: string) => {
+  const confirmRequested = async (reserved: Reserved, title: string, detail?: { text: string; label: string }) => {
     if (reserved.passive !== undefined || !hasIntent(surface) || !hasUserGesture()) return false
     return confirmIntent(
       host,
       surface,
       confirmOptions(host, surface, {
         title,
-        ...(detail ? { detail } : {}),
+        ...(detail ? { detail: detail.text, detailLabel: detail.label } : {}),
         confirmLabel: host.t("confirm.continue"),
         ...(reserved.confirm ? { requested: reserved.confirm } : {}),
       }),
@@ -195,7 +195,7 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
   const outward = (
     reserved: Reserved,
     name: string,
-    input: { title: string; detail: string; confirmLabel: string },
+    input: { title: string; detail: string; detailLabel: string; confirmLabel: string },
   ) => {
     if (reserved.passive !== undefined) refuse(`${name}: not from an activation (${reserved.passive})`)
     return allowOutward(host, surface, {
@@ -246,6 +246,8 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
 
   return {
     sendPrompt: action(async (params, reserved) => {
+      // Nothing to say (Enter in an empty field, a missing param) sends nothing, as insertPrompt does.
+      if (!text(params.text).trim() && params.data === undefined) refuse("sendPrompt: no text")
       const message = formatSentMessage(
         params.data === undefined ? { text: text(params.text) } : { text: text(params.text), data: params.data },
       )
@@ -254,6 +256,7 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
       const ok = await outward(reserved, "sendPrompt", {
         title: host.t("confirm.send"),
         detail: message,
+        detailLabel: host.t("confirm.label.message"),
         confirmLabel: host.t("confirm.sendLabel"),
       })
       if (!ok) refuse("sendPrompt")
@@ -274,6 +277,7 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
       const ok = await outward(reserved, "insertPrompt", {
         title: host.t("confirm.insert"),
         detail: value,
+        detailLabel: host.t("confirm.label.text"),
         confirmLabel: host.t("confirm.insertLabel"),
       })
       if (!ok) refuse("insertPrompt")
@@ -296,10 +300,13 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
 
     copyText: action(async (params, reserved) => {
       const value = text(params.text)
+      // Nothing to copy (a param slip such as { value }): refuse rather than empty the clipboard and say "Copied".
+      if (!value) refuse("copyText: no text")
       const label = clip(text(params.label).trim(), 60)
       const ok = await outward(reserved, "copyText", {
         title: host.t("confirm.copy"),
         detail: value,
+        detailLabel: host.t("confirm.label.text"),
         confirmLabel: host.t("confirm.copyLabel"),
       })
       if (!ok) refuse("copyText")
@@ -310,7 +317,7 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
         throw error
       }
       host.toast({
-        title: label ? host.t("action.copiedLabel", { label }) : host.t("action.copied"),
+        title: label ? host.t("action.copiedNamed", { label }) : host.t("action.copied"),
         variant: "success",
       })
     }),
@@ -325,7 +332,8 @@ export function createHandlers(host: Host, surface: SurfaceContext, options: Han
       const description = clip(text(params.description).trim(), MAX_MESSAGE)
       if (reserved.confirm !== undefined) {
         const detail = description ? `${title}\n\n${description}` : title
-        if (!(await confirmRequested(reserved, host.t("confirm.toast"), detail))) refuse("showToast")
+        const shown = { text: detail, label: host.t("confirm.label.notification") }
+        if (!(await confirmRequested(reserved, host.t("confirm.toast"), shown))) refuse("showToast")
       }
       const variant = params.variant === "success" || params.variant === "error" ? params.variant : "default"
       host.toast({ title, ...(description ? { description } : {}), variant })

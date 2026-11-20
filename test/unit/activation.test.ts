@@ -7,6 +7,7 @@ import {
   ensureInstructions,
   removeInstructions,
   sameActivation,
+  sessionHint,
   type ActivationSession,
   type InstructionsClient,
 } from "../../src/runtime/activation.ts"
@@ -220,5 +221,15 @@ describe("activationTarget", () => {
     expect(results.at(-1)).toBe("put")
     expect(second.calls.filter((call) => call.startsWith("put"))).toHaveLength(1)
     dispose()
+  })
+})
+
+describe("sessionHint [review4 FIDELITY#7]", () => {
+  test("the stored session entry limits itself to while the plugin's skill is available", () => {
+    const value = sessionHint("HINT", "genui")
+    expect(value.startsWith("HINT\n\n")).toBe(true)
+    // The entry outlives the plugin on the server; once the skill is gone with it, the agent is told to ignore it.
+    expect(value).toContain("only while the `genui` skill is among your available skills")
+    expect(value).toContain("ignore this note and answer in plain text")
   })
 })

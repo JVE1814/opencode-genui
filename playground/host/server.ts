@@ -55,6 +55,15 @@ export interface ServerLog {
   readonly prompts: PromptRecord[]
   /** The session instruction entries, by session id, then key. */
   readonly instructions: Record<string, Record<string, unknown>>
+  /** `client.session.switchModel` calls, in order. */
+  readonly modelSwitches: { readonly sessionID: string; readonly model: SessionModel }[]
+}
+
+/** A session's model, as the session info holds it (the client's `ModelRef`). */
+export interface SessionModel {
+  readonly id: string
+  readonly providerID: string
+  readonly variant?: string
 }
 
 export interface FakeServer {
@@ -100,7 +109,9 @@ const MODEL = { id: "playground-model", providerID: "playground" }
 export function createFakeServer(options: { readonly window?: number } = {}): FakeServer {
   const window = Math.max(1, options.window ?? 20)
   const [state, setState] = createStore<{ sessions: Record<string, SessionState> }>({ sessions: {} })
-  const log: ServerLog = { prompts: [], instructions: {} }
+  const log: ServerLog = { prompts: [], instructions: {}, modelSwitches: [] }
+  // Each session's model, as `switchModel` last set it (MODEL until then).
+  const models: Record<string, SessionModel> = {}
 
   const ensure = (sessionID: string) => {
     if (state.sessions[sessionID]) return
@@ -136,7 +147,14 @@ export function createFakeServer(options: { readonly window?: number } = {}): Fa
     session: {
       // The session's info, as the app's synced store holds it: top-level sessions (no parentID), no staged revert.
       get: (sessionID: string) =>
-        state.sessions[sessionID] ? { id: sessionID, title: `Session ${sessionID}`, time: { created: 0 } } : undefined,
+        state.sessions[sessionID]
+          ? {
+              id: sessionID,
+              title: `Session ${sessionID}`,
+              time: { created: 0 },
+              model: { ...(models[sessionID] ?? MODEL) },
+            }
+          : undefined,
       status: (sessionID: string) => state.sessions[sessionID]?.status ?? "idle",
       setStatus: (sessionID: string, status: "idle" | "running") => setState("sessions", sessionID, "status", status),
       message: {
@@ -167,6 +185,13 @@ export function createFakeServer(options: { readonly window?: number } = {}): Fa
 
   const client = {
     session: {
+      switchModel: async (input: { readonly sessionID: string; readonly model: SessionModel }) => {
+        if (typeof input?.sessionID !== "string" || typeof input.model?.id !== "string")
+          throw new Error("session.switchModel: sessionID and model are required")
+        const model = { ...input.model }
+        log.modelSwitches.push({ sessionID: input.sessionID, model })
+        models[input.sessionID] = model
+      },
       prompt: async (input: { readonly sessionID: string; readonly text: string }) => {
         if (typeof input?.sessionID !== "string" || typeof input.text !== "string")
           throw new Error("session.prompt: sessionID and text are required")
@@ -186,7 +211,14 @@ export function createFakeServer(options: { readonly window?: number } = {}): Fa
       message: {
         get: async (input: { readonly sessionID: string; readonly messageID: string }) => {
           const found = session(input.sessionID).history.find((message) => message.id === input.messageID)
-          if (!found) throw new Error(`message ${input.messageID} not found`)
+          // The server's error for a message it does not have (@opencode/client `MessageNotFoundError`).
+          if (!found)
+            throw {
+              _tag: "MessageNotFoundError",
+              sessionID: input.sessionID,
+              messageID: input.messageID,
+              message: `Message not found: ${input.messageID}`,
+            }
           return snapshot(found)
         },
       },

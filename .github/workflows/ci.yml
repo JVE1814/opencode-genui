@@ -28,9 +28,9 @@ jobs:
         run: bun scripts/build-skill.ts --check
 
       - name: Build and check the desktop bundle
-        run: bun run build
+        run: bun run bundle
 
-      # OpenCode installs plugins with scripts disabled, so the committed bundle is what users run.
+      # Nothing is built when OpenCode installs the plugin, so the committed bundle is what users run.
       - name: Committed bundle matches the source
         run: git diff --exit-code -- dist/gui-experimental.cjs skills/genui/SKILL.md
 

@@ -2,7 +2,8 @@ import * as solid from "solid-js"
 import * as solidStore from "solid-js/store"
 import * as solidWeb from "solid-js/web"
 import * as effect from "effect"
-import type { Plugin, StoreDeclaration } from "@opencode/plugin/gui"
+import type { Plugin } from "@opencode/plugin/gui"
+import { bundleDefinitionProblem, defaultExport } from "../../scripts/bundle-definition.ts"
 import * as sdk from "../fake-sdk/index.ts"
 
 /**
@@ -45,7 +46,8 @@ function inert(name: string): unknown {
 /**
  * Evaluates a built bundle the way the app does (packages/plugin/src/gui/host.ts `evaluatePluginBundle`): CommonJS
  * code run with `new Function("require", "module", "exports", code)`, `require` limited to the shared modules, the
- * default export checked to be a `Plugin.define` with a setup.
+ * default export checked with the app's own schema (scripts/bundle-definition.ts): every store a Store.global or
+ * Store.session with an effect Schema, every catalog message a string, a setup.
  */
 export function evaluateBundle(code: string, required: string[] = []): Plugin.Definition {
   const module: { exports: Record<string, unknown> } = { exports: {} }
@@ -57,22 +59,10 @@ export function evaluateBundle(code: string, required: string[] = []): Plugin.De
     throw new Error(`Plugin GUI bundle requires a module the app does not share: ${name}`)
   }
   new Function("require", "module", "exports", code)(require, module, module.exports)
-  const plugin = (Object.hasOwn(module.exports, "default") ? module.exports.default : module.exports) as unknown
-  if (typeof plugin !== "object" || plugin === null)
-    throw new Error("A plugin's ./gui-experimental bundle must default-export a `Plugin.define` object")
-  const definition = plugin as Plugin.Definition
-  if (typeof definition.setup !== "function" && typeof definition.main !== "function")
-    throw new Error("A plugin's GUI must have a window `setup`, a `main` setup, or both")
-  if (definition.i18n !== undefined && (typeof definition.i18n !== "object" || typeof definition.i18n.en !== "object"))
-    throw new Error("A plugin's `i18n` must be an object with an `en` catalog")
-  for (const [name, store] of Object.entries(definition.stores ?? {}) as [string, StoreDeclaration | undefined][])
-    if (
-      !store ||
-      (store.scope !== "global" && store.scope !== "session") ||
-      (typeof store.schema !== "object" && typeof store.schema !== "function")
-    )
-      throw new Error(`Store ${name} is not a Store.global or Store.session declaration`)
-  return definition
+  const plugin = defaultExport(module.exports)
+  const problem = bundleDefinitionProblem(plugin)
+  if (problem) throw new Error(`A plugin's ./gui-experimental bundle is refused: ${problem}`)
+  return plugin as Plugin.Definition
 }
 
 /** Fetches and evaluates a bundle; `url` is one the playground serves (the built plugin or the stub). */

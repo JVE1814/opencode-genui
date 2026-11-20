@@ -18,7 +18,6 @@ export default {
 
   // Results of actions
   "action.copied": "Copied to clipboard",
-  "action.copiedLabel": "Copied {{label}}",
   "action.copyFailed": "Couldn't copy to clipboard",
   "action.sendFailed": "Couldn't send the message",
   "action.noSession": "This UI isn't part of an open session",

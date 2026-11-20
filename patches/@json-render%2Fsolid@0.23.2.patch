@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62afb361ec 100644
+index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687fec74d6b1 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -715,9 +715,15 @@ function RepeatScopeProvider(props) {
@@ -21,7 +21,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
        };
      },
      get children() {
-@@ -842,6 +848,46 @@ function useDevtoolsActive() {
+@@ -842,6 +848,54 @@ function useDevtoolsActive() {
    (0, import_solid_js6.onCleanup)(unsub);
    return active;
  }
@@ -44,21 +44,29 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
 +}
 +// opencode-genui patch: watch runs are bounded. A watch whose actions write the state it (or another watch) watches
 +// runs again on its own write; with an awaited action in between, each round passes through a microtask, so the loop
-+// never yields to the event loop and the window freezes. A provider runs at most WATCH_RUNS_PER_TASK watches before the
-+// event loop gets a turn; the rest are skipped, which ends such a loop. User input arrives in tasks of its own.
++// never yields to the event loop and the window freezes. The bound belongs to the state store, so it holds across
++// elements and across remounts (a watch that hides and re-shows its own parent is mounted afresh every round, and a
++// repeat row can add rows that watch too): the store's watches run at most WATCH_RUNS_PER_TASK times in all before
++// the event loop gets a turn; further runs are skipped, which ends any such loop. It is small because every write
++// re-evaluates the whole UI, so a loop that grows the UI costs the square of its runs. User input and streamed spec
++// updates arrive in tasks of their own.
 +var WATCH_RUNS_PER_TASK = 64;
-+var watchRuns = /* @__PURE__ */ new WeakMap();
-+function takeWatchRun(store, path) {
-+  let budget = watchRuns.get(store);
++var watchBudgets = /* @__PURE__ */ new WeakMap();
++function takeWatchRun(stateStore, path) {
++  let budget = watchBudgets.get(stateStore);
 +  if (!budget) {
-+    budget = { runs: 0, warned: false };
-+    watchRuns.set(store, budget);
-+    setTimeout(() => watchRuns.delete(store), 0);
++    budget = { runs: 0, warned: false, timer: void 0 };
++    watchBudgets.set(stateStore, budget);
 +  }
++  if (budget.timer === void 0) budget.timer = setTimeout(() => {
++    budget.timer = void 0;
++    budget.runs = 0;
++    budget.warned = false;
++  }, 0);
 +  if (budget.runs >= WATCH_RUNS_PER_TASK) {
 +    if (!budget.warned) {
 +      budget.warned = true;
-+      console.warn(`[json-render] Skipped the watch on "${path}": ${WATCH_RUNS_PER_TASK} watch runs without a break (a watch that triggers itself).`);
++      console.warn(`[json-render] Skipped the watch on "${path}": watches ran ${WATCH_RUNS_PER_TASK} times without a break (a watch that triggers itself).`);
 +    }
 +    return false;
 +  }
@@ -68,7 +76,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
  function ElementRenderer(props) {
    const repeatScope = useRepeatScope();
    const {
-@@ -875,7 +921,17 @@ function ElementRenderer(props) {
+@@ -875,7 +929,17 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -87,7 +95,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
    const emit = async (eventName) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
-@@ -931,6 +987,7 @@ function ElementRenderer(props) {
+@@ -931,6 +995,7 @@ function ElementRenderer(props) {
            if (!changedPaths.has(path)) continue;
            const binding = watchConfig[path];
            if (!binding) continue;
@@ -95,7 +103,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
            const bindings = Array.isArray(binding) ? binding : [binding];
            for (const b of bindings) {
              if (!b.params) {
-@@ -959,11 +1016,15 @@ function ElementRenderer(props) {
+@@ -959,11 +1024,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = (0, import_solid_js6.createMemo)(() => {
      const rawProps = props.element.props;
@@ -113,7 +121,22 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -1111,6 +1172,70 @@ function ElementRendererContent(props) {
+@@ -1076,10 +1145,14 @@ function ElementRendererContent(props) {
+           });
+         }
+       });
++      // opencode-genui patch: components also get the element's key (genui keeps per-element UI state by it).
+       const rendered = (0, import_web18.createComponent)(Component, {
+         get element() {
+           return props.resolvedElement;
+         },
++        get elementKey() {
++          return props.elementKey;
++        },
+         get emit() {
+           return props.emit;
+         },
+@@ -1111,6 +1184,70 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -184,7 +207,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
  function RepeatChildren(props) {
    const stateStore = useStateStore();
    const repeat = () => props.element.repeat;
-@@ -1123,17 +1248,19 @@ function RepeatChildren(props) {
+@@ -1123,17 +1260,19 @@ function RepeatChildren(props) {
      return resolved;
    };
    const items = () => statePath() === void 0 ? [] : (0, import_core6.getByPath)(stateStore.state, statePath()) ?? [];
@@ -211,8 +234,16 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62
          get index() {
            return index();
          },
+@@ -1161,6 +1300,7 @@ function RepeatChildren(props) {
+                   get element() {
+                     return el();
+                   },
++                  elementKey: childKey,
+                   get spec() {
+                     return props.spec;
+                   },
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da43618f20ad0 100644
+index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec1fe3fafd 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -664,9 +664,15 @@ function RepeatScopeProvider(props) {
@@ -243,7 +274,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
  var _tmpl$2 = /* @__PURE__ */ _$template2(`<span style=display:contents>`);
  var EMPTY_FUNCTIONS = {};
  var FunctionsContext = createContext6(EMPTY_FUNCTIONS);
-@@ -706,6 +712,46 @@ function useDevtoolsActive() {
+@@ -706,6 +712,54 @@ function useDevtoolsActive() {
    onCleanup2(unsub);
    return active;
  }
@@ -266,21 +297,29 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
 +}
 +// opencode-genui patch: watch runs are bounded. A watch whose actions write the state it (or another watch) watches
 +// runs again on its own write; with an awaited action in between, each round passes through a microtask, so the loop
-+// never yields to the event loop and the window freezes. A provider runs at most WATCH_RUNS_PER_TASK watches before the
-+// event loop gets a turn; the rest are skipped, which ends such a loop. User input arrives in tasks of its own.
++// never yields to the event loop and the window freezes. The bound belongs to the state store, so it holds across
++// elements and across remounts (a watch that hides and re-shows its own parent is mounted afresh every round, and a
++// repeat row can add rows that watch too): the store's watches run at most WATCH_RUNS_PER_TASK times in all before
++// the event loop gets a turn; further runs are skipped, which ends any such loop. It is small because every write
++// re-evaluates the whole UI, so a loop that grows the UI costs the square of its runs. User input and streamed spec
++// updates arrive in tasks of their own.
 +var WATCH_RUNS_PER_TASK = 64;
-+var watchRuns = /* @__PURE__ */ new WeakMap();
-+function takeWatchRun(store, path) {
-+  let budget = watchRuns.get(store);
++var watchBudgets = /* @__PURE__ */ new WeakMap();
++function takeWatchRun(stateStore, path) {
++  let budget = watchBudgets.get(stateStore);
 +  if (!budget) {
-+    budget = { runs: 0, warned: false };
-+    watchRuns.set(store, budget);
-+    setTimeout(() => watchRuns.delete(store), 0);
++    budget = { runs: 0, warned: false, timer: void 0 };
++    watchBudgets.set(stateStore, budget);
 +  }
++  if (budget.timer === void 0) budget.timer = setTimeout(() => {
++    budget.timer = void 0;
++    budget.runs = 0;
++    budget.warned = false;
++  }, 0);
 +  if (budget.runs >= WATCH_RUNS_PER_TASK) {
 +    if (!budget.warned) {
 +      budget.warned = true;
-+      console.warn(`[json-render] Skipped the watch on "${path}": ${WATCH_RUNS_PER_TASK} watch runs without a break (a watch that triggers itself).`);
++      console.warn(`[json-render] Skipped the watch on "${path}": watches ran ${WATCH_RUNS_PER_TASK} times without a break (a watch that triggers itself).`);
 +    }
 +    return false;
 +  }
@@ -290,7 +329,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
  function ElementRenderer(props) {
    const repeatScope = useRepeatScope();
    const {
-@@ -739,7 +785,17 @@ function ElementRenderer(props) {
+@@ -739,7 +793,17 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -309,7 +348,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
    const emit = async (eventName) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
-@@ -795,6 +851,7 @@ function ElementRenderer(props) {
+@@ -795,6 +859,7 @@ function ElementRenderer(props) {
            if (!changedPaths.has(path)) continue;
            const binding = watchConfig[path];
            if (!binding) continue;
@@ -317,7 +356,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
            const bindings = Array.isArray(binding) ? binding : [binding];
            for (const b of bindings) {
              if (!b.params) {
-@@ -823,11 +880,15 @@ function ElementRenderer(props) {
+@@ -823,11 +888,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = createMemo3(() => {
      const rawProps = props.element.props;
@@ -335,7 +374,22 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -975,6 +1036,70 @@ function ElementRendererContent(props) {
+@@ -940,10 +1009,14 @@ function ElementRendererContent(props) {
+           });
+         }
+       });
++      // opencode-genui patch: components also get the element's key (genui keeps per-element UI state by it).
+       const rendered = _$createComponent6(Component, {
+         get element() {
+           return props.resolvedElement;
+         },
++        get elementKey() {
++          return props.elementKey;
++        },
+         get emit() {
+           return props.emit;
+         },
+@@ -975,6 +1048,70 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -406,7 +460,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
  function RepeatChildren(props) {
    const stateStore = useStateStore();
    const repeat = () => props.element.repeat;
-@@ -987,17 +1112,19 @@ function RepeatChildren(props) {
+@@ -987,17 +1124,19 @@ function RepeatChildren(props) {
      return resolved;
    };
    const items = () => statePath() === void 0 ? [] : getByPath2(stateStore.state, statePath()) ?? [];
@@ -433,3 +487,11 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da436
          get index() {
            return index();
          },
+@@ -1025,6 +1164,7 @@ function RepeatChildren(props) {
+                   get element() {
+                     return el();
+                   },
++                  elementKey: childKey,
+                   get spec() {
+                     return props.spec;
+                   },

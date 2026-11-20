@@ -1,8 +1,15 @@
-import { createEffect, createSignal, onCleanup, type Accessor } from "solid-js"
+import { createContext, createEffect, createSignal, onCleanup, useContext, type Accessor } from "solid-js"
 import type { ValidationConfig } from "@json-render/core"
-import { useStateStore, useValidation, type BaseComponentProps, type ComponentFn } from "@json-render/solid"
+import {
+  useRepeatScope,
+  useStateStore,
+  useValidation,
+  type BaseComponentProps,
+  type ComponentFn,
+} from "@json-render/solid"
 import type { GenuiCatalog } from "../../catalog/index.ts"
 import type { ComponentName } from "../../catalog/components.ts"
+import { elementKeyOf } from "../element.ts"
 
 /**
  * Conventions for every genui component (src/gui/components/*.tsx):
@@ -85,6 +92,34 @@ export function useBound<T>(
   }
 
   return [value, set]
+}
+
+/** The surface's per-element UI memory (`SurfaceRuntime.memory`), provided by the surface. */
+export const SurfaceMemoryContext = createContext<Map<string, unknown>>()
+
+/**
+ * UI state a component keeps itself (not in the spec's state), remembered per element by the surface, so it survives a
+ * remount: a timeline row that scrolled off screen, a canvas tab switched away and back. `name` tells a component's
+ * values apart; inside a repeat each row has its own. Undefined until the component sets it.
+ */
+export function useRemembered<T>(
+  ctx: BaseComponentProps<Record<string, unknown>>,
+  name: string,
+): [Accessor<T | undefined>, (value: T) => void] {
+  const memory = useContext(SurfaceMemoryContext)
+  const scope = useRepeatScope()
+  const element = elementKeyOf(ctx)
+  const key = () => `${element ?? ""}\u0000${scope?.basePath ?? ""}\u0000${name}`
+  const [value, setValue] = createSignal<T | undefined>(
+    element !== undefined ? (memory?.get(key()) as T | undefined) : undefined,
+  )
+  return [
+    value,
+    (next: T) => {
+      setValue(() => next)
+      if (element !== undefined) memory?.set(key(), next)
+    },
+  ]
 }
 
 /**

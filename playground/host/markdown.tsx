@@ -87,13 +87,20 @@ export function MarkdownView(props: {
 /** A fenced block shown as code, as the app shows a block no plugin claims. */
 export function PlainCode(props: { readonly block: FenceBlock; readonly toolbar?: JSX.Element }) {
   return (
-    <div data-component="markdown-code" data-language={props.block.language || undefined}>
-      <pre data-closed={props.block.closed ? "" : undefined}>
-        <code>{props.block.body}</code>
-      </pre>
-      <Show when={props.toolbar}>
-        <div data-slot="markdown-code-toolbar">{props.toolbar}</div>
-      </Show>
+    // In a display: contents holder that says whether the block is still being written, as in the app (see timeline.tsx).
+    <div
+      data-markdown-block=""
+      data-markdown-complete={props.block.closed ? "true" : "false"}
+      style={{ display: "contents" }}
+    >
+      <div data-component="markdown-code" data-language={props.block.language || undefined}>
+        <pre data-closed={props.block.closed ? "" : undefined}>
+          <code>{props.block.body}</code>
+        </pre>
+        <Show when={props.toolbar}>
+          <div data-slot="markdown-code-toolbar">{props.toolbar}</div>
+        </Show>
+      </div>
     </div>
   )
 }
@@ -231,23 +238,35 @@ function Prose(props: { readonly text: string }) {
 
 const SAFE_LINK = /^(https?:|mailto:)/i
 
-/** Inline Markdown: `code`, **strong**, *em* / _em_, [links](https://...). Anything else stays text. */
+/** Backslash escapes of ASCII punctuation read as the character, as in marked. */
+const unescape = (text: string) => text.replace(/\\([!-/:-@[-`{-~])/g, "$1")
+
+/**
+ * Inline Markdown: `code`, **strong**, *em* / _em_, [links](https://...), fragment links with a single-quoted title
+ * (`[text](#target 'title')`, rendered without `external-link`, as the app renders `#` links), backslash escapes.
+ * Anything else stays text.
+ */
 export function inline(text: string): JSX.Element[] {
   const out: JSX.Element[] = []
   const pattern =
-    /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|_([^_\s][^_]*)_|\[([^\]]+)\]\(([^)\s]+)\)/g
+    /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|_([^_\s][^_]*)_|\[((?:\\.|[^\]\\])+)\]\(([^)\s]+)(?:\s+'((?:\\.|[^'\\])*)')?\)/g
   let last = 0
   for (const match of text.matchAll(pattern)) {
     const start = match.index ?? 0
-    if (start > last) out.push(text.slice(last, start))
+    if (start > last) out.push(unescape(text.slice(last, start)))
     if (match[2] !== undefined) out.push(<code>{match[2]}</code>)
     else if (match[3] !== undefined) out.push(<strong>{inline(match[3])}</strong>)
     else if (match[4] !== undefined) out.push(<em>{inline(match[4])}</em>)
     else if (match[5] !== undefined) out.push(<em>{inline(match[5])}</em>)
     else if (match[6] !== undefined) {
       const href = match[7]!
+      const title = match[8] === undefined ? undefined : unescape(match[8])
       out.push(
-        SAFE_LINK.test(href) ? (
+        href.startsWith("#") ? (
+          <a href={href} title={title}>
+            {inline(match[6])}
+          </a>
+        ) : SAFE_LINK.test(href) ? (
           <a href={href} target="_blank" rel="noopener noreferrer" class="external-link">
             {inline(match[6])}
           </a>
@@ -258,6 +277,6 @@ export function inline(text: string): JSX.Element[] {
     }
     last = start + match[0].length
   }
-  if (last < text.length) out.push(text.slice(last))
+  if (last < text.length) out.push(unescape(text.slice(last)))
   return out
 }

@@ -1,8 +1,15 @@
 import { standardDirectives } from "@json-render/directives"
 import { CANVAS_LANGUAGE, DEFAULT_CANVAS, INLINE_LANGUAGE } from "../shared/constants.ts"
-import { formatSentMessage, MAX_SENT_MESSAGE } from "../shared/message.ts"
+import { formatSentMessage, MAX_SENT_MESSAGE, MAX_TEXT_WITH_DATA, TRUNCATED } from "../shared/message.ts"
 import { MAX_PATTERN_INPUT, MAX_PATTERN_LENGTH } from "../protocol/pattern.ts"
-import { describeActivations, getCatalog, OUTWARD_BURST, OUTWARD_INTERVAL_MS } from "./index.ts"
+import {
+  actionDefinitions,
+  describeActivations,
+  getCatalog,
+  listOf,
+  OUTWARD_BURST,
+  OUTWARD_INTERVAL_MS,
+} from "./index.ts"
 
 const FENCE = "```"
 const SPEC = `${FENCE}${INLINE_LANGUAGE}`
@@ -14,6 +21,11 @@ const indent = (text: string, by = "  ") =>
     .map((line) => (line ? by + line : line))
     .join("\n")
 
+/** showToast's variants, from its params schema: "default", "success" or "error". */
+const TOAST_VARIANTS = listOf(
+  actionDefinitions.showToast.params.shape.variant.unwrap().options.map((name) => `"${name}"`),
+)
+
 const sentExample = formatSentMessage({
   text: "Deploy with these settings",
   data: { env: "production", replicas: 3 },
@@ -22,7 +34,7 @@ const sentExample = formatSentMessage({
 /** How UI works in OpenCode. Comes before json-render's reference, which only knows inline `spec` blocks. */
 const OPENCODE_SECTION = `# Interactive UI in OpenCode
 
-You are running in the OpenCode desktop app. Besides text, you can show interactive UI: you write a json-render spec (JSONL lines of RFC 6902 JSON Patch) in a fenced block of your reply, and the app renders it with its own components and theme. This skill covers how UI works in OpenCode, then the spec format, the components and the actions.
+You are running in the OpenCode desktop app. Besides text, you can show interactive UI: you write a json-render spec (JSONL lines of RFC 6902 JSON Patch) in a fenced block of your reply, and the app renders it with its own components and theme.
 
 ## When to use UI
 
@@ -40,8 +52,8 @@ Use UI when the user would rather click or scan than read: collecting input (for
 A canvas is a sidebar tab, about 360px wide, that stays open across turns: use it for dashboards, status boards, checklists, plans or previews that you keep updating while you work.
 
 - The first line is the header: {"canvas":"<id>","title":"..."}, with a short lowercase id ("${DEFAULT_CANVAS}" when omitted).
-- A block that sets /root replaces the canvas: a new UI with fresh state.
-- A block without /root patches the canvas as it is, with RFC 6902 ops (add, replace, remove, move, copy) on /elements/<key>, /elements/<key>/props/<prop>, /state/... or /root.
+- A block that sets /root and adds that root element replaces the canvas: a new UI with fresh state.
+- Any other block patches the canvas as it is, with RFC 6902 ops (add, replace, remove, move, copy) on /elements/<key>, /elements/<key>/props/<prop> and /state/.... Replacing /root with an element the canvas has switches the view, keeping the state and what the user entered.
 - {"canvas":"<id>","close":true} on its own removes the canvas.
 - The canvas renders while the block streams, so write /root and the layout first and the data after.
 - Several canvases can exist, one tab each; give each its own id.
@@ -72,15 +84,17 @@ The rest of this skill describes the patch lines. They are the same in both fenc
 
 Inputs keep what the user enters. Bind each input you want back to a state path you choose ({"$bindState":"/form/email"}), then send it with sendPrompt.
 
-- sendPrompt { text, data? } sends a user message that you then answer as usual: the text, a blank line, then the data as a fenced json block (pretty-printed, cut off after about ${MAX_SENT_MESSAGE.toLocaleString("en-US")} characters). Write text as the user's own words for what they did; data is usually {"$state":"/form"}. A button with params {"text":"Deploy with these settings","data":{"$state":"/form"}} sends:
+- sendPrompt { text, data? } sends a user message that you then answer as usual: the text (cut after about ${MAX_TEXT_WITH_DATA.toLocaleString("en-US")} characters when there is data), a blank line, then the data as the last fenced json block (pretty-printed, cut after about ${MAX_SENT_MESSAGE.toLocaleString("en-US")} characters); a cut ends in "${TRUNCATED}". Write text as the user's own words for what they did; data is usually {"$state":"/form"}. A button with params {"text":"Deploy with these settings","data":{"$state":"/form"}} sends:
 
 ${indent(sentExample)}
 
 - insertPrompt { text } puts text in the message box for the user to edit and send.
-- openLink { url } opens an http(s) or mailto URL. copyText { text, label? } copies to the clipboard. showToast { title, description?, variant? } shows a notification. openCanvas { canvas } shows a canvas tab.
+- openLink { url } opens an http(s) or mailto URL. copyText { text, label? } copies to the clipboard. showToast { title, description?, variant? } shows a notification; variant is ${TOAST_VARIANTS}. openCanvas { canvas } shows a canvas tab.
 - sendPrompt, insertPrompt, openLink and copyText leave the UI, so they run only when the user activates a control: ${describeActivations()}. Bound anywhere else (watch, on.focus, on.blur, a Slider's on.change) they never run. One activation runs at most ${OUTWARD_BURST} of them, in order (say, copyText then openLink); the next activation in the same UI must come at least ${OUTWARD_INTERVAL_MS / 1000} s later. The app may ask the user to confirm first, showing exactly what will be sent, opened or copied.
+- Arrow keys in Radio and Tabs move the choice without sending it; Space, Enter or a click sends it. A choice the user should look over first is best sent from a Button.
 - "confirm" on an action binding asks the user first, e.g. {"action":"sendPrompt","params":{"text":"Delete the branch"},"confirm":{"title":"Delete branch?","message":"This cannot be undone.","variant":"danger"}}. It works for the custom actions only, not for setState, pushState, removeState or validateForm, and never in watch, on.focus or on.blur.
-- onSuccess runs after an action succeeded and onError after it failed. When the user declines a confirm or the app refuses the action, neither runs and the rest of the bound actions stop. Write each onSuccess/onError out as { "action": ..., "params": {...} } or { "set": {...} }: one written as an expression, or read from state, is ignored.
+- onSuccess runs after a custom action succeeded and onError after it failed. When the user declines a confirm or the app refuses the action, neither runs and the rest of the bound actions stop. Write each onSuccess/onError out as { "action": ..., "params": {...} } or { "set": {...} }: one written as an expression, or read from state, is ignored.
+- setState, pushState, removeState and validateForm run neither: to do something after one, list it next in an array ("press":[{"action":"setState",...},{"action":"showToast",...}]).
 - Use setState, pushState and removeState for changes within the UI (tabs, toggles, list edits); they need no round trip to you.
 
 ## Design
@@ -89,16 +103,16 @@ The UI always takes the app's design and follows the user's theme and light or d
 
 - Keep it compact. Prefer Card, Stack and Grid for layout, Card titles or Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
+- Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.`
 
 /** One line that opens json-render's part: it fits an agent that also writes text, unlike json-render's default. */
 const SYSTEM = `You can answer with interactive UI as well as text. This reference covers the JSONL patch lines inside ${SPEC} and ${CANVAS} blocks.`
 
+// The OpenCode section already says there are no style props and never to put secrets in a spec.
 const RULES = [
-  "There are no color, style or className props: the app's theme styles every component.",
   "Bind every input you need back to a state path of your own with $bindState, and send it with sendPrompt from a button.",
   "sendPrompt, insertPrompt, openLink and copyText run only when the user activates a control, never from watch, on.focus or on.blur.",
-  "Never put secrets in a spec.",
 ]
 
 /**
@@ -106,8 +120,9 @@ const RULES = [
  * `spec` fence, its dynamic-prop examples set colors, its watch example calls an action that does not exist here (on a
  * Select without its required label) and suggests watch for loading data, its event examples bind `press` on the first
  * catalog component (Stack, which has no events), it says `$item` params resolve to a path (genui's own actions get the
- * value), and its `pattern` check knows no limits. Each `from` must occur
- * in the generated text; a test checks that, so a json-render update that changes the wording fails loudly.
+ * value), its `pattern` check knows no limits, its sample data is about blogs and shops rather than the task, and two
+ * of its rules repeat another ("ONLY use components listed above"). Each `from` must occur in the generated text; a test
+ * checks that, so a json-render update that changes the wording fails loudly.
  */
 export const PROMPT_FIXES: readonly { readonly from: string; readonly to: string }[] = [
   {
@@ -144,11 +159,27 @@ export const PROMPT_FIXES: readonly { readonly from: string; readonly to: string
   },
   {
     from: '{ "$item": "field" } resolves to the absolute state path,',
-    to: '{ "$item": "field" } resolves to the absolute state path for built-ins (to the field\'s value for sendPrompt and the other custom actions),',
+    to: '{ "$item": "field" } resolves to the absolute state path for built-ins bound directly (to the field\'s value for sendPrompt and the other custom actions, and anywhere in an onSuccess/onError chain),',
   },
   {
     from: '- pattern — match a regex (args: { "pattern": "regex" })',
     to: `- pattern — match a regular expression (args: { "pattern": "regex" }), without backreferences or lookarounds, at most ${MAX_PATTERN_LENGTH} characters; a value longer than ${MAX_PATTERN_INPUT} characters fails it`,
+  },
+  {
+    from: "Include realistic sample data in state. For blogs: 3-4 posts with titles, excerpts, authors, dates. For product lists: 3-5 items with names, prices, descriptions. Never leave arrays empty.",
+    to: "Include realistic data in state, taken from the task at hand. Never leave arrays empty.",
+  },
+  {
+    from: "Always include realistic, professional-looking sample data. For blogs include 3-4 posts with varied titles, authors, dates, categories. For products include names, prices, images. Never leave data empty.",
+    to: "Always include realistic data, taken from the task at hand. Never leave data empty.",
+  },
+  {
+    from: "and status indicators. ONLY use components from the AVAILABLE COMPONENTS list.",
+    to: "and status indicators.",
+  },
+  {
+    from: "use vertical layout components. ONLY use components from the AVAILABLE COMPONENTS list.",
+    to: "use vertical layout components.",
   },
   {
     from: "Use `watch` for cascading dependencies where changing one field should trigger side effects (loading data, resetting dependent fields, computing derived values).",

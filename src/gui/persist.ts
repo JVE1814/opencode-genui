@@ -2,7 +2,7 @@ import { createEffect, on, onCleanup, untrack, type Accessor } from "solid-js"
 import { readSurfaceOverrides, writeSurfaceOverrides, type PersistedSession } from "../runtime/snapshot.ts"
 import { contentId } from "../protocol/digest.ts"
 import type { ParsedBlock } from "../protocol/surface.ts"
-import type { SurfaceRuntime } from "../runtime/surfaces.ts"
+import { getSurface, type SurfaceRuntime } from "../runtime/surfaces.ts"
 
 type Draft = { -readonly [K in keyof PersistedSession]: PersistedSession[K] }
 
@@ -67,6 +67,15 @@ export function surfaceEntry(kind: "inline" | "canvas", id: string, generation?:
   return kind === "canvas" ? `canvas/${id}@${generation ?? 0}` : `inline/${id}`
 }
 
+/** The canvas and generation of a canvas's entry id (`surfaceEntry`), or undefined for any other entry. */
+export function canvasEntryOf(entry: string): { readonly canvas: string; readonly generation: number } | undefined {
+  if (!entry.startsWith("canvas/")) return
+  const at = entry.lastIndexOf("@")
+  const generation = Number(entry.slice(at + 1))
+  if (at < "canvas/".length || !Number.isInteger(generation)) return
+  return { canvas: entry.slice("canvas/".length, at), generation }
+}
+
 /**
  * Where an inline block's UI state lives, decided by provenance and content, never by the block's say-so alone:
  * - a block that is not the agent's own (tool output, a file preview) gets a store of its own, keyed by its content (a
@@ -89,6 +98,34 @@ export function inlineSurfaceId(
   const id = block.header.id
   if (id === undefined) return `trusted/${contentId(block.text)}`
   return newest ? `trusted/${id}` : `trusted/${id}@${contentId(block.text)}`
+}
+
+/**
+ * Called by the newest agent block of a header id as it drives the id's shared runtime (before it sets its state). When
+ * another block drove it until now (the agent re-sent the block), that older copy keeps what the user entered in it:
+ * its own runtime starts from the shared edits as they are now, before the new block's state drops what the agent
+ * changed, and they are stored for its entry. Once per older copy; one that already has edits keeps them.
+ */
+export function handOverInline(input: {
+  readonly shared: SurfaceRuntime
+  /** The runtime key of a surface id (`surfaceKey` with the session). */
+  readonly keyOf: (surfaceId: string) => string
+  readonly block: Pick<ParsedBlock, "header" | "text">
+  readonly store: SessionStore | undefined
+}): void {
+  const id = input.block.header.id
+  if (id === undefined) return
+  const mine = contentId(input.block.text)
+  const previous = input.shared.driver
+  input.shared.driver = mine
+  if (previous === undefined || previous === mine) return
+  const older = `trusted/${id}@${previous}`
+  const copy = getSurface(input.keyOf(older))
+  if (copy.store.overrides().length > 0) return
+  const edits = input.shared.store.overrides()
+  if (edits.length === 0) return
+  copy.store.loadOverrides(edits)
+  writeStore(input.store, (value) => writeSurfaceOverrides(value, surfaceEntry("inline", older), edits))
 }
 
 /**
@@ -120,6 +157,7 @@ export function persistSurface(input: {
           // A new canvas generation: what the user typed belonged to the replaced UI.
           hydrated.delete(runtime)
           runtime.store.reset()
+          runtime.memory.clear()
           writeStore(store, (value) => writeSurfaceOverrides(value, loaded, []))
         }
         // Edits made before the store was ready (rare: it loads within a tick) win over the stored copy.

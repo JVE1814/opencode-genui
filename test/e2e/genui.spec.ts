@@ -312,6 +312,8 @@ test.describe("canvas", () => {
     const tab = page.locator(CANVAS_TAB)
     const canvas = page.locator('[data-gu-chrome="canvas"][data-canvas="deploy"]')
     await expect(tab).toBeVisible({ timeout: 15_000 })
+    // The sampler sees the tab at its next tick, which can come after toBeVisible passes (timers lag under load).
+    await expect.poll(async () => (await samples()).some((sample) => sample.tab)).toBe(true)
     const opened = (await samples()).find((sample) => sample.tab)!
     // It opened during the agent's first reply, while that reply was still being written.
     expect(opened).toMatchObject({ assistants: 1, streaming: 1 })
@@ -605,7 +607,7 @@ test.describe("outward action gate", () => {
 test("the built bundle renders the form scenario", async ({ page }) => {
   expect(
     existsSync(fileURLToPath(new URL("../../dist/gui-experimental.cjs", import.meta.url))),
-    "dist/gui-experimental.cjs is missing: run `bun run build` first",
+    "dist/gui-experimental.cjs is missing: run `bun run bundle` first",
   ).toBe(true)
   await boot(page, "scenario=form&speed=instant&persist=0&bundle=1")
   expect(await page.evaluate(() => ({ mode: window.__genui.mode, bundle: window.__genui.bundle }))).toEqual({
@@ -867,6 +869,44 @@ test.describe("blocks from tool output", () => {
     expect(Date.now() - started).toBeLessThan(1000)
     expect(await surface.locator('[data-gu="dialog"]').evaluate((node) => node.isConnected)).toBe(true)
     await expect(surface.getByText("Watch runs:")).toHaveText("Watch runs: 0")
+  })
+
+  test("a watch that hides and re-shows its own parent still stops at the surface's bound [recheck#1]", async ({
+    page,
+  }) => {
+    await boot(page, "scenario=empty&speed=instant&persist=0")
+    // Each round unmounts the watching element and mounts a fresh copy, which validateForm wakes again: with a bound
+    // per element mount, every round started a new count, and one key press froze the window.
+    const loop = [
+      { action: "setState", params: { statePath: "/p", value: false } },
+      { action: "setState", params: { statePath: "/p", value: true } },
+      { action: "pushState", params: { statePath: "/runs", value: 1 } },
+      { action: "validateForm" },
+    ]
+    await toolOutput(
+      page,
+      block("spec", { id: "remount" }, [
+        root("box"),
+        element("box", "Stack", {}, ["search", "wrap", "count"]),
+        element("search", "Input", { label: "Search", value: { $bindState: "/q" } }),
+        element("wrap", "Stack", {}, ["w"], { visible: { $state: "/p" } }),
+        element("w", "Text", { text: "Results appear here." }, [], { watch: { "/q": loop, "/formValidation": loop } }),
+        element("count", "Text", { text: { $concat: ["Watch runs: ", { $count: { $state: "/runs" } }] } }),
+        state("/p", true),
+        state("/q", ""),
+        state("/runs", []),
+      ]),
+    )
+    const surface = untrustedSurfaces(page)
+    await surface.getByLabel("Search").click()
+    await page.keyboard.type("a")
+    const started = Date.now()
+    expect(await page.evaluate(() => 1 + 1)).toBe(2)
+    expect(Date.now() - started).toBeLessThan(1000)
+    await expect(surface.getByText("Results appear here.")).toBeVisible()
+    const runs = Number((await surface.getByText("Watch runs:").textContent())!.replace(/\D+/g, ""))
+    expect(runs).toBeGreaterThan(1)
+    expect(runs).toBeLessThanOrEqual(64)
   })
 })
 

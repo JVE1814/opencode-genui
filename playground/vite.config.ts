@@ -44,7 +44,7 @@ function pluginBundles(): Plugin {
     if (url === "/dist/gui-experimental.cjs")
       void readFile(path.join(repo, "dist/gui-experimental.cjs"), "utf8").then(
         (code) => send(res, 200, code),
-        () => send(res, 404, "dist/gui-experimental.cjs not found: run `bun run build` (or `vite build`) first"),
+        () => send(res, 404, "dist/gui-experimental.cjs not found: run `bun run bundle` (or `vite build`) first"),
       )
     else if (url === "/__genui/stub-bundle.cjs")
       void buildStubBundle().then(

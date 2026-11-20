@@ -21,7 +21,14 @@ interface Intent {
   spent: number
   /** When it was granted, or last renewed by a confirm the user accepted (see INTENT_TTL_MS). */
   since: number
+  /** For a choice, the control it was made on (see `withIntent`). */
+  readonly choice?: object
+  /** Not an activation: a dispatch that may not act outward at all (see `withoutIntent`). */
+  readonly passive?: true
 }
+
+// The newest choice intent of each control (see `withIntent`).
+const latestChoice = new WeakMap<object, Intent>()
 
 /**
  * How long an intent lasts after it was granted, or after the user last accepted a confirm in its dispatch: about as
@@ -66,9 +73,35 @@ export function hasUserGesture(): boolean {
  * without, so their outward actions are refused. (Bindings of those kinds are also tagged by the normalizer, so they are
  * refused even while an activation of the same surface is being dispatched.)
  */
-export async function withIntent<T>(surface: SurfaceContext | undefined, dispatch: () => Promise<T>): Promise<T> {
+export async function withIntent<T>(
+  surface: SurfaceContext | undefined,
+  dispatch: () => Promise<T>,
+  options: { readonly choice?: object } = {},
+): Promise<T> {
   if (!surface || !hasUserGesture()) return dispatch()
-  const intent: Intent = { spent: 0, since: Date.now() }
+  const intent: Intent = { spent: 0, since: Date.now(), ...(options.choice ? { choice: options.choice } : {}) }
+  if (options.choice) latestChoice.set(options.choice, intent)
+  const open = intents.get(surface)
+  if (open) open.push(intent)
+  else intents.set(surface, [intent])
+  try {
+    return await dispatch()
+  } finally {
+    const list = intents.get(surface)
+    const index = list?.indexOf(intent) ?? -1
+    if (list && index !== -1) list.splice(index, 1)
+  }
+}
+
+/**
+ * Runs `dispatch`, the actions a control fires for something the user does not mean as an activation (a choice moved
+ * with the arrow keys, focus, blur, a slider's movement), as the surface's newest dispatch with a spent intent: its
+ * outward actions are refused, and it opens no dialog, even while another activation of the surface is being
+ * dispatched or a choice waits for the gap (intents are kept per surface, see `liveIntent`).
+ */
+export async function withoutIntent<T>(surface: SurfaceContext | undefined, dispatch: () => Promise<T>): Promise<T> {
+  if (!surface) return dispatch()
+  const intent: Intent = { spent: OUTWARD_BURST, since: Date.now(), passive: true }
   const open = intents.get(surface)
   if (open) open.push(intent)
   else intents.set(surface, [intent])
@@ -83,7 +116,8 @@ export async function withIntent<T>(surface: SurfaceContext | undefined, dispatc
 
 /** Whether the surface is dispatching an activation (whose actions may act outward, or ask for a confirm). */
 export function hasIntent(surface: SurfaceContext | undefined): boolean {
-  return !!surface && liveIntent(surface) !== undefined
+  const intent = surface && liveIntent(surface)
+  return !!intent && !intent.passive
 }
 
 /**
@@ -104,19 +138,40 @@ export async function confirmIntent(
 // ---------------------------------------------------------------------------------------------------------------------
 // Confirm dialogs
 // ---------------------------------------------------------------------------------------------------------------------
+//
+// The app shows a confirm's description as one paragraph: its dialog collapses whitespace (line breaks included) and
+// keeps the text from being selected (packages/ui/src/overlays/dialog/dialog.css, `[data-slot=dialog-description]`).
+// So genui's description reads as one run of text whatever the host does with whitespace:
+//
+//   [genui's note (untrusted) | the spec's message (trusted)] [The UI says: “the spec's text” (untrusted)]
+//   [Message: the payload, line breaks shown as ↵]
+//
+// The payload comes last and runs to the end of the dialog, so nothing it contains can pass for genui's own text that
+// follows it; it is labelled, word for word, and spelled out so that nothing in it hides. The spec's text on an untrusted
+// surface is quoted with every quotation mark (and lookalike) in it replaced, so it cannot close genui's quote.
 
 // Characters that draw nothing, or reorder or disguise text: controls (but tab and line breaks), format characters (zero-width
-// and bidirectional marks, Unicode tag characters), private-use, unassigned and lone surrogate code points, variation
-// selectors, the combining grapheme joiner, the Mongolian free variation selectors, the Khmer inherent vowels, Hangul
-// fillers and the blank braille pattern. A payload could hide or disguise part of itself with them.
+// and bidirectional marks, Unicode tag characters), private-use, unassigned and lone surrogate code points, line and
+// paragraph separators, variation selectors, the combining grapheme joiner, the Mongolian free variation selectors, the
+// Khmer inherent vowels, Hangul fillers, the blank braille pattern, the musical null notehead and the Khitan filler. A
+// payload could hide or disguise part of itself with them.
 const INVISIBLE =
-  /(?![\t\n\r])[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/u
+  /(?![\t\n\r])[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}\u{1D159}\u{16FE4}]/u
 const INVISIBLE_RUN = new RegExp(`(?:${INVISIBLE.source})+`, "gu")
 // Unicode tag characters mirror printable ASCII (U+E0020-E007E): they carry text that is invisible to the reader but read
 // by a model ("ASCII smuggling"). A run of them is decoded, so the user sees what is hidden.
 const TAG = /^[\u{E0020}-\u{E007E}]$/u
-const LONG_SPACE = /[^\S\n]{20,}/g
-const BLANK_LINES = /\n(?:[^\S\n]*\n){3,}/g
+// A run of 8 or more of one symbol, mark or non-ASCII space: a glyph this list does not know may draw nothing (or a box),
+// and a long run of it could push the rest of the payload out of view.
+const SAME_RUN = /([^\p{L}\p{N}\p{P}\u0000-\u007f])\1{7,}/gu
+// A long run of spaces, or a run with 3 or more spaces the dialog does not collapse (no-break, em, ideographic...).
+const WIDE_SPACE = /[^\S\r\n]{20,}|(?:[^\S\r\n]*[^\S\r\n\t ]){3,}[^\S\r\n]*/g
+// A run of line breaks (with the spaces around them, which the dialog collapses anyway).
+const LINE_BREAKS = /[^\S\r\n]*(?:(?:\r\n|\r|\n)[^\S\r\n]*)+/g
+/** Stands in for a line break in a confirm's payload: the dialog would collapse it. */
+export const LINE_BREAK = "↵"
+/** A payload longer than this (in characters) shows its length, so text out of view is never silent. */
+export const LONG_PAYLOAD = 280
 
 const codePoint = (char: string) => `U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`
 
@@ -146,25 +201,45 @@ function spellOut(host: Host, run: string): string {
   return parts.join("")
 }
 
-/**
- * A payload as the confirm shows it: all of it, with invisible characters spelled out (hidden tag text decoded) and long
- * runs of spaces or blank lines collapsed into a visible count, so nothing in it can hide off screen or between lines.
- */
-export function showPayload(host: Host, text: string): string {
+/** Text with whatever could hide made visible: invisible characters spelled out, long runs counted. */
+function reveal(host: Host, text: string): string {
   return text
     .replace(INVISIBLE_RUN, (run) => spellOut(host, run))
-    .replace(LONG_SPACE, (run) => ` ${host.t("confirm.spaces", { count: run.length })} `)
-    .replace(BLANK_LINES, (run) => `\n\n${host.t("confirm.blankLines", { count: run.split("\n").length - 2 })}\n\n`)
+    .replace(SAME_RUN, (run, char: string) => `[${codePoint(char)} ×${[...run].length}]`)
+    .replace(WIDE_SPACE, (run) => ` ${host.t("confirm.spaces", { count: run.length })} `)
 }
 
 /**
- * Text the spec wrote for a confirm, as an untrusted dialog quotes it: on one line, with quotation marks replaced, so it
- * cannot close genui's quote and go on as text that reads like genui's own.
+ * A payload as the confirm shows it, on one line: all of it, with invisible characters spelled out (hidden tag text
+ * decoded), long runs of one symbol or of spaces counted, line breaks shown as ↵ and runs of blank lines counted.
+ */
+export function showPayload(host: Host, text: string): string {
+  return reveal(host, text).replace(LINE_BREAKS, (run) => {
+    const breaks = run.match(/\r\n|\r|\n/g)!.length
+    return breaks > 3
+      ? ` ${LINE_BREAK} ${host.t("confirm.blankLines", { count: breaks - 1 })} ${LINE_BREAK} `
+      : ` ${Array.from({ length: breaks }, () => LINE_BREAK).join(" ")} `
+  })
+}
+
+// Quotation marks of every script, and characters that look like one (primes, modifier letters, accents, ditto marks).
+const QUOTE_LIKE =
+  /[\p{Pi}\p{Pf}"＂＇`´‚‛„‟〃ʹʺʻʼʽʾʿˈˊˋˮ˝˵˶״׳′″‴‵‶‷⁗「」『』﹁﹂﹃﹄〝〞〟❛❜❝❞❟❠❮❯⹂\u{1F676}-\u{1F678}]/gu
+
+// Combining marks that do not sit on a letter, a digit or another mark: on their own they draw a free-standing accent,
+// and some look like a quotation mark (U+030B draws ˝, U+030E a small ").
+const LOOSE_MARKS = /(?<![\p{L}\p{N}\p{M}])\p{M}+/gu
+
+/**
+ * Text the spec wrote for a confirm, as an untrusted dialog quotes it: on one line, made visible as a payload is, with
+ * every quotation mark and lookalike replaced and combining marks that sit on no letter spelled out, so it cannot close
+ * genui's quote and go on as text that reads like genui's own.
  */
 export function quoteSpecText(host: Host, text: string): string {
-  const flat = showPayload(host, text)
-    .replace(/[\s\u2028\u2029]+/gu, " ")
-    .replace(/["“”„‟«»‹›〝〞〟＂❝❞]/gu, "'")
+  const flat = reveal(host, text)
+    .replace(LOOSE_MARKS, (run) => spellOut(host, run))
+    .replace(/\s+/gu, " ")
+    .replace(QUOTE_LIKE, "'")
     .trim()
   return `“${flat}”`
 }
@@ -174,23 +249,40 @@ export interface ConfirmInput {
   readonly title: string
   /** Exactly what will happen, shown in full: the whole message with its data, the URL, the copied text. */
   readonly detail?: string
+  /** What the detail is, e.g. "Address" (`confirm.label.*`); "Message" when omitted. */
+  readonly detailLabel?: string
   /** genui's confirm button label. */
   readonly confirmLabel?: string
   /** A confirm the spec itself asked for (a binding's `confirm`). */
   readonly requested?: RequestedConfirm
 }
 
+/** The payload part of a confirm's description: labelled, shown in full, with its length when it is long. */
+function payloadPart(host: Host, input: ConfirmInput): string | undefined {
+  const detail = input.detail
+  if (detail === undefined || detail === "") return undefined
+  const label = input.detailLabel || host.t("confirm.label.message")
+  const text = showPayload(host, detail).trim()
+  const length = [...detail].length
+  return length > LONG_PAYLOAD
+    ? host.t("confirm.detailLong", { label, count: length.toLocaleString("en-US"), text })
+    : host.t("confirm.detail", { label, text })
+}
+
 /**
- * The confirm dialog for an action. It always shows the whole payload. On a trusted surface (the agent's own reply, a
- * canvas) the spec's confirm may word the title, message and buttons. On an untrusted one (tool output, a file) the title
- * and buttons stay genui's, and the spec's text appears only quoted and labelled, after genui's note and the payload.
+ * The confirm dialog for an action. It always shows the whole payload, last. On a trusted surface (the agent's own
+ * reply, a canvas) the spec's confirm may word the title, message and buttons. On an untrusted one (tool output, a file)
+ * the title and buttons stay genui's, and the spec's text appears only quoted and labelled, after genui's note. The
+ * parts are separated by blank lines for a host that keeps them, and read as one paragraph where the host collapses
+ * them (see the top of this section).
  */
 export function confirmOptions(host: Host, surface: SurfaceContext | undefined, input: ConfirmInput) {
   const requested = input.requested
-  const payload = input.detail === undefined || input.detail === "" ? undefined : showPayload(host, input.detail)
+  const payload = payloadPart(host, input)
   const danger = requested?.danger ? { danger: true } : {}
   if (surface?.trusted) {
-    const notes = [requested?.message, payload].filter(Boolean)
+    const message = requested?.message ? reveal(host, requested.message).replace(/\s+/gu, " ").trim() : ""
+    const notes = [message, payload].filter(Boolean)
     const confirm = requested?.confirmLabel || input.confirmLabel
     return {
       title: requested?.title || input.title,
@@ -203,14 +295,48 @@ export function confirmOptions(host: Host, surface: SurfaceContext | undefined, 
   const said = [requested?.title, requested?.message].filter(Boolean).join(" — ")
   const notes = [
     host.t("confirm.untrusted"),
-    payload,
     said ? host.t("confirm.specSays", { text: quoteSpecText(host, said) }) : undefined,
+    payload,
   ].filter(Boolean)
   return {
     title: input.title,
     description: notes.join("\n\n"),
     ...(input.confirmLabel ? { confirm: input.confirmLabel } : {}),
     ...danger,
+  }
+}
+
+// The choices waiting for the gap on each surface, in the order they were made (see `choiceTurn`).
+const choiceQueue = new WeakMap<object, Promise<void>>()
+
+/**
+ * Waits until a choice made too soon after the surface's previous outward activation may go: OUTWARD_INTERVAL_MS after
+ * it, and after the choices made before it on the same surface, so the agent hears them in the order the user made
+ * them. A choice its control has replaced meanwhile (the user moved on: only the value the control now shows matters),
+ * or whose intent expired, does not go.
+ *
+ * @returns Whether the choice may go; the surface's gap then starts again from now.
+ */
+async function choiceTurn(key: object, intent: Intent, choice: object): Promise<boolean> {
+  const ahead = choiceQueue.get(key) ?? Promise.resolve()
+  let done!: () => void
+  const turn = new Promise<void>((resolve) => (done = resolve))
+  const queued = ahead.then(() => turn)
+  choiceQueue.set(key, queued)
+  try {
+    await ahead
+    for (;;) {
+      if (latestChoice.get(choice) !== intent || Date.now() - intent.since > INTENT_TTL_MS) return false
+      const wait = OUTWARD_INTERVAL_MS - (Date.now() - (lastActivation.get(key) ?? 0))
+      if (wait <= 0) {
+        lastActivation.set(key, Date.now())
+        return true
+      }
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+  } finally {
+    done()
+    if (choiceQueue.get(key) === queued) choiceQueue.delete(key)
   }
 }
 
@@ -239,16 +365,33 @@ export async function allowOutward(
   if (intent && intent.spent >= OUTWARD_BURST) return false
   if (input.requireIntent && !intent) return false
   if (!intent || intent.spent === 0) {
-    const now = Date.now()
-    if (now - (lastActivation.get(key) ?? 0) < OUTWARD_INTERVAL_MS) {
-      // Too soon after the previous activation: the rest of this one's burst is refused too.
-      if (intent) intent.spent = OUTWARD_BURST
-      return false
+    if (Date.now() - (lastActivation.get(key) ?? 0) < OUTWARD_INTERVAL_MS) {
+      // Too soon after the previous activation. A choice (the value its control now shows) waits for the gap instead
+      // (see `choiceTurn`); anything else is refused, with the rest of its burst.
+      if (!intent?.choice || !(await choiceTurn(key, intent, intent.choice))) {
+        if (intent) intent.spent = OUTWARD_BURST
+        return false
+      }
     }
-    lastActivation.set(key, now)
+    lastActivation.set(key, Date.now())
   }
   if (intent) intent.spent++
+  return askOutward(host, surface, input)
+}
 
+/**
+ * The confirm part of the outward gate on its own: asks when the settings call for it (always, or only for untrusted
+ * surfaces) or when the spec asked for a confirm, showing the whole payload. Also used where genui's own control is
+ * the activation and no rate limit applies (a click on "Load image").
+ *
+ * @returns Whether to proceed: false without a window user activation.
+ */
+export async function askOutward(
+  host: Host,
+  surface: SurfaceContext | undefined,
+  input: ConfirmInput,
+): Promise<boolean> {
+  if (!hasUserGesture()) return false
   const policy = host.prefs().confirmActions
   const ask = !!input.requested || policy === "always" || (policy === "untrusted" && !surface?.trusted)
   if (!ask) return true
@@ -269,6 +412,7 @@ export async function openLink(
   const ok = await allowOutward(host, surface, {
     title: host.t("confirm.openLink", { host: urlHost(url) }),
     detail: url,
+    detailLabel: host.t("confirm.label.address"),
     confirmLabel: host.t("confirm.open"),
     ...options,
   })

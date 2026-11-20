@@ -165,6 +165,55 @@ describe("parseBlock", () => {
       ])
     })
 
+    // A member alone on its line (an array item, a props object) is valid JSON by itself; it must not become the header.
+    const spread = (props: Record<string, unknown>) =>
+      [
+        "{",
+        '  "root": "table",',
+        '  "elements": {',
+        '    "table": {',
+        '      "type": "Table",',
+        `      "props":`,
+        `        ${JSON.stringify(props)},`,
+        '      "children": []',
+        "    }",
+        "  },",
+        '  "state": {',
+        '    "rows": [',
+        '      {"id": "1", "title": "Alpha"},',
+        '      {"id": "2", "title": "Beta"}',
+        "    ]",
+        "  }",
+        "}",
+      ].join("\n")
+
+    test.each([
+      [{ columns: ["Title"], rows: { $state: "/rows" } }],
+      [{ title: "Deploy", id: "deploy-form" }],
+      [{ canvas: "deploy" }],
+      [{ close: true }],
+    ])("a line inside a document is not a header (%j)", (props) => {
+      const block = parseBlock(spread(props))
+      expect(block.header).toEqual({})
+      expect(block.errors).toEqual([])
+      expect(blockKind("spec", block.header)).toBe("inline")
+      expect(block.patches.map((patch) => patch.path)).toEqual(["/root", "/elements/table", "/state"])
+      expect((block.patches[2]!.value as { rows: unknown[] }).rows).toHaveLength(2)
+    })
+
+    test("after a header line, a line inside the document is still not a header", () => {
+      const block = parseBlock(`{"title":"Rows"}\n${spread({ title: "Deploy", id: "x", close: true })}`)
+      expect(block.header).toEqual({ title: "Rows" })
+      expect(block.errors).toEqual([])
+      expect(block.patches.map((patch) => patch.path)).toEqual(["/root", "/elements/table", "/state"])
+    })
+
+    test("a header after a line that is not JSON is an error, not a header", () => {
+      const block = parseBlock(["{bad", '{"title":"Late"}', ROOT].join("\n"))
+      expect(block.header).toEqual({})
+      expect(block.errors.map((error) => error.line)).toEqual([1, 2])
+    })
+
     test("a broken multi-line document keeps the line errors", () => {
       const text = JSON.stringify(spec, null, 2).slice(0, -1)
       expect(parseBlock(text).errors.length).toBeGreaterThan(0)

@@ -9,6 +9,8 @@ import {
   ON_ERROR_PARAM,
   ON_SUCCESS_PARAM,
   OUTWARD_ACTIONS,
+  OUTWARD_BURST,
+  RESERVED_PARAMS,
   type ActionName,
   type GenuiCatalog,
 } from "../catalog/index.ts"
@@ -16,8 +18,11 @@ import { CANVAS_LANGUAGE, INLINE_LANGUAGE, UI_SECRET_ROOT } from "../shared/cons
 import {
   BOUND_PROPS,
   BUILTIN_ACTIONS,
+  INVALID_REPEAT,
   isExpression,
   isRecord,
+  normalizeNotes,
+  notABinding,
   secretStatePath,
   UI_STATE_ROOT,
   uiStatePath,
@@ -209,31 +214,113 @@ function checkProps(
   }
 }
 
+/** A param's expected type for a message: "string", "a value", ... */
+const paramList = (shape: Record<string, { safeParse: (value: unknown) => { success: boolean } }>) =>
+  Object.entries(shape)
+    .map(([name, schema]) => (schema.safeParse(undefined).success ? `${name}?` : name))
+    .join(", ")
+
+/**
+ * A custom action's params against its schema in the catalog (src/catalog/actions.ts), as the handler will read them: the
+ * reserved params the normalizer adds are left out, and values that are expressions are only known when the action runs,
+ * so problems under one are skipped. Unknown params are reported too: the handler ignores them (`{ "href": ... }` for
+ * openLink's `url`), which is how a misnamed param fails silently.
+ */
+function checkActionParams(
+  action: string,
+  params: Record<string, unknown>,
+  where: string,
+  definition: { readonly params?: unknown } | undefined,
+): string | undefined {
+  const schema = definition?.params as
+    | { shape?: unknown; safeParse?: (value: unknown) => { success: boolean; error?: { issues: unknown } } }
+    | undefined
+  if (!isRecord(schema?.shape) || typeof schema.safeParse !== "function") return undefined
+  const shape = schema.shape as Record<string, { safeParse: (value: unknown) => { success: boolean } }>
+  const own = Object.fromEntries(Object.entries(params).filter(([name]) => !RESERVED_PARAMS.includes(name)))
+  let result: { success: boolean; error?: { issues: unknown } }
+  try {
+    result = schema.safeParse(own)
+  } catch {
+    return undefined
+  }
+  const problems =
+    result.success || !Array.isArray(result.error?.issues)
+      ? []
+      : (result.error.issues as ZodIssueLike[])
+          .filter((issue) => !touchesExpression(own, issue.path))
+          .map((issue) => describePropIssue(issue, own))
+  for (const name of Object.keys(own))
+    if (!Object.hasOwn(shape, name)) problems.push(`unknown param "${truncate(name, 40)}"`)
+  const unique = [...new Set(problems)]
+  if (unique.length === 0) return undefined
+  return `${action} in ${where} has invalid params: ${unique.slice(0, MAX_PROP_PROBLEMS).join("; ")}${
+    unique.length > MAX_PROP_PROBLEMS ? ` (and ${unique.length - MAX_PROP_PROBLEMS} more)` : ""
+  }. It takes { ${paramList(shape)} }`
+}
+
+// The params of the built-ins that name a state path. At the top of a bound action's params, `{ "$item": "field" }`
+// resolves to the item's path; inside an onSuccess/onError chain json-render resolves it as a prop, to the item's value.
+const PATH_PARAMS = ["statePath", "clearStatePath"]
+
 /** Why an outward action or a confirm in a passive binding never runs; part of the validator's message. */
 export const ACTIVATION_RULE = `outward actions (${[...OUTWARD_ACTIONS].join(", ")}) and confirms run only when the user activates a control: ${describeActivations()}.`
 
 const MAX_CHAIN_DEPTH = 8
 
+/** The most outward actions one run of a binding (or a list of them) can reach, along any onSuccess/onError path. */
+function outwardCount(binding: unknown, depth = 0): number {
+  if (Array.isArray(binding)) return binding.reduce((sum: number, entry) => sum + outwardCount(entry, depth), 0)
+  if (!isRecord(binding) || typeof binding.action !== "string") return 0
+  const own = OUTWARD_ACTIONS.has(binding.action as ActionName) ? 1 : 0
+  // A built-in runs neither chain.
+  if (BUILTIN_ACTIONS.has(binding.action) || depth >= MAX_CHAIN_DEPTH) return own
+  const params = isRecord(binding.params) ? binding.params : {}
+  return (
+    own +
+    Math.max(
+      outwardCount(binding.onSuccess ?? params[ON_SUCCESS_PARAM], depth + 1),
+      outwardCount(binding.onError ?? params[ON_ERROR_PARAM], depth + 1),
+    )
+  )
+}
+
 /**
  * Action bindings of an element's `on` and `watch` maps, with their onSuccess/onError chains (as written, or moved into
- * reserved params by the normalizer): unknown actions, bindings that are not bindings, and outward actions or confirms
- * where no activation can happen (watch, on.focus, on.blur, ...), which never run.
+ * reserved params by the normalizer): unknown actions, bindings that are not bindings, custom actions whose params do
+ * not match the catalog, outward actions or confirms where no activation can happen (watch, on.focus, on.blur, ...),
+ * which never run, more outward actions than one activation runs, and chains on built-ins, which never run.
  */
-function checkBindings(key: string, element: Record<string, unknown>, known: ReadonlySet<string>): SurfaceIssue[] {
+function checkBindings(
+  key: string,
+  element: Record<string, unknown>,
+  known: ReadonlySet<string>,
+  definitions: Readonly<Record<string, { readonly params?: unknown }>>,
+): SurfaceIssue[] {
   const issues: SurfaceIssue[] = []
   const type = typeof element.type === "string" ? element.type : ""
   const check = (binding: unknown, where: string, passive: "watch" | "event" | undefined, depth: number) => {
     if (!isRecord(binding) || typeof binding.action !== "string") {
-      issues.push({
-        severity: "warning",
-        code: "invalid_binding",
-        message: `${where} is not an action binding ({ "action": "...", "params": {...} })`,
-        elementKey: key,
-      })
+      issues.push({ severity: "warning", code: "invalid_binding", message: notABinding(where), elementKey: key })
       return
     }
     const action = binding.action
     const params = isRecord(binding.params) ? binding.params : {}
+    const definition = known.has(action) && Object.hasOwn(definitions, action) ? definitions[action] : undefined
+    const paramsProblem = checkActionParams(action, params, where, definition)
+    if (paramsProblem)
+      issues.push({ severity: "warning", code: "invalid_action_params", message: paramsProblem, elementKey: key })
+    if (BUILTIN_ACTIONS.has(action) && depth > 0)
+      for (const name of PATH_PARAMS) {
+        const value = params[name]
+        if (isRecord(value) && typeof value.$item === "string" && Object.keys(value).length === 1)
+          issues.push({
+            severity: "warning",
+            code: "item_path_in_chain",
+            message: `${where}: { "$item": "${truncate(value.$item, 40)}" } as ${action}'s ${name} gives the item's value here, not its state path ($item gives a path only in the params of an action bound directly): bind ${action} directly instead, e.g. as the next entry of the event's array of bindings`,
+            elementKey: key,
+          })
+      }
     if (!known.has(action))
       issues.push({
         severity: "warning",
@@ -260,6 +347,18 @@ function checkBindings(key: string, element: Record<string, unknown>, known: Rea
         message: `${action} in ${where} asks for a confirm, so it never runs: ${ACTIVATION_RULE}`,
         elementKey: key,
       })
+    if (BUILTIN_ACTIONS.has(action)) {
+      // json-render runs a built-in itself and returns before looking at its chain.
+      const chained = (["onSuccess", "onError"] as const).filter((field) => binding[field] != null)
+      if (chained.length > 0)
+        issues.push({
+          severity: "warning",
+          code: "chain_on_builtin",
+          message: `${where}.${chained.join("/")} never runs: ${action} runs no onSuccess or onError (only the custom actions do). List the next action after it in an array instead, e.g. "press": [{ "action": "${action}", ... }, { "action": "showToast", ... }]`,
+          elementKey: key,
+        })
+      return
+    }
     if (depth >= MAX_CHAIN_DEPTH) return
     for (const [field, param] of [
       ["onSuccess", ON_SUCCESS_PARAM],
@@ -285,6 +384,14 @@ function checkBindings(key: string, element: Record<string, unknown>, known: Rea
       const passive = field === "watch" ? "watch" : isActivation(type, name) ? undefined : "event"
       if (Array.isArray(value)) value.forEach((binding, index) => check(binding, `${where}[${index}]`, passive, 0))
       else check(value, where, passive, 0)
+      const outward = passive ? 0 : outwardCount(value)
+      if (outward > OUTWARD_BURST)
+        issues.push({
+          severity: "warning",
+          code: "outward_burst",
+          message: `${where} runs ${outward} of ${[...OUTWARD_ACTIONS].join(", ")}, but one activation runs at most ${OUTWARD_BURST}: the ones after that are refused`,
+          elementKey: key,
+        })
     }
   }
   return issues
@@ -466,8 +573,9 @@ function checkWithJsonRender(spec: Spec, elements: Record<string, unknown>): Sur
 
 /**
  * Checks a spec against json-render's structural rules and the catalog: unknown component types, props that do not
- * match the component's schema (values that are expressions are only known at render time and are skipped), and
- * unknown actions. `fatal` means nothing can render: no root, no root element, or a root of an unknown type.
+ * match the component's schema (values that are expressions are only known at render time and are skipped), unknown
+ * actions and bindings that cannot run as written. For a spec from normalizeSpec, also what the normalizer removed or
+ * ignored (see normalizeNotes). `fatal` means nothing can render: no root, no root element, or a root of an unknown type.
  */
 export function validateSurface(
   spec: Spec,
@@ -480,6 +588,10 @@ export function validateSurface(
   const components = catalog.data.components as Record<string, { props?: unknown }>
   const componentNames = new Set(catalog.componentNames)
   const known = new Set([...BUILTIN_ACTIONS, ...catalog.actionNames])
+  const definitions = (isRecord(catalog.data.actions) ? catalog.data.actions : {}) as Record<
+    string,
+    { readonly params?: unknown }
+  >
 
   const issues: SurfaceIssue[] = [...checkStructure(spec.root, elements), ...checkWithJsonRender(spec, elements)]
 
@@ -508,14 +620,11 @@ export function validateSurface(
       issues.push(...checkExpressions(key, props))
     }
     if (element.repeat !== undefined && !validRepeat(element.repeat))
-      issues.push({
-        severity: "error",
-        code: "invalid_repeat",
-        message: 'has an invalid "repeat" (expected { "statePath": "/path/to/array" })',
-        elementKey: key,
-      })
-    issues.push(...checkBindings(key, element, known))
+      issues.push({ severity: "error", code: "invalid_repeat", message: INVALID_REPEAT, elementKey: key })
+    issues.push(...checkBindings(key, element, known, definitions))
   }
+  // What the normalizer removed or ignored before this spec got here (nothing, for a spec it did not produce).
+  issues.push(...normalizeNotes(spec))
 
   const root = spec.root
   const rootElement = typeof root === "string" && root && Object.hasOwn(elements, root) ? elements[root] : undefined

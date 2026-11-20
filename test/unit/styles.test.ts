@@ -14,7 +14,7 @@ const TOKENS = path.join(import.meta.dir, "../../node_modules/@opencode/ui/src/s
 const HOST_MARKUP_EXCEPTIONS: Readonly<Record<string, readonly string[]>> = {
   "chrome.css": [
     // The app's raw code block while a spec or canvas block streams: kept short and faded.
-    '[data-component="markdown-code"]:is([data-language="spec" i], [data-language="canvas" i]):not([data-code-content]) > pre',
+    '[data-markdown-complete="false"] > [data-component="markdown-code"]:is([data-language="spec" i], [data-language="canvas" i]):not( [data-code-content], :hover, :focus-within, [data-genui] * ) > pre',
   ],
 }
 

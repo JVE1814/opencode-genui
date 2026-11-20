@@ -5,15 +5,7 @@ import { isIconName } from "../../catalog/icons.ts"
 import { safeUrl } from "../../protocol/url.ts"
 import { useHost, useSurface, type Host } from "../host.ts"
 import { openLink } from "../outward.ts"
-import {
-  JOINER,
-  neutralizeMarkdown,
-  QUOTE_ENTITY,
-  restoreQuotes,
-  splitMarkdown,
-  stripJoiners,
-  type MarkdownPart,
-} from "./markdown.ts"
+import { JOINER, linkTarget, neutralizeMarkdown, splitMarkdown, stripJoiners, type MarkdownPart } from "./markdown.ts"
 import { list, oneOf, str, type GenuiComponent } from "./shared.tsx"
 
 // Content components: Heading, Text, Markdown, Code, Badge, Alert, Keybind, Icon. Styles: src/gui/styles/content.css.
@@ -27,10 +19,14 @@ const TONES = ["neutral", "info", "success", "warning", "danger"] as const
 /**
  * Model-written Markdown through the app's renderer (`ui.Markdown`), shared by Markdown, Accordion and Popover.
  *
- * - Images become links, raw HTML shows as text and quotes cannot end an attribute (src/gui/components/markdown.ts), so
- *   nothing loads remote content without a click; top-level fenced code blocks render with `ui.Code`.
- * - Links go through the surface's link policy (http, https and mailto only, the outward gate, a confirm on untrusted
- *   surfaces) instead of the renderer's own handling: a capturing listener on the wrapper sees the click first.
+ * - The renderer never gets a link, image or tag whose address the model wrote (src/gui/components/markdown.ts):
+ *   links, images, autolinks and bare URLs become links to `#genui-link:` fragments, which the app renders without
+ *   loading anything (it adds a remote favicon to every web link), and nothing else can become a link, an image or
+ *   HTML. So nothing loads remote content without a click, whatever the text is built from. Fenced code blocks render
+ *   with `ui.Code`.
+ * - A click on one of those links opens its address through the surface's link policy (http, https and mailto only, the
+ *   outward gate, a confirm on untrusted surfaces): a capturing listener on the wrapper sees the click before the
+ *   renderer does.
  * - Copying a selection drops the invisible joiners the neutralizing added.
  */
 export function MarkdownText(props: { readonly text: string }) {
@@ -46,22 +42,15 @@ export function MarkdownText(props: { readonly text: string }) {
     const anchor = target.closest("a[href]")
     if (!anchor) return
     const href = anchor.getAttribute("href") ?? ""
-    // Footnotes and other in-document anchors stay with the renderer.
-    if (href.startsWith("#")) return
+    const own = linkTarget(href)
+    // Other in-document anchors stay with the renderer.
+    if (own === undefined && href.startsWith("#")) return
     event.preventDefault()
     event.stopPropagation()
-    const url = safeUrl(href, "link")
+    // genui's own links carry the address; the renderer's (e-mail addresses it links itself) are checked here.
+    const url = safeUrl(own ?? stripJoiners(href), "link")
     if (url) void openLink(host, surface, url)
-  }
-
-  // marked shows the quote entities neutralizeMarkdown added as written in code (and after a backslash): the rendered
-  // text reads `"` again. Only text nodes change, so this cannot add markup.
-  const restore = (root: Node) => {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const text = node as Text
-      if (text.data.includes(QUOTE_ENTITY)) text.data = restoreQuotes(text.data)
-    }
+    else host.toast({ title: host.t("action.linkBlocked"), variant: "error" })
   }
 
   const copy = (event: ClipboardEvent) => {
@@ -78,11 +67,6 @@ export function MarkdownText(props: { readonly text: string }) {
         element.addEventListener("click", intercept, true)
         element.addEventListener("auxclick", intercept, true)
         element.addEventListener("copy", copy)
-        if (typeof MutationObserver === "undefined") return
-        const observer = new MutationObserver(() => restore(element))
-        observer.observe(element, { childList: true, subtree: true, characterData: true })
-        onCleanup(() => observer.disconnect())
-        queueMicrotask(() => restore(element))
       }}
     >
       <Index each={parts()}>

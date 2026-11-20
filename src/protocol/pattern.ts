@@ -7,7 +7,8 @@
  * validation functions (VALIDATION_FUNCTIONS):
  *
  * - A pattern runs on an automaton (a Thompson NFA, as RE2 does), in time linear in the value for any pattern. Its
- *   syntax is JavaScript's without flags, minus backreferences and lookarounds; a pattern that uses them, or is longer
+ *   syntax is JavaScript's without flags (with Annex B's legacy escapes, such as octal `\12`), minus backreferences and
+ *   lookarounds; a pattern that uses them, or is longer
  *   than MAX_PATTERN_LENGTH, or compiles to more than MAX_STATES states, is ignored (the check passes) and the validator
  *   reports it.
  * - A value longer than MAX_PATTERN_INPUT (or MAX_EMAIL_LENGTH) fails the check without running it.
@@ -93,12 +94,41 @@ const CLASS_ESCAPES: Readonly<Record<string, Test>> = {
 const CONTROL_ESCAPES: Readonly<Record<string, number>> = { t: 9, n: 10, v: 11, f: 12, r: 13 }
 const QUANTIFIER = /^\{(\d+)(?:(,)(\d*))?\}/
 
+/**
+ * The capturing groups of a pattern, counted before parsing: without the `u` flag, `\N` is a backreference only when the
+ * pattern has at least N capturing groups (anywhere in it), and `\k` only when it has a named one; otherwise they are
+ * the legacy escapes of Annex B (see Parser#escapeCode).
+ */
+function countGroups(src: string): { readonly count: number; readonly named: boolean } {
+  let count = 0
+  let named = false
+  let inClass = false
+  for (let index = 0; index < src.length; index++) {
+    const c = src[index]
+    if (c === "\\") index++
+    else if (inClass) inClass = c !== "]"
+    else if (c === "[") inClass = true
+    else if (c === "(") {
+      if (src[index + 1] !== "?") count++
+      else if (src[index + 2] === "<" && src[index + 3] !== "=" && src[index + 3] !== "!") {
+        count++
+        named = true
+      }
+    }
+  }
+  return { count, named }
+}
+
+const isOctal = (code: number) => code >= 48 && code <= 55
+
 class Parser {
   private pos = 0
   private readonly src: string
+  private readonly groups: ReturnType<typeof countGroups>
 
   constructor(src: string) {
     this.src = src
+    this.groups = countGroups(src)
   }
 
   parse(): Node {
@@ -201,7 +231,22 @@ class Parser {
     const node = this.alternation()
     if (this.peek() !== ")") throw new Unsupported("unterminated group")
     this.pos++
-    return node
+    // A group may be quantified even when all it holds is an assertion (`(^)?`, `(?:\b)+`); a bare one may not.
+    return node.t === "assert" ? { t: "seq", items: [node] } : node
+  }
+
+  /**
+   * Annex B's legacy octal escape, after `\` and its first digit `first` (0-7): up to three digits from 0-3, up to two
+   * from 4-7 (so at most 0o377).
+   */
+  private octal(first: string): number {
+    let value = Number(first)
+    const digits = first <= "3" ? 3 : 2
+    for (let count = 1; count < digits && isOctal(this.src.charCodeAt(this.pos)); count++) {
+      value = value * 8 + (this.src.charCodeAt(this.pos) - 48)
+      this.pos++
+    }
+    return value
   }
 
   /**
@@ -218,8 +263,15 @@ class Parser {
     if (c === "b") return inClass ? 8 : "boundary"
     if (c === "B" && !inClass) return "notBoundary"
     if (c === "0" && !isDigit(this.src.charCodeAt(this.pos))) return 0
-    if (/[0-9]/.test(c)) throw new Unsupported("backreferences are not supported")
-    if (c === "k") throw new Unsupported("backreferences are not supported")
+    if (isDigit(c.charCodeAt(0))) {
+      // Outside a class, `\N` refers to group N when the pattern has that many; otherwise (and always in a class) it is
+      // a legacy octal escape, or 8 or 9 as itself (JavaScript without the `u` flag, Annex B).
+      if (!inClass && c !== "0" && Number(c + /^\d*/.exec(this.src.slice(this.pos))![0]) <= this.groups.count)
+        throw new Unsupported("backreferences are not supported")
+      return c === "8" || c === "9" ? c.charCodeAt(0) : this.octal(c)
+    }
+    // `\k<name>` refers to a named group; in a pattern without one, `\k` is a plain "k".
+    if (c === "k" && this.groups.named) throw new Unsupported("backreferences are not supported")
     if (c === "x" && /^[0-9a-fA-F]{2}/.test(this.src.slice(this.pos))) {
       const code = parseInt(this.src.slice(this.pos, this.pos + 2), 16)
       this.pos += 2
@@ -231,10 +283,15 @@ class Parser {
       return code
     }
     if (c === "c") {
-      const letter = this.peek()
-      if (!/[A-Za-z]/.test(letter)) throw new Unsupported("unsupported \\c escape")
-      this.pos++
-      return letter.charCodeAt(0) % 32
+      const code = this.src.charCodeAt(this.pos)
+      // A letter, and in a class also a digit or `_`, names a control character (Annex B for the last two).
+      if (/[A-Za-z]/.test(this.peek()) || (inClass && (isDigit(code) || code === 95))) {
+        this.pos++
+        return code % 32
+      }
+      // Otherwise the `\` stands for itself and the `c` is read next (Annex B).
+      this.pos--
+      return 92
     }
     // Any other escaped character stands for itself (JavaScript without the `u` flag).
     return c.charCodeAt(0)

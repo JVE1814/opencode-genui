@@ -56,8 +56,10 @@ Here's the deploy form:
 ````
 
 The block renders in place once it is complete (until then the app shows its source). The optional first line is a
-header: `id` keeps what you typed when the agent re-sends the block, `title` labels it. What you change stays on top of
-the agent's state until the agent writes a new value at the same place: the newest writer wins.
+header: `id` keeps what you typed when the agent re-sends the block (the older copy keeps it too), `title` labels it.
+What you change stays on top of the agent's state until the agent writes a new value at the same place: the newest
+writer wins. What you change in a list item stays with that item (found by the repeat's `key`) when the agent adds,
+removes or reorders items around it, and goes when the agent removes the item.
 
 ### Canvases: ` ```canvas `
 
@@ -70,11 +72,14 @@ the agent's state until the agent writes a new value at the same place: the newe
 ````
 
 - The header names the canvas (`main` when omitted). Each canvas is a tab in the session's side panel.
-- A block that sets `/root` replaces the canvas; a block without it **patches** it (`{"op":"replace","path":"/state/done/2","value":true}`).
+- A block that sets `/root` and adds that root element replaces the canvas; any other block **patches** it
+  (`{"op":"replace","path":"/state/done/2","value":true}`). Pointing `/root` at an element the canvas already has
+  switches the view and keeps its elements and state, also when the block rewrites that element with `replace`.
 - `{"canvas":"migration","close":true}` removes it.
 - Canvases render **while the agent is still writing**, and a new canvas opens its tab automatically (configurable).
 - They survive reloads: the transcript is the log, and each canvas's last settled state is also stored, so canvases
-  created long ago in a session still open.
+  created long ago in a session still open. A canvas whose reply was reverted stays gone, also when the revert was
+  committed while the app was closed (genui asks the server whether that reply still exists).
 
 ### Components
 
@@ -87,20 +92,22 @@ spec features work: state, `$state` / `$bindState` / `$item` / `$cond` / `$templ
 
 ### Actions
 
-| Action                       | What it does                                                                         |
-| ---------------------------- | ------------------------------------------------------------------------------------ |
-| `sendPrompt { text, data? }` | Sends a message to the agent as you: the text, then the data as a fenced JSON block. |
-| `insertPrompt { text }`      | Puts text in your message box, unsent.                                               |
-| `openLink { url }`           | Opens an http(s) or mailto link in your browser.                                     |
-| `copyText { text }`          | Copies to the clipboard.                                                             |
-| `showToast { title }`        | Shows a notification.                                                                |
-| `openCanvas { canvas }`      | Focuses a canvas tab.                                                                |
+| Action                                        | What it does                                                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `sendPrompt { text, data? }`                  | Sends a message to the agent as you: the text, then the data as a fenced JSON block; long text or data is cut and marked. |
+| `insertPrompt { text }`                       | Puts text in your message box, unsent.                                                                                    |
+| `openLink { url }`                            | Opens an http(s) or mailto link in your browser.                                                                          |
+| `copyText { text, label? }`                   | Copies to the clipboard; the toast names the label ("Install command copied").                                            |
+| `showToast { title, description?, variant? }` | Shows a notification (variant: default, success or error).                                                                |
+| `openCanvas { canvas }`                       | Focuses a canvas tab.                                                                                                     |
 
 ### How the agent learns it
 
 The full catalog and rules (generated from json-render's catalog prompt) are registered as the on-demand skill
 `genui`. A short hint tells the agent the skill exists; by default the desktop app attaches it to each session it opens,
-so terminal-only sessions are not told to emit UI they cannot show.
+so terminal-only sessions are not told to emit UI they cannot show. The session hint ends with a note that it applies
+only while the `genui` skill is available, so sessions that keep the hint after you uninstall genui tell the agent to
+ignore it. To remove it from a session, set `"instructions": "off"` and open that session in the desktop app once.
 
 ## Options
 
@@ -130,26 +137,34 @@ without a click, and **Clear stored UI state**.
 
 Specs are written by a model and treated as data:
 
-- **Text is text.** Markdown goes through the app's renderer with images turned into links, raw HTML shown as text and
-  quotes encoded, so nothing in it loads remote content or adds markup. Links open only http, https and mailto URLs;
-  images load only http(s) and base64 `data:image` URLs, and remote images wait for a click unless you allow them.
+- **Text is text.** Markdown goes through the app's renderer, but genui writes every link, image, autolink and bare
+  address in it as a link it opens itself, and shows raw HTML as text: nothing in it loads remote content (the app would
+  otherwise fetch a favicon for each web link as soon as it renders) or adds markup, whatever the text is built from.
+  Links open only http, https and mailto URLs; images load only http(s) and base64 `data:image` URLs, and remote images
+  wait for a click (which asks first, with the full address, where outward actions ask) unless you allow them.
 - **Outward actions need your activation.** Sending a message, filling the composer, opening a link and copying run
   only when you deliberately activate a control of that UI: pressing a Button or Link, picking from a DropdownMenu or
   Table, Enter in an Input, or a choice in a Select, Radio, Checkbox, Switch, Toggle, ToggleGroup, ButtonGroup,
   Pagination or Tabs. Never from `watch`, focus, blur, typing or slider movement, and never from an `onSuccess`/`onError`
   handler read from state. One activation may run up to 3 of them (copy a code, then open a page); the next activation
-  of that UI needs a second's gap.
+  of that UI needs a second's gap, and a choice made sooner is sent once the second has passed (only the control's
+  latest). Arrow keys in a Radio or Tabs only move the choice; Space, Enter or a click sends it.
 - **Confirms show everything.** genui asks first when your setting says so, or when the spec asks. The dialog shows the
-  whole payload (the full message with its data, the URL, the copied text) with invisible characters spelled out and
-  text hidden in Unicode tag characters decoded.
+  whole payload (the full message with its data, the URL, the copied text) last and labelled, with line breaks shown as
+  ↵ (the app's dialog runs its text together), invisible and blank characters spelled out, long runs counted, its
+  length when it is long, and text hidden in Unicode tag characters decoded.
 - **Blocks outside the agent's reply are untrusted.** A ` ```spec ` block in tool output or a previewed file is marked as
   such and asks before every outward action (by default), keeping genui's own wording; the spec's text appears only
   quoted. It gets state of its own (it cannot read or change the agent's UI with the same `id`), cannot open a Dialog or
   Drawer by itself, and has no "Ask agent to fix". Trust is decided by the block's exact text.
-- **Passwords stay in memory.** What you type into a password Input is never written to stored UI state. Other edits are
+- **Passwords stay in memory.** What you type into a password Input is never written to stored UI state, also after
+  the agent's next version of the UI drops that Input. Other edits are
   stored per session (up to 50 surfaces) so they survive reloads, until **Clear stored UI state**.
 - **No freezes.** Validation patterns run on a linear-time matcher (no backreferences or lookarounds) with a shared work
-  budget, so a spec cannot hang the window.
+  budget, Markdown is prepared in time linear in its length, and a UI's watches stop after 64 runs without a break (in
+  all, also across remounts, so a watch that hides and re-shows itself stops too), so a spec cannot hang the window.
+  One change can therefore wake at most 64 watches at once: a reaction in every row of a long list belongs in the
+  rows' props (`$state`, `$item`), not in a watch per row.
 
 ## Development
 
@@ -159,12 +174,13 @@ bun run dev          # rebuild dist/gui-experimental.cjs on change; the desktop 
 bun run playground   # the plugin in a fake desktop host, with scripted conversations
 bun run test         # unit tests
 bun run test:e2e     # Playwright against the playground (PW_PORT=5180 to use a dev server on another port)
-bun run build        # skill + bundle + bundle checks
+bun run bundle       # skill + bundle + bundle checks
 ```
 
 Point your global config at the checkout to develop against the real app. The desktop bundle and
-`skills/genui/SKILL.md` are committed because OpenCode installs plugins with install scripts disabled; CI fails when
-either is stale.
+`skills/genui/SKILL.md` are committed because nothing is built when OpenCode installs the plugin: package.json has no
+`build`, `prepare` or install script (npm runs one for a git dependency even with scripts disabled, and a unit test
+keeps it that way), so `bun run bundle` builds both. CI fails when either is stale.
 
 Layout:
 
@@ -186,11 +202,19 @@ playground/        fake desktop host for development and end-to-end tests
   first reply must already know about UI.
 - Desktop only: the web app and the terminal UI show the blocks as code.
 - Generated UI keeps clear of the code block's toolbar by measuring it, which relies on the app's markup; so does the
-  rule that shortens a spec's source while it streams. Neither, nor flushing edits when the plugin reloads and
+  rule that shortens a spec's source while it streams (it applies only while the app marks the block as still being
+  written). Neither, nor flushing edits when the plugin reloads and
   re-sending the session hint after a reconnect, has been verified in the desktop app itself (only in the playground
   and in unit tests).
-- A code block nested in a Markdown list or quote stays with the app's renderer: its copy button may copy invisible
-  joiners, or `&#34;` for quotes.
+- A fenced code block in a Markdown list item renders after the item, as a block of its own. One inside a Markdown
+  quote stays with the app's renderer: its copy button may copy invisible joiners. Markdown links show no favicon, and
+  their address shows in their tooltip rather than the status bar.
+- The app's confirm dialog cannot be selected or copied from, and runs its text together: genui shows line breaks in
+  the payload as ↵.
+- Messages a UI sends use the model picked in the composer but the session's current agent: the plugin API does not
+  expose the composer's agent.
+- In windows narrower than 768 px the app has no side region: canvases show in the session's Canvas view (in the More
+  menu), one at a time with a picker. This view has not been verified in the desktop app itself.
 
 ## License
 

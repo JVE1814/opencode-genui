@@ -1,4 +1,4 @@
-import { createEffect, getOwner, onCleanup, untrack } from "solid-js"
+import { createEffect, createSignal, getOwner, onCleanup, untrack } from "solid-js"
 import {
   CodeBlock,
   Command,
@@ -14,10 +14,16 @@ import {
 } from "@opencode/plugin/gui"
 import { Schema } from "effect"
 import { compareRefs } from "../protocol/fold.ts"
-import { activationTarget, ensureInstructions, removeInstructions, sameActivation } from "../runtime/activation.ts"
+import {
+  activationTarget,
+  ensureInstructions,
+  removeInstructions,
+  sameActivation,
+  sessionHint,
+} from "../runtime/activation.ts"
 import { EMPTY_PERSISTED } from "../runtime/snapshot.ts"
 import { clearSurfaces, peekSurface, surfaceKeyPrefix } from "../runtime/surfaces.ts"
-import { CANVAS_TAB_PREFIX, INSTRUCTION_KEY, LANGUAGES } from "../shared/constants.ts"
+import { CANVAS_TAB_PREFIX, INSTRUCTION_KEY, LANGUAGES, SKILL_ID } from "../shared/constants.ts"
 import { hintFor } from "../shared/hint.ts"
 import { parseOptions, type GenuiOptions } from "../shared/options.ts"
 import { createHostAdapter } from "./adapter.ts"
@@ -59,6 +65,10 @@ export interface GuiEnv {
   /** The host key of a canvas's tab, `${plugin}:canvas.<id>`. */
   tabKey(canvas: string): string
   openCanvas(session: SessionRef, canvas: string, tab?: "select" | "append"): void
+  /** The canvas the narrow-screen view shows for a session: the one last opened, if any. Reactive. */
+  mobileCanvas(session: SessionRef): string | undefined
+  /** Shows a canvas in the narrow-screen view (its picker). */
+  showMobileCanvas(session: SessionRef, canvas: string): void
   closeCanvas(session: SessionRef, canvas: string): void
   /** The user closed this canvas's tab in this window; auto-open leaves it closed. */
   markClosed(session: SessionRef, canvas: string): void
@@ -87,6 +97,44 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
   const closed = new Set<string>()
   const closedKey = (session: SessionRef, canvas: string) => `${session.key}\n${canvas}`
   const tabKey = (canvas: string) => `${ctx.id}:${CANVAS_TAB_PREFIX}${canvas}`
+  // Per session key: the canvas the narrow-screen view shows.
+  const [mobile, setMobile] = createSignal<ReadonlyMap<string, string>>(new Map())
+  const showMobile = (session: SessionRef, canvas: string) =>
+    setMobile((previous) =>
+      previous.get(session.key) === canvas ? previous : new Map(previous).set(session.key, canvas),
+    )
+
+  /**
+   * Before a UI sends a message: switches the session to the model the user picked in the composer, as the app's own
+   * send does (composer/submit.ts `applySelection`). The pick stays in the window until a prompt is sent, and only the
+   * routed session has the composer. Not while a revert is staged: the prompt commits it, which drops a switch made after
+   * its cut. Best effort: if anything fails, the message still goes, on the session's model. The plugin API does not
+   * expose the composer's agent, so the session's current agent answers.
+   */
+  async function applyComposerModel(session: SessionRef) {
+    try {
+      if (ctx.sessions.current()?.key !== session.key) return
+      const picked = ctx.screen.current()?.composer.model()
+      if (!picked) return
+      const info = session.server.data.session.get(session.id) as
+        | { model?: { id: string; providerID: string; variant?: string }; revert?: unknown }
+        | undefined
+      const stored = info?.model
+      if (info?.revert) return
+      if (stored?.id === picked.modelID && stored.providerID === picked.providerID && stored.variant === picked.variant)
+        return
+      await session.server.client.session.switchModel({
+        sessionID: session.id,
+        model: {
+          id: picked.modelID,
+          providerID: picked.providerID,
+          ...(picked.variant ? { variant: picked.variant } : {}),
+        },
+      })
+    } catch (error) {
+      console.warn("genui: could not switch to the composer's model", error)
+    }
+  }
 
   const env: GuiEnv = {
     ctx,
@@ -97,11 +145,18 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     tabKey,
     openCanvas(session, canvas, tab = "select") {
       closed.delete(closedKey(session, canvas))
-      ctx.layout.open(tabKey(canvas), session, { tab, background: true })
+      showMobile(session, canvas)
+      // On a narrow screen the side region is not shown: a canvas the user opens shows in the panel's narrow-screen
+      // view (an `open` selects it there); one opened quietly stays a tab for when the window is wide.
+      if (tab === "select" && ctx.layout.narrow()) ctx.layout.open(tabKey(canvas), session, { tab: "open" })
+      else ctx.layout.open(tabKey(canvas), session, { tab, background: true })
     },
+    mobileCanvas: (session) => mobile().get(session.key),
+    showMobileCanvas: showMobile,
     closeCanvas: (session, canvas) => ctx.layout.close(tabKey(canvas), session),
     markClosed: (session, canvas) => void closed.add(closedKey(session, canvas)),
     async sendPrompt(session, text) {
+      await applyComposerModel(session)
       await session.server.client.session.prompt({ sessionID: session.id, text })
     },
     insertPrompt(session, text) {
@@ -217,7 +272,8 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     createKeyed(
       target,
       (run) => {
-        void ensureInstructions(run.client, run.sessionID, INSTRUCTION_KEY, hintFor(options)).then((result) => {
+        const value = sessionHint(hintFor(options), SKILL_ID)
+        void ensureInstructions(run.client, run.sessionID, INSTRUCTION_KEY, value).then((result) => {
           if (result !== "failed" || warned || ctx.signal.aborted) return
           warned = true
           ctx.toast.show({

@@ -28,7 +28,7 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "bun scripts/build-skill.ts && vite build && bun scripts/check-bundle.ts",
+    "bundle": "bun scripts/build-skill.ts && vite build && bun scripts/check-bundle.ts",
     "dev": "vite build --watch",
     "playground": "vite --config playground/vite.config.ts",
     "playground:build": "vite build --config playground/vite.config.ts",
@@ -36,7 +36,7 @@
     "test": "bun test --conditions browser test/unit",
     "test:e2e": "playwright test",
     "format": "prettier --write .",
-    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
+    "prepublishOnly": "bun run typecheck && bun run test && bun run bundle"
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.3.0"

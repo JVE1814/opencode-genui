@@ -1,5 +1,5 @@
 // Writes skills/genui/SKILL.md, the `genui` skill the server part registers: frontmatter, then the agent's full UI
-// instructions (src/catalog/prompt.ts). The file is committed, since OpenCode installs plugins with scripts disabled.
+// instructions (src/catalog/prompt.ts). The file is committed, since nothing is built when OpenCode installs the plugin.
 //
 //   bun scripts/build-skill.ts           write the file
 //   bun scripts/build-skill.ts --check   exit 1 when the committed file is stale (CI)

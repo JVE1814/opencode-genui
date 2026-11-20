@@ -21,7 +21,7 @@ export const actionDefinitions = {
   },
   copyText: {
     params: z.object({ text: z.string(), label: z.string().optional() }),
-    description: "Copy text to the clipboard and confirm with a toast.",
+    description: 'Copy text to the clipboard and confirm with a toast ("<label> copied").',
   },
   showToast: {
     params: z.object({

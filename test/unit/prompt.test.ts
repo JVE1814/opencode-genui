@@ -131,7 +131,10 @@ describe("buildPrompt", () => {
     expect(prompt).toContain('{"canvas":"<id>","title":"..."}')
     expect(prompt).toContain('{"canvas":"<id>","close":true}')
     expect(prompt).toContain('{"id":"<stable-id>","title":"..."}')
-    expect(prompt).toMatch(/without \/root patches the canvas/)
+    expect(prompt).toContain("sets /root and adds that root element replaces the canvas")
+    expect(prompt).toContain("Any other block patches the canvas as it is")
+    // [review4 USE#2] A patch may switch /root to an element the canvas has; it keeps the canvas.
+    expect(prompt).toContain("Replacing /root with an element the canvas has switches the view")
     expect(prompt).toMatch(/compacted/)
   })
 

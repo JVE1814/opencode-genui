@@ -70,6 +70,116 @@ describe("safe pattern checks", () => {
     }
   })
 
+  // Valid JavaScript that was once refused with a wrong reason ("nothing to repeat", "backreferences are not
+  // supported"): a quantified group that holds only an assertion, and Annex B's legacy escapes.
+  const LEGACY: string[] = [
+    "(^)?a",
+    "(?:\\b)+a",
+    "($){1,3}",
+    "(?<g>\\B)+x",
+    "(?<g4>\\b)+",
+    "-+?(\\B)?",
+    "(?:^){2,} .",
+    "(^$)*x",
+    ".[^\\00\\[]",
+    "[^\\00^]b",
+    "^\\1$",
+    "^\\8$",
+    "^\\9+$",
+    "^\\12$",
+    "^\\123$",
+    "^\\400$",
+    "^\\477$",
+    "^\\0777$",
+    "^\\05$",
+    "^\\08$",
+    "^(a)\\10$",
+    "^(a)\\2$",
+    "^[\\1]$",
+    "^[\\8]$",
+    "^[\\18]+$",
+    "^[\\00]$",
+    "^[\\05]$",
+    "^[\\123]$",
+    "^\\k$",
+    "^\\k<a>$",
+    "^\\c1$",
+    "^\\c$",
+    "^[\\c1]$",
+    "^[\\c_]$",
+    "^[\\c*]+$",
+    "^\\cJ$",
+  ]
+  const POOL = [
+    "\x00",
+    "\x01",
+    "\x05",
+    "\x08",
+    "\n",
+    "\x11",
+    "\x1f",
+    "'",
+    "?",
+    "S",
+    "1",
+    "7",
+    "8",
+    "9",
+    "0",
+    "a",
+    "b",
+    "x",
+  ]
+  const MORE = [" ", "k", "<", ">", "c", "J", "\\", "*", "^", "[", "-", "_", "aa"]
+  const samples = (() => {
+    // Every string of up to two characters from POOL, a few longer ones, and a fixed pseudo-random batch.
+    const out = new Set<string>(["", ...POOL, ...MORE])
+    for (const a of POOL) for (const b of POOL) out.add(a + b)
+    for (const text of [
+      "a\x08",
+      "aa0",
+      "\x0a",
+      " 0",
+      "'7",
+      "?7",
+      "\x008",
+      "k<a>",
+      "\\c1",
+      "\\c",
+      "ba",
+      "ab",
+      "x ",
+      "a .",
+      "\x05b",
+    ])
+      out.add(text)
+    let seed = 7
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31)
+    const chars = [...POOL, ...MORE]
+    for (let index = 0; index < 300; index++) {
+      let text = ""
+      for (let length = next() % 5; length > 0; length--) text += chars[next() % chars.length]
+      out.add(text)
+    }
+    return [...out]
+  })()
+
+  test.each(LEGACY)("runs %s as RegExp does", (pattern) => {
+    const compiled = compilePattern(pattern)
+    expect(compiled).not.toBeTypeOf("string")
+    if (typeof compiled === "string") return
+    const regexp = new RegExp(pattern)
+    const wrong = samples.filter((value) => compiled.test(value) !== regexp.test(value))
+    expect(wrong.map((value) => JSON.stringify(value))).toEqual([])
+  })
+
+  test("a backreference is still refused, also to a later group, and \\k once the pattern has a named group", () => {
+    for (const pattern of ["(a)\\1", "\\1(a)", "(a)(b)\\2", "(?<n>a)\\k<n>", "(a)[\\1]\\1"])
+      expect([pattern, patternProblem(pattern)]).toEqual([pattern, "backreferences are not supported"])
+    // A bare quantified assertion is not valid JavaScript at all.
+    expect(patternProblem("\\b+")).toContain("not a valid regular expression")
+  })
+
   test("refuses what an automaton cannot run, and what is too big", () => {
     expect(patternProblem("(a)\\1")).toBe("backreferences are not supported")
     expect(patternProblem("(?<n>a)\\k<n>")).toBe("backreferences are not supported")

@@ -170,6 +170,16 @@ function toSurfaceEntry(value: unknown): SurfaceEntry | undefined {
   return { t: typeof value.t === "number" && Number.isFinite(value.t) ? value.t : 0, o }
 }
 
+/** Deletes the stored edits of every surface whose id `drop` accepts; the value itself when none goes. */
+export function deleteSurfaceOverrides(p: PersistedSession, drop: (surfaceId: string) => boolean): PersistedSession {
+  const surfaces = recordOf(p.surfaces)
+  const ids = Object.keys(surfaces).filter(drop)
+  if (ids.length === 0) return p
+  const next = { ...surfaces }
+  for (const id of ids) delete next[id]
+  return { ...p, v: 1, surfaces: next }
+}
+
 /** The user's persisted state edits for a surface, ready for `TrackedStore.loadOverrides`. */
 export function readSurfaceOverrides(p: PersistedSession | undefined, surfaceId: string): OverrideEntry[] {
   return toSurfaceEntry(parse(ownString(p?.surfaces, surfaceId)))?.o ?? []

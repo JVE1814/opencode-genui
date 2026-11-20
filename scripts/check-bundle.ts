@@ -8,12 +8,15 @@
  * 2. Size budget: the app reads and evaluates the bundle in every window and in the main process.
  * 3. Main-process smoke test: the app also evaluates the bundle in Electron's main process, where Solid and the other
  *    window-only modules are inert placeholders and `@opencode/plugin/gui` is the main SDK (which has no window
- *    registries). Evaluation must not throw, and the default export must be a `Plugin.define` with a window `setup`.
+ *    registries). Evaluation must not throw, with only the globals Node has (this script runs on Bun, which has more,
+ *    such as `self` and `Worker`), and the default export must pass the app's own check (scripts/bundle-definition.ts)
+ *    and have a window `setup`.
  *
  * Exits 1 with a message per problem.
  */
 import { readFileSync } from "node:fs"
 import path from "node:path"
+import { bundleDefinitionProblem, defaultExport } from "./bundle-definition.ts"
 
 // Copied from node_modules/@opencode/plugin/dist/gui/modules.js (@opencode/plugin 2.3.2), `pluginSharedModules` and
 // `pluginWindowModules`. Checked against the installed SDK below, so an SDK update that changes them is reported.
@@ -132,26 +135,69 @@ const mainRequire = (name: string): unknown => {
   throw new Error(`Plugin GUI bundle requires a module the app does not share: ${name}`)
 }
 
+/**
+ * Globals Bun defines that Node, and so Electron's main process, does not (compared with Node 22): code that reads one
+ * at module scope works here and throws in the app. They are hidden while the bundle evaluates. `Bun` itself cannot be
+ * deleted, so the evaluated code sees a parameter of that name instead.
+ */
+const BUN_ONLY_GLOBALS = [
+  "self",
+  "Worker",
+  "alert",
+  "confirm",
+  "prompt",
+  "addEventListener",
+  "removeEventListener",
+  "dispatchEvent",
+  "postMessage",
+  "onmessage",
+  "onerror",
+  "reportError",
+  "HTMLRewriter",
+  "BuildError",
+  "BuildMessage",
+  "ResolveError",
+  "ResolveMessage",
+  "CloseEvent",
+  "ErrorEvent",
+  "PerformanceTiming",
+  "PerformanceServerTiming",
+  "ShadowRealm",
+  "Temporal",
+  "URLPattern",
+  "Float16Array",
+  "DisposableStack",
+  "AsyncDisposableStack",
+  "SuppressedError",
+]
+
+function withNodeGlobals<T>(run: () => T): T {
+  const global = globalThis as Record<string, unknown>
+  const hidden: [string, PropertyDescriptor][] = []
+  for (const name of BUN_ONLY_GLOBALS) {
+    const descriptor = Object.getOwnPropertyDescriptor(global, name)
+    if (!descriptor?.configurable) continue
+    hidden.push([name, descriptor])
+    delete global[name]
+  }
+  try {
+    return run()
+  } finally {
+    for (const [name, descriptor] of hidden) Object.defineProperty(global, name, descriptor)
+  }
+}
+
 try {
   const module: { exports: Record<string, unknown> } = { exports: {} }
   // The bundle is this repository's own build output, evaluated exactly as the app evaluates it.
-  new Function("require", "module", "exports", code)(mainRequire, module, module.exports)
-  const plugin = (Object.hasOwn(module.exports, "default") ? module.exports.default : module.exports) as Record<
-    string,
-    unknown
-  >
-  if (typeof plugin !== "object" || plugin === null)
-    problems.push("the default export is not an object (expected `export default Plugin.define({ ... })`)")
-  else {
-    if (typeof plugin.setup !== "function") problems.push("the default export has no window `setup` function")
-    if (plugin.main !== undefined && typeof plugin.main !== "function") problems.push("`main` is not a function")
-    const i18n = plugin.i18n as Record<string, unknown> | undefined
-    if (i18n !== undefined && (typeof i18n !== "object" || typeof i18n.en !== "object"))
-      problems.push("`i18n` must be an object with an `en` catalog")
-    for (const [name, store] of Object.entries((plugin.stores ?? {}) as Record<string, Record<string, unknown>>))
-      if (store?.scope !== "global" && store?.scope !== "session")
-        problems.push(`store "${name}" is not a Store.global or Store.session declaration`)
-  }
+  withNodeGlobals(() =>
+    new Function("require", "module", "exports", "Bun", code)(mainRequire, module, module.exports, undefined),
+  )
+  const plugin = defaultExport(module.exports)
+  const problem = bundleDefinitionProblem(plugin)
+  if (problem) problems.push(problem)
+  else if (typeof (plugin as { setup?: unknown }).setup !== "function")
+    problems.push("the default export has no window `setup` function")
 } catch (error) {
   problems.push(
     `evaluating the bundle as the main process does threw: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
@@ -167,4 +213,6 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`  FAIL      ${problem}`)
   process.exit(1)
 }
-console.log("  ok        provided modules only, within budget, evaluates in the main process")
+console.log(
+  "  ok        provided modules only, within budget, evaluates in the main process and passes the app's check",
+)

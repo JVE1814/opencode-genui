@@ -119,21 +119,25 @@ export function hashText(text: string): string {
 }
 
 /**
- * Parses a block body: an optional header line, then one JSON patch per line. Blank lines are skipped. A body that is
- * one whole spec document (possibly spread over many lines) is accepted too. `partial: true` treats an unparsable last
- * line as still streaming instead of as an error.
+ * Parses a block body: an optional header (the first line that is not blank or a `//` comment), then one JSON patch per
+ * line. Blank lines are skipped. A body that is one whole spec document (possibly spread over many lines) is accepted
+ * too, after the header or without one. `partial: true` treats an unparsable last line as still streaming instead of as
+ * an error.
  */
 export function parseBlock(body: string, options: { partial?: boolean } = {}): ParsedBlock {
   const lines = body.split("\n").map((line) => line.trim())
   const patches: Patch[] = []
   const errors: LineError[] = []
   let header: SurfaceHeader = {}
-  let headerSeen = false
   let headerLine = -1
   let lastContent = -1
   lines.forEach((line, index) => {
     if (line) lastContent = index
   })
+  // The header can only be the first line that is not blank or a comment. Further down, an object without `op` is a
+  // line of something else: a member of a spec document written over several lines (an array item on its own line is
+  // valid JSON by itself), or a mistake.
+  const firstContent = lines.findIndex((line) => line !== "" && !line.startsWith("//"))
 
   lines.forEach((line, index) => {
     if (!line || line.startsWith("//")) return
@@ -154,9 +158,8 @@ export function parseBlock(body: string, options: { partial?: boolean } = {}): P
       patches.push(...specToPatches(value))
       return
     }
-    if (isRecord(value) && !("op" in value) && !headerSeen && patches.length === 0) {
+    if (isRecord(value) && !("op" in value) && index === firstContent) {
       header = toHeader(value)
-      headerSeen = true
       headerLine = index
       return
     }

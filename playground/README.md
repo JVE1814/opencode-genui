@@ -13,17 +13,17 @@ bun run test:e2e            # Playwright against the playground
 
 ## URL parameters
 
-| Parameter         | Effect                                                                                                     |
-| ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| `scenario=<name>` | Conversation to play: `empty` (default), `form`, `canvas`, `invalid`, `gallery`, `history`, `untrusted`.   |
-| `speed=<speed>`   | `instant` (tests), `fast`, `normal` (default), `slow`.                                                     |
-| `theme=dark`      | Start in dark mode (`data-color-scheme="dark"` on `<html>`). The header button toggles it.                 |
-| `plugin=stub`     | Load `playground/stub/gui.tsx`, a tiny plugin for testing the host itself, instead of `src/gui.tsx`.       |
-| `bundle=1`        | Load the **built** `dist/gui-experimental.cjs` (run `bun run build` first) through the app's require shim. |
-| `bundle=stub`     | Same, with the stub plugin built in memory by the same `gui()` preset.                                     |
-| `options=<json>`  | Plugin options, as in `opencode.json`, e.g. `options={"instructions":"always"}`.                           |
-| `window=<n>`      | How many of the newest messages the session store holds (default 20, like the app).                        |
-| `persist=0`       | Do not keep storage, the side strip and the transcript across reloads.                                     |
+| Parameter         | Effect                                                                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `scenario=<name>` | Conversation to play: `empty` (default), `form`, `canvas`, `invalid`, `gallery`, `history`, `untrusted`.              |
+| `speed=<speed>`   | `instant` (tests), `fast`, `normal` (default), `slow`.                                                                |
+| `theme=dark`      | Start in dark mode (`data-color-scheme="dark"` on `<html>`). The header button toggles it.                            |
+| `plugin=stub`     | Load `playground/stub/gui.tsx`, a tiny plugin for testing the host itself, instead of `src/gui.tsx`.                  |
+| `bundle=1`        | Load the **built** `dist/gui-experimental.cjs` (run `bun run bundle` first) through the app's require shim and check. |
+| `bundle=stub`     | Same, with the stub plugin built in memory by the same `gui()` preset.                                                |
+| `options=<json>`  | Plugin options, as in `opencode.json`, e.g. `options={"instructions":"always"}`.                                      |
+| `window=<n>`      | How many of the newest messages the session store holds (default 20, like the app).                                   |
+| `persist=0`       | Do not keep storage, the side strip and the transcript across reloads.                                                |
 
 By default the plugin loads from source (`src/gui.tsx`, with `@opencode/plugin/gui` aliased to `fake-sdk/`), so edits
 hot-reload. Storage, the side strip and the transcript are kept in `sessionStorage`: reloading the page is "restarting

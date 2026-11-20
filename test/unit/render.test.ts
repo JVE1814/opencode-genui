@@ -314,6 +314,136 @@ describe("rendering with json-render", () => {
     }
   })
 
+  test("the watch bound holds across remounts: a watch that hides and re-shows its own parent stops", async () => {
+    // Each round unmounts the watching element and mounts a fresh copy; validateForm wakes the copy again.
+    const loop = [
+      { action: "setState", params: { statePath: "/p", value: false } },
+      { action: "setState", params: { statePath: "/p", value: true } },
+      { action: "validateForm" },
+    ]
+    const spec: Spec = {
+      root: "box",
+      elements: {
+        box: { type: "Box", props: { title: "card" }, children: ["kick", "wrap"] },
+        kick: { type: "Kick", props: {}, children: [] },
+        wrap: { type: "Box", props: { title: "wrap" }, children: ["w"], visible: { $state: "/p" } },
+        w: {
+          type: "Field",
+          props: { label: "w", value: "" },
+          children: [],
+          watch: { "/q": loop, "/formValidation": loop },
+        },
+      },
+    }
+    let set: ((path: string, value: unknown) => void) | undefined
+    const Kick: ElementImpl = () => {
+      set = useStateStore().set
+      return "kick" as never
+    }
+    const warn = console.warn
+    const warnings: string[] = []
+    console.warn = (...args: unknown[]) => void warnings.push(String(args[0]))
+    try {
+      const view = render(() => spec, { p: true, q: "" }, { Box, Field, Kick })
+      set!("/q", "a")
+      // With a bound per element mount, every round started a fresh count and this timer never fired.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      const mounts = count(view.mounts).Field ?? 0
+      expect(mounts).toBeGreaterThan(10)
+      expect(mounts).toBeLessThanOrEqual(64 + 2)
+      expect(warnings.some((warning) => warning.includes("Skipped the watch"))).toBe(true)
+      view.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
+
+  test("the watch bound holds for watches that add watches: rows that each add a watching row stop", async () => {
+    // Every run adds a row whose watch also wakes on the next validateForm, so the runs per round double.
+    const spec: Spec = {
+      root: "box",
+      elements: {
+        box: { type: "Box", props: { title: "rows" }, children: ["kick", "list"] },
+        kick: { type: "Kick", props: {}, children: [] },
+        list: { type: "Box", props: { title: "list" }, children: ["row"], repeat: { statePath: "/rows" } },
+        row: {
+          type: "Field",
+          props: { label: "r", value: "" },
+          children: [],
+          watch: {
+            "/formValidation": [
+              { action: "pushState", params: { statePath: "/rows", value: 0 } },
+              { action: "validateForm" },
+            ],
+          },
+        },
+      },
+    }
+    let set: ((path: string, value: unknown) => void) | undefined
+    const Kick: ElementImpl = () => {
+      set = useStateStore().set
+      return "kick" as never
+    }
+    const warn = console.warn
+    console.warn = () => {}
+    try {
+      const view = render(() => spec, { rows: [0] }, { Box, Field, Kick })
+      set!("/formValidation", { valid: true })
+      // With a bound per watch (or per change), the rows doubled every round and this timer never fired.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      const rows = (view.store.get("/rows") as unknown[]).length
+      expect(rows).toBeGreaterThan(10)
+      expect(rows).toBeLessThanOrEqual(1 + 64)
+      view.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
+
+  test("the watch bound is per surface and per task: other surfaces and the next change run as usual", async () => {
+    // Each row's watch appends to /log when /filter changes. One change wakes a hundred watches: 64 run (a reaction in
+    // every row belongs in its props, as $state or $item expressions), and the next change, a task later, runs 64 more.
+    const spec: Spec = {
+      root: "box",
+      elements: {
+        box: { type: "Box", props: { title: "rows" }, children: ["kick", "list"] },
+        kick: { type: "Kick", props: {}, children: [] },
+        list: { type: "Box", props: { title: "list" }, children: ["row"], repeat: { statePath: "/rows" } },
+        row: {
+          type: "Field",
+          props: { label: "r", value: { $item: "" } },
+          children: [],
+          watch: { "/filter": { action: "pushState", params: { statePath: "/log", value: { $item: "" } } } },
+        },
+      },
+    }
+    const setters: ((path: string, value: unknown) => void)[] = []
+    const Kick: ElementImpl = () => {
+      setters.push(useStateStore().set)
+      return "kick" as never
+    }
+    const warn = console.warn
+    console.warn = () => {}
+    try {
+      const rows = Array.from({ length: 100 }, (_, index) => index)
+      const first = render(() => spec, { rows, filter: "", log: [] }, { Box, Field, Kick })
+      const second = render(() => spec, { rows: rows.slice(0, 3), filter: "", log: [] }, { Box, Field, Kick })
+      setters[0]!("/filter", "x")
+      // In the same task, the other surface's watches still run.
+      setters[1]!("/filter", "x")
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect((first.store.get("/log") as unknown[]).length).toBe(64)
+      expect((second.store.get("/log") as unknown[]).length).toBe(3)
+      setters[0]!("/filter", "y")
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect((first.store.get("/log") as unknown[]).length).toBe(128)
+      first.dispose()
+      second.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
+
   test("a prop or condition that throws leaves its parent and siblings rendered", async () => {
     const { standardDirectives } = await import("@json-render/directives")
     const spec: Spec = {

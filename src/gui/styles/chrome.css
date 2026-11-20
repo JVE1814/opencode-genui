@@ -320,6 +320,12 @@
   white-space: nowrap;
 }
 
+[data-genui][data-gu-chrome="canvas"] > [data-slot="header"] > [data-slot="picker"] {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 [data-genui][data-gu-chrome="canvas"] > [data-slot="header"] > [data-slot="status"] {
   display: inline-flex;
   flex: none;
@@ -427,9 +433,17 @@
 /* ── Host-markup exception 1: the app's raw code block while a spec streams ─────────────────────────────────────── */
 
 /* Until its fence closes, the app shows a spec or canvas block as highlighted JSONL. Keep it short and faded, so a
-   long spec does not push the conversation around before the UI replaces it. If the app's markup changes, the block
-   simply shows at full height. */
-[data-component="markdown-code"]:is([data-language="spec" i], [data-language="canvas" i]):not([data-code-content])
+   long spec does not push the conversation around before the UI replaces it. Only a block the app marks as still being
+   written (data-markdown-complete="false" on the block's parent), never finished code (genui's own Code component, a
+   block genui declines to render), and not while the pointer or focus is on it: a reply cut off mid-block never
+   completes. If the app's markup changes, the block simply shows at full height. */
+[data-markdown-complete="false"]
+  > [data-component="markdown-code"]:is([data-language="spec" i], [data-language="canvas" i]):not(
+    [data-code-content],
+    :hover,
+    :focus-within,
+    [data-genui] *
+  )
   > pre {
   max-height: 128px;
   overflow: hidden;

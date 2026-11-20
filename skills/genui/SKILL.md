@@ -5,7 +5,7 @@ description: "Full reference for showing interactive UI in the OpenCode desktop 
 
 # Interactive UI in OpenCode
 
-You are running in the OpenCode desktop app. Besides text, you can show interactive UI: you write a json-render spec (JSONL lines of RFC 6902 JSON Patch) in a fenced block of your reply, and the app renders it with its own components and theme. This skill covers how UI works in OpenCode, then the spec format, the components and the actions.
+You are running in the OpenCode desktop app. Besides text, you can show interactive UI: you write a json-render spec (JSONL lines of RFC 6902 JSON Patch) in a fenced block of your reply, and the app renders it with its own components and theme.
 
 ## When to use UI
 
@@ -23,8 +23,8 @@ Use UI when the user would rather click or scan than read: collecting input (for
 A canvas is a sidebar tab, about 360px wide, that stays open across turns: use it for dashboards, status boards, checklists, plans or previews that you keep updating while you work.
 
 - The first line is the header: {"canvas":"<id>","title":"..."}, with a short lowercase id ("main" when omitted).
-- A block that sets /root replaces the canvas: a new UI with fresh state.
-- A block without /root patches the canvas as it is, with RFC 6902 ops (add, replace, remove, move, copy) on /elements/<key>, /elements/<key>/props/<prop>, /state/... or /root.
+- A block that sets /root and adds that root element replaces the canvas: a new UI with fresh state.
+- Any other block patches the canvas as it is, with RFC 6902 ops (add, replace, remove, move, copy) on /elements/<key>, /elements/<key>/props/<prop> and /state/.... Replacing /root with an element the canvas has switches the view, keeping the state and what the user entered.
 - {"canvas":"<id>","close":true} on its own removes the canvas.
 - The canvas renders while the block streams, so write /root and the layout first and the data after.
 - Several canvases can exist, one tab each; give each its own id.
@@ -55,7 +55,7 @@ The rest of this skill describes the patch lines. They are the same in both fenc
 
 Inputs keep what the user enters. Bind each input you want back to a state path you choose ({"$bindState":"/form/email"}), then send it with sendPrompt.
 
-- sendPrompt { text, data? } sends a user message that you then answer as usual: the text, a blank line, then the data as a fenced json block (pretty-printed, cut off after about 16,000 characters). Write text as the user's own words for what they did; data is usually {"$state":"/form"}. A button with params {"text":"Deploy with these settings","data":{"$state":"/form"}} sends:
+- sendPrompt { text, data? } sends a user message that you then answer as usual: the text (cut after about 4,000 characters when there is data), a blank line, then the data as the last fenced json block (pretty-printed, cut after about 16,000 characters); a cut ends in "... (truncated)". Write text as the user's own words for what they did; data is usually {"$state":"/form"}. A button with params {"text":"Deploy with these settings","data":{"$state":"/form"}} sends:
 
   Deploy with these settings
 
@@ -67,10 +67,12 @@ Inputs keep what the user enters. Bind each input you want back to a state path 
   ```
 
 - insertPrompt { text } puts text in the message box for the user to edit and send.
-- openLink { url } opens an http(s) or mailto URL. copyText { text, label? } copies to the clipboard. showToast { title, description?, variant? } shows a notification. openCanvas { canvas } shows a canvas tab.
+- openLink { url } opens an http(s) or mailto URL. copyText { text, label? } copies to the clipboard. showToast { title, description?, variant? } shows a notification; variant is "default", "success" or "error". openCanvas { canvas } shows a canvas tab.
 - sendPrompt, insertPrompt, openLink and copyText leave the UI, so they run only when the user activates a control: on.press of Button or Link, on.select of DropdownMenu or Table, on.submit of Input or on.change of Select, Radio, Checkbox, Switch, Toggle, ToggleGroup, ButtonGroup, Pagination or Tabs. Bound anywhere else (watch, on.focus, on.blur, a Slider's on.change) they never run. One activation runs at most 3 of them, in order (say, copyText then openLink); the next activation in the same UI must come at least 1 s later. The app may ask the user to confirm first, showing exactly what will be sent, opened or copied.
+- Arrow keys in Radio and Tabs move the choice without sending it; Space, Enter or a click sends it. A choice the user should look over first is best sent from a Button.
 - "confirm" on an action binding asks the user first, e.g. {"action":"sendPrompt","params":{"text":"Delete the branch"},"confirm":{"title":"Delete branch?","message":"This cannot be undone.","variant":"danger"}}. It works for the custom actions only, not for setState, pushState, removeState or validateForm, and never in watch, on.focus or on.blur.
-- onSuccess runs after an action succeeded and onError after it failed. When the user declines a confirm or the app refuses the action, neither runs and the rest of the bound actions stop. Write each onSuccess/onError out as { "action": ..., "params": {...} } or { "set": {...} }: one written as an expression, or read from state, is ignored.
+- onSuccess runs after a custom action succeeded and onError after it failed. When the user declines a confirm or the app refuses the action, neither runs and the rest of the bound actions stop. Write each onSuccess/onError out as { "action": ..., "params": {...} } or { "set": {...} }: one written as an expression, or read from state, is ignored.
+- setState, pushState, removeState and validateForm run neither: to do something after one, list it next in an array ("press":[{"action":"setState",...},{"action":"showToast",...}]).
 - Use setState, pushState and removeState for changes within the UI (tabs, toggles, list edits); they need no round trip to you.
 
 ## Design
@@ -79,6 +81,7 @@ The UI always takes the app's design and follows the user's theme and light or d
 
 - Keep it compact. Prefer Card, Stack and Grid for layout, Card titles or Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
+- Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.
 
 # Spec format and catalog (json-render)
@@ -117,7 +120,7 @@ Stream state progressively - output one patch per array item instead of one gian
   For scalars: {"op":"add","path":"/state/newTodoText","value":""}
   Initialize the array first if needed: {"op":"add","path":"/state/posts","value":[]}
 When content comes from the state model, use { "$state": "/some/path" } dynamic props to display it instead of hardcoding the same value in both state and props. The state model is the single source of truth.
-Include realistic sample data in state. For blogs: 3-4 posts with titles, excerpts, authors, dates. For product lists: 3-5 items with names, prices, descriptions. Never leave arrays empty.
+Include realistic data in state, taken from the task at hand. Never leave arrays empty.
 
 DYNAMIC LISTS (repeat field):
 Any element can have a top-level "repeat" field to render its children once per item in a state array: { "repeat": { "statePath": "/arrayPath", "key": "id" } }.
@@ -133,7 +136,7 @@ Use action "pushState" to append items to arrays. Params: { statePath: "/arrayPa
 Values inside pushState can contain { "$state": "/statePath" } references to read current state (e.g. the text from an input field).
 Use "$id" inside a pushState value to auto-generate a unique ID.
 Example: on: { "press": { "action": "pushState", "params": { "statePath": "/todos", "value": { "id": "$id", "title": { "$state": "/newTodoText" }, "completed": false }, "clearStatePath": "/newTodoText" } } }
-Use action "removeState" to remove items from arrays by index. Params: { statePath: "/arrayPath", index: N }. Inside a repeated element's children, use { "$index": true } for the current item index. Action params support the same expressions as props: { "$item": "field" } resolves to the absolute state path for built-ins (to the field's value for sendPrompt and the other custom actions), { "$index": true } resolves to the index number, and { "$state": "/path" } reads a value from state.
+Use action "removeState" to remove items from arrays by index. Params: { statePath: "/arrayPath", index: N }. Inside a repeated element's children, use { "$index": true } for the current item index. Action params support the same expressions as props: { "$item": "field" } resolves to the absolute state path for built-ins bound directly (to the field's value for sendPrompt and the other custom actions, and anywhere in an onSuccess/onError chain), { "$index": true } resolves to the index number, and { "$state": "/path" } reads a value from state.
 For lists where users can add/remove items (todos, carts, etc.), use pushState and removeState instead of hardcoding with setState.
 
 IMPORTANT: State paths use RFC 6901 JSON Pointer syntax (e.g. "/todos/0/title"). Do NOT use JavaScript-style dot notation (e.g. "/todos.length" is WRONG). To generate unique IDs for new items, use "$id" instead of trying to read array length.
@@ -192,7 +195,7 @@ AVAILABLE ACTIONS:
 - sendPrompt: Send a message to you (the agent) as the user, e.g. from a submit button. text says what the user did; data carries the values, usually { "$state": "/form" }. You receive it as the user's next message.
 - insertPrompt: Put text in the user's message box for them to edit and send, without sending it.
 - openLink: Open an http(s) or mailto URL in the user's browser.
-- copyText: Copy text to the clipboard and confirm with a toast.
+- copyText: Copy text to the clipboard and confirm with a toast ("<label> copied").
 - showToast: Show a short notification.
 - openCanvas: Open (focus) a sidebar canvas by id.
 
@@ -308,10 +311,8 @@ RULES:
 13. CRITICAL: The "on" field goes on the ELEMENT object, NOT inside "props". Use on.press, on.change, on.submit etc. NEVER put action/actionParams inside props.
 14. When the user asks for a UI that displays data (e.g. blog posts, products, users), ALWAYS include a state field with realistic sample data. The state field is a top-level field on the spec (sibling of root/elements).
 15. When building repeating content backed by a state array (e.g. posts, products, items), use the "repeat" field on a container element. Example: { "type": "<ContainerComponent>", "props": {}, "repeat": { "statePath": "/posts", "key": "id" }, "children": ["post-card"] }. For a nested list stored on the enclosing item, use "repeat": { "statePath": { "$item": "comments" }, "key": "id" }. The $item statePath form is valid only inside another repeat. Replace <ContainerComponent> with an appropriate component from the AVAILABLE COMPONENTS list. Inside repeated children, use { "$item": "field" } to read a field from the current item, and { "$index": true } for the current array index. For two-way binding to an item field use { "$bindItem": "completed" }. Do NOT hardcode individual elements for each array item.
-16. Design with visual hierarchy: use container components to group content, heading components for section titles, proper spacing, and status indicators. ONLY use components from the AVAILABLE COMPONENTS list.
-17. For data-rich UIs, use multi-column layout components if available. For forms and single-column content, use vertical layout components. ONLY use components from the AVAILABLE COMPONENTS list.
-18. Always include realistic, professional-looking sample data. For blogs include 3-4 posts with varied titles, authors, dates, categories. For products include names, prices, images. Never leave data empty.
-19. There are no color, style or className props: the app's theme styles every component.
-20. Bind every input you need back to a state path of your own with $bindState, and send it with sendPrompt from a button.
-21. sendPrompt, insertPrompt, openLink and copyText run only when the user activates a control, never from watch, on.focus or on.blur.
-22. Never put secrets in a spec.
+16. Design with visual hierarchy: use container components to group content, heading components for section titles, proper spacing, and status indicators.
+17. For data-rich UIs, use multi-column layout components if available. For forms and single-column content, use vertical layout components.
+18. Always include realistic data, taken from the task at hand. Never leave data empty.
+19. Bind every input you need back to a state path of your own with $bindState, and send it with sendPrompt from a button.
+20. sendPrompt, insertPrompt, openLink and copyText run only when the user activates a control, never from watch, on.focus or on.blur.

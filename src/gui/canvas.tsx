@@ -10,8 +10,17 @@ import {
   untrack,
   type JSX,
 } from "solid-js"
-import type { MountedSession, Panel, PanelTab, SessionRef, UiMenuEntry } from "@opencode/plugin/gui"
+import {
+  usePanel,
+  type MountedSession,
+  type Panel,
+  type PanelTab,
+  type SessionRef,
+  type UiMenuEntry,
+  type UiSelectOption,
+} from "@opencode/plugin/gui"
 import { compileSpec } from "../protocol/compile.ts"
+import { compareRefs } from "../protocol/fold.ts"
 import { writeSurfaceOverrides } from "../runtime/snapshot.ts"
 import { getSurface, surfaceKey, type SurfaceRuntime } from "../runtime/surfaces.ts"
 import { CANVAS_TAB_PREFIX } from "../shared/constants.ts"
@@ -73,6 +82,8 @@ export function canvasPanel(env: GuiEnv): Panel {
   return {
     id: "canvas",
     region: "side",
+    // Narrow windows show no side region: the session's canvases are a view of their own there, in the More menu.
+    mobile: { title: env.ctx.t("menu.canvas"), order: 60, kind: "menu", icon: "layout-right" },
     // The host computes every plugin's panel list in one memo, so this reads only cheap, equality-guarded selectors
     // (booleans and the removed set), never the canvas states that change on every streaming update.
     list(input) {
@@ -97,7 +108,7 @@ export function canvasPanel(env: GuiEnv): Panel {
       if (cache) for (const key of cache.keys()) if (!keep.has(key)) cache.delete(key)
       return listed
     },
-    render: (props) => <CanvasView env={env} tabId={() => props.tab.id} session={() => props.session} />,
+    render: (props) => <PanelView env={env} tabId={() => props.tab.id} session={() => props.session} />,
     close(input) {
       env.markClosed(input.session, canvasOfTab(input.tab.id))
     },
@@ -119,11 +130,86 @@ function TabLabel(props: { readonly env: GuiEnv; readonly title: () => string; r
   )
 }
 
+/** Where the panel renders: the side region (one canvas per tab), or the narrow-screen view of all of them. */
+function placement(): () => "side" | "mobile" {
+  try {
+    return usePanel().placement
+  } catch {
+    return () => "side"
+  }
+}
+
+function PanelView(props: {
+  readonly env: GuiEnv
+  readonly tabId: () => string
+  readonly session: () => MountedSession
+}): JSX.Element {
+  const where = placement()
+  return (
+    <Show when={where() === "mobile"} fallback={<CanvasView {...props} />}>
+      <MobileCanvases env={props.env} session={props.session} />
+    </Show>
+  )
+}
+
+/**
+ * The narrow-screen view: the canvas the user last opened in this session (else the one the agent updated last), with
+ * a picker in its header when the session has more than one.
+ */
+function MobileCanvases(props: { readonly env: GuiEnv; readonly session: () => MountedSession }): JSX.Element {
+  const { env } = props
+  const { host } = env
+  const entry = createMemo(() => env.sessions.get(props.session()))
+  const ids = () => entry().index.canvasIds()
+  const latest = createMemo(() => {
+    const states = entry().index.canvases()
+    if (states.length === 0) return undefined
+    return states.reduce((a, b) => (compareRefs(a.last, b.last) >= 0 ? a : b)).id
+  })
+  const shown = createMemo(() => {
+    const wanted = env.mobileCanvas(props.session())
+    return wanted !== undefined && ids().includes(wanted) ? wanted : latest()
+  })
+  const choices = () =>
+    ids().length > 1 ? ids().map((id): UiSelectOption => ({ value: id, label: entry().title(id) ?? id })) : undefined
+  return (
+    <Show
+      when={shown()}
+      fallback={
+        <div data-genui="" data-gu-chrome="canvas">
+          <div data-slot="body">
+            <div data-gu-chrome="notice">
+              <span data-slot="icon">
+                <env.ctx.ui.Icon name="layout-right" size="large" />
+              </span>
+              <div data-slot="title">{host.t("none.title")}</div>
+              <p data-slot="body">{host.t("none.description")}</p>
+            </div>
+          </div>
+        </div>
+      }
+    >
+      {(canvas) => (
+        <CanvasView
+          env={env}
+          tabId={() => `${CANVAS_TAB_PREFIX}${canvas()}`}
+          session={props.session}
+          choices={choices}
+          onChoose={(id) => env.showMobileCanvas(props.session(), id)}
+        />
+      )}
+    </Show>
+  )
+}
+
 /** One canvas in the side panel: a slim header with its title, live state and menu, and the canvas itself. */
 function CanvasView(props: {
   readonly env: GuiEnv
   readonly tabId: () => string
   readonly session: () => MountedSession
+  /** The canvases to pick from in the header instead of the title (the narrow-screen view). */
+  readonly choices?: () => readonly UiSelectOption[] | undefined
+  readonly onChoose?: (canvas: string) => void
 }): JSX.Element {
   const { env } = props
   const { host, ctx } = env
@@ -251,9 +337,26 @@ function CanvasView(props: {
     <HostContext.Provider value={host}>
       <div data-genui="" data-gu-chrome="canvas" data-canvas={canvas()}>
         <header data-slot="header">
-          <span data-slot="title" title={title()}>
-            {title()}
-          </span>
+          <Show
+            when={props.choices?.()}
+            fallback={
+              <span data-slot="title" title={title()}>
+                {title()}
+              </span>
+            }
+          >
+            {(choices) => (
+              <span data-slot="picker">
+                <ui.Select
+                  label={host.t("pick.title")}
+                  options={choices()}
+                  value={canvas()}
+                  placement="bottom-start"
+                  onChange={(id) => props.onChoose?.(id)}
+                />
+              </span>
+            )}
+          </Show>
           <Show when={streaming()}>
             <span data-slot="status" role="status">
               <span data-gu-live="" />
@@ -386,5 +489,6 @@ function resetOnNewGeneration(
   runtime.generation = generation
   if (previous === undefined || previous === generation) return
   runtime.store.reset()
+  runtime.memory.clear()
   writeStore(env.store(session), (value) => writeSurfaceOverrides(value, surfaceEntry("canvas", canvas, previous), []))
 }

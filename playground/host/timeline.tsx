@@ -221,54 +221,62 @@ export function CodeBlockView(props: { readonly app: App; readonly block: () => 
   })
 
   return (
+    // The app wraps each code block in a display: contents holder that says whether the block is still being written
+    // (session-ui markdown.tsx renderCode); genui's streaming clamp keys on it.
     <div
-      ref={wrapper}
-      data-component="markdown-code"
-      data-language={props.block().language || undefined}
-      data-code-content={content() ? "" : undefined}
-      data-playground-code={
-        !props.block().closed
-          ? "streaming"
-          : content()
-            ? "content"
-            : failed() && failed() === mount()
-              ? "failed"
-              : "code"
-      }
+      data-markdown-block=""
+      data-markdown-complete={props.block().closed ? "true" : "false"}
+      style={{ display: "contents" }}
     >
-      <pre>
-        <code>{props.block().body}</code>
-      </pre>
-      <div data-slot="markdown-code-toolbar">
-        <div data-slot="markdown-code-actions">
-          <For each={blockActions()}>
-            {(item) => (
-              <button
-                type="button"
-                data-component="icon-button-v2"
-                data-size="normal"
-                data-variant="ghost-muted"
-                aria-label={item.value.title}
-                title={item.value.title}
-                onClick={() => {
-                  const block = untrack(props.block)
-                  void Promise.try(() =>
-                    item.value.run({
-                      code: block.body,
-                      language: block.language,
-                      get session() {
-                        return app.sessions.current()
-                      },
-                    }),
-                  ).catch((error: unknown) => app.fail(item.plugin, `CodeBlockAction ${item.value.id}`, error))
-                }}
-              >
-                <Icon name={item.value.icon} />
-              </button>
-            )}
-          </For>
+      <div
+        ref={wrapper}
+        data-component="markdown-code"
+        data-language={props.block().language || undefined}
+        data-code-content={content() ? "" : undefined}
+        data-playground-code={
+          !props.block().closed
+            ? "streaming"
+            : content()
+              ? "content"
+              : failed() && failed() === mount()
+                ? "failed"
+                : "code"
+        }
+      >
+        <pre>
+          <code>{props.block().body}</code>
+        </pre>
+        <div data-slot="markdown-code-toolbar">
+          <div data-slot="markdown-code-actions">
+            <For each={blockActions()}>
+              {(item) => (
+                <button
+                  type="button"
+                  data-component="icon-button-v2"
+                  data-size="normal"
+                  data-variant="ghost-muted"
+                  aria-label={item.value.title}
+                  title={item.value.title}
+                  onClick={() => {
+                    const block = untrack(props.block)
+                    void Promise.try(() =>
+                      item.value.run({
+                        code: block.body,
+                        language: block.language,
+                        get session() {
+                          return app.sessions.current()
+                        },
+                      }),
+                    ).catch((error: unknown) => app.fail(item.plugin, `CodeBlockAction ${item.value.id}`, error))
+                  }}
+                >
+                  <Icon name={item.value.icon} />
+                </button>
+              )}
+            </For>
+          </div>
+          <CopyButton text={() => props.block().body} />
         </div>
-        <CopyButton text={() => props.block().body} />
       </div>
     </div>
   )
