@@ -833,6 +833,41 @@ test.describe("blocks from tool output", () => {
     expect(await dialog.evaluate((node) => node.matches(":modal"))).toBe(true)
     await expect(dialog).toContainText("From tool output")
   })
+
+  test("a refused modal open does not wake a watch that opens it again, so nothing loops [review4-security#1]", async ({
+    page,
+  }) => {
+    await boot(page, "scenario=empty&speed=instant&persist=0")
+    // The watch writes the open state back after an awaited action: with the refusal written through json-render, each
+    // round ran the watch again in a microtask, and the window froze as soon as the block rendered.
+    await toolOutput(
+      page,
+      block("spec", { id: "loop" }, [
+        root("box"),
+        element("box", "Stack", {}, ["dialog", "count"], {
+          watch: {
+            "/open": [
+              { action: "validateForm" },
+              { action: "pushState", params: { statePath: "/runs", value: 1 } },
+              { action: "setState", params: { statePath: "/open", value: true } },
+            ],
+          },
+        }),
+        element("dialog", "Dialog", { title: "Session expired", openPath: "/open" }, []),
+        element("count", "Text", { text: { $concat: ["Watch runs: ", { $count: { $state: "/runs" } }] } }),
+        state("/open", true),
+        state("/runs", []),
+      ]),
+    )
+    const surface = untrustedSurfaces(page)
+    await expect(surface.locator('dialog[data-gu="dialog"]')).toHaveJSProperty("open", false)
+    // The page answers right away, and the watch never ran: the refusal is genui's own write.
+    const started = Date.now()
+    expect(await page.evaluate(() => 1 + 1)).toBe(2)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(await surface.locator('[data-gu="dialog"]').evaluate((node) => node.isConnected)).toBe(true)
+    await expect(surface.getByText("Watch runs:")).toHaveText("Watch runs: 0")
+  })
 })
 
 test.describe("outward actions and validation", () => {

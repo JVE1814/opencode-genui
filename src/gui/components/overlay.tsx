@@ -8,10 +8,11 @@ import {
   onCleanup,
   onMount,
   Show,
+  useContext,
   type JSX,
 } from "solid-js"
 import { useStateBinding } from "@json-render/solid"
-import { useHost, useSurface } from "../host.ts"
+import { QuietWriteContext, useHost, useSurface } from "../host.ts"
 import { hasIntent } from "../outward.ts"
 import { MarkdownText } from "./content.tsx"
 import { GuardedImage, statePath } from "./data.tsx"
@@ -52,7 +53,8 @@ interface ModalContext {
  * an activation of one of its controls (a press, a pick, Enter in a field, a choice; see `withIntent` in
  * src/gui/outward.ts): never from the spec's initial state, a watch, focus or blur (tabbing through a field), since a
  * model-written modal over the whole window is a phishing tool. An open it refuses writes false back, so the user's own
- * press can open it later. The modal then says where it comes from.
+ * press can open it later; that write bypasses the surface's watches (a watch that wrote true again would otherwise
+ * loop with the refusal, see QuietWriteContext). The modal then says where it comes from.
  */
 function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
   const host = useHost()
@@ -74,6 +76,12 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
     const current = binding()
     if (current && (current[0]() === true) !== value) current[1](value)
   }
+  const quiet = useContext(QuietWriteContext)
+  const refuse = () => {
+    const target = path()
+    if (quiet && target) quiet(target, false)
+    else setOpen(false)
+  }
 
   let dialog: HTMLDialogElement | undefined
   let disposed = false
@@ -92,7 +100,7 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
       return
     }
     if (untrusted && !hasIntent(surface)) {
-      setOpen(false)
+      refuse()
       return
     }
     try {

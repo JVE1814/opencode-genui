@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c67fbd53af 100644
+index 7ddfd3c5374c35e09edb649c90805d303245f780..1ef4ddc403be3d5d43b389a54c0f7f62afb361ec 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -715,9 +715,15 @@ function RepeatScopeProvider(props) {
@@ -21,7 +21,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c6
        };
      },
      get children() {
-@@ -842,6 +848,23 @@ function useDevtoolsActive() {
+@@ -842,6 +848,46 @@ function useDevtoolsActive() {
    (0, import_solid_js6.onCleanup)(unsub);
    return active;
  }
@@ -42,10 +42,33 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c6
 +    return resolved;
 +  }
 +}
++// opencode-genui patch: watch runs are bounded. A watch whose actions write the state it (or another watch) watches
++// runs again on its own write; with an awaited action in between, each round passes through a microtask, so the loop
++// never yields to the event loop and the window freezes. A provider runs at most WATCH_RUNS_PER_TASK watches before the
++// event loop gets a turn; the rest are skipped, which ends such a loop. User input arrives in tasks of its own.
++var WATCH_RUNS_PER_TASK = 64;
++var watchRuns = /* @__PURE__ */ new WeakMap();
++function takeWatchRun(store, path) {
++  let budget = watchRuns.get(store);
++  if (!budget) {
++    budget = { runs: 0, warned: false };
++    watchRuns.set(store, budget);
++    setTimeout(() => watchRuns.delete(store), 0);
++  }
++  if (budget.runs >= WATCH_RUNS_PER_TASK) {
++    if (!budget.warned) {
++      budget.warned = true;
++      console.warn(`[json-render] Skipped the watch on "${path}": ${WATCH_RUNS_PER_TASK} watch runs without a break (a watch that triggers itself).`);
++    }
++    return false;
++  }
++  budget.runs++;
++  return true;
++}
  function ElementRenderer(props) {
    const repeatScope = useRepeatScope();
    const {
-@@ -875,7 +898,17 @@ function ElementRenderer(props) {
+@@ -875,7 +921,17 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -64,7 +87,15 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c6
    const emit = async (eventName) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
-@@ -959,11 +992,15 @@ function ElementRenderer(props) {
+@@ -931,6 +987,7 @@ function ElementRenderer(props) {
+           if (!changedPaths.has(path)) continue;
+           const binding = watchConfig[path];
+           if (!binding) continue;
++          if (!takeWatchRun(stateStore, path)) continue;
+           const bindings = Array.isArray(binding) ? binding : [binding];
+           for (const b of bindings) {
+             if (!b.params) {
+@@ -959,11 +1016,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = (0, import_solid_js6.createMemo)(() => {
      const rawProps = props.element.props;
@@ -82,16 +113,17 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c6
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -1111,6 +1148,60 @@ function ElementRendererContent(props) {
+@@ -1111,6 +1172,70 @@ function ElementRendererContent(props) {
      }
    });
  }
 +// opencode-genui patch (patches/): repeat rows keep their identity across updates instead of being keyed by item
 +// identity (upstream re-created a row, and its inputs, which lost focus, on every write to the item, since each write
 +// replaces the item object), and the repeat scope reads its item, index and base path live. Each new item takes the id
-+// of an unused previous row: the same item (a removal or reorder that kept the others), else the row with the same
-+// `repeat.key` value (the agent re-sent the list), else the row at the same index (the item was edited in place, its
-+// key field included), else a new id.
++// of an unused previous row: the row at its index when that row held the very same item (equal primitives and shared
++// objects keep their rows), else the nearest row with the same item (a removal or reorder that kept the others), else
++// the row with the same `repeat.key` value (the agent re-sent the list), else the row at the same index (the item was
++// edited in place, its key field included), else a new id.
 +function createRowIds() {
 +  let previousItems = [];
 +  let previousIds = [];
@@ -108,8 +140,17 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c6
 +      else byItem.set(item, [i]);
 +    });
 +    items.forEach((item, i) => {
-+      const at = byItem.get(item);
-+      const j = at?.find((index) => !used.has(index));
++      if (i < previousItems.length && Object.is(previousItems[i], item)) {
++        ids[i] = previousIds[i];
++        used.add(i);
++      }
++    });
++    items.forEach((item, i) => {
++      if (ids[i] !== void 0) return;
++      let j;
++      for (const index of byItem.get(item) ?? []) {
++        if (!used.has(index) && (j === void 0 || Math.abs(index - i) < Math.abs(j - i))) j = index;
++      }
 +      if (j !== void 0) {
 +        ids[i] = previousIds[j];
 +        used.add(j);
@@ -143,7 +184,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c6
  function RepeatChildren(props) {
    const stateStore = useStateStore();
    const repeat = () => props.element.repeat;
-@@ -1123,17 +1214,19 @@ function RepeatChildren(props) {
+@@ -1123,17 +1248,19 @@ function RepeatChildren(props) {
      return resolved;
    };
    const items = () => statePath() === void 0 ? [] : (0, import_core6.getByPath)(stateStore.state, statePath()) ?? [];
@@ -171,7 +212,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..b4a4b10056842c0d0f09c2a7940fa0c6
            return index();
          },
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d21e607433 100644
+index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eace5f3ad50815b606b35309977da43618f20ad0 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -664,9 +664,15 @@ function RepeatScopeProvider(props) {
@@ -202,7 +243,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d2
  var _tmpl$2 = /* @__PURE__ */ _$template2(`<span style=display:contents>`);
  var EMPTY_FUNCTIONS = {};
  var FunctionsContext = createContext6(EMPTY_FUNCTIONS);
-@@ -706,6 +712,23 @@ function useDevtoolsActive() {
+@@ -706,6 +712,46 @@ function useDevtoolsActive() {
    onCleanup2(unsub);
    return active;
  }
@@ -223,10 +264,33 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d2
 +    return resolved;
 +  }
 +}
++// opencode-genui patch: watch runs are bounded. A watch whose actions write the state it (or another watch) watches
++// runs again on its own write; with an awaited action in between, each round passes through a microtask, so the loop
++// never yields to the event loop and the window freezes. A provider runs at most WATCH_RUNS_PER_TASK watches before the
++// event loop gets a turn; the rest are skipped, which ends such a loop. User input arrives in tasks of its own.
++var WATCH_RUNS_PER_TASK = 64;
++var watchRuns = /* @__PURE__ */ new WeakMap();
++function takeWatchRun(store, path) {
++  let budget = watchRuns.get(store);
++  if (!budget) {
++    budget = { runs: 0, warned: false };
++    watchRuns.set(store, budget);
++    setTimeout(() => watchRuns.delete(store), 0);
++  }
++  if (budget.runs >= WATCH_RUNS_PER_TASK) {
++    if (!budget.warned) {
++      budget.warned = true;
++      console.warn(`[json-render] Skipped the watch on "${path}": ${WATCH_RUNS_PER_TASK} watch runs without a break (a watch that triggers itself).`);
++    }
++    return false;
++  }
++  budget.runs++;
++  return true;
++}
  function ElementRenderer(props) {
    const repeatScope = useRepeatScope();
    const {
-@@ -739,7 +762,17 @@ function ElementRenderer(props) {
+@@ -739,7 +785,17 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -245,7 +309,15 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d2
    const emit = async (eventName) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
-@@ -823,11 +856,15 @@ function ElementRenderer(props) {
+@@ -795,6 +851,7 @@ function ElementRenderer(props) {
+           if (!changedPaths.has(path)) continue;
+           const binding = watchConfig[path];
+           if (!binding) continue;
++          if (!takeWatchRun(stateStore, path)) continue;
+           const bindings = Array.isArray(binding) ? binding : [binding];
+           for (const b of bindings) {
+             if (!b.params) {
+@@ -823,11 +880,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = createMemo3(() => {
      const rawProps = props.element.props;
@@ -263,16 +335,17 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d2
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -975,6 +1012,60 @@ function ElementRendererContent(props) {
+@@ -975,6 +1036,70 @@ function ElementRendererContent(props) {
      }
    });
  }
 +// opencode-genui patch (patches/): repeat rows keep their identity across updates instead of being keyed by item
 +// identity (upstream re-created a row, and its inputs, which lost focus, on every write to the item, since each write
 +// replaces the item object), and the repeat scope reads its item, index and base path live. Each new item takes the id
-+// of an unused previous row: the same item (a removal or reorder that kept the others), else the row with the same
-+// `repeat.key` value (the agent re-sent the list), else the row at the same index (the item was edited in place, its
-+// key field included), else a new id.
++// of an unused previous row: the row at its index when that row held the very same item (equal primitives and shared
++// objects keep their rows), else the nearest row with the same item (a removal or reorder that kept the others), else
++// the row with the same `repeat.key` value (the agent re-sent the list), else the row at the same index (the item was
++// edited in place, its key field included), else a new id.
 +function createRowIds() {
 +  let previousItems = [];
 +  let previousIds = [];
@@ -289,8 +362,17 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d2
 +      else byItem.set(item, [i]);
 +    });
 +    items.forEach((item, i) => {
-+      const at = byItem.get(item);
-+      const j = at?.find((index) => !used.has(index));
++      if (i < previousItems.length && Object.is(previousItems[i], item)) {
++        ids[i] = previousIds[i];
++        used.add(i);
++      }
++    });
++    items.forEach((item, i) => {
++      if (ids[i] !== void 0) return;
++      let j;
++      for (const index of byItem.get(item) ?? []) {
++        if (!used.has(index) && (j === void 0 || Math.abs(index - i) < Math.abs(j - i))) j = index;
++      }
 +      if (j !== void 0) {
 +        ids[i] = previousIds[j];
 +        used.add(j);
@@ -324,7 +406,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..0ec00b935b4ca54624737418820c63d2
  function RepeatChildren(props) {
    const stateStore = useStateStore();
    const repeat = () => props.element.repeat;
-@@ -987,17 +1078,19 @@ function RepeatChildren(props) {
+@@ -987,17 +1112,19 @@ function RepeatChildren(props) {
      return resolved;
    };
    const items = () => statePath() === void 0 ? [] : getByPath2(stateStore.state, statePath()) ?? [];

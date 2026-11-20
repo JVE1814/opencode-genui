@@ -9,7 +9,7 @@ import { buildRegistry, createElementRenderer, type ElementImpl } from "../../sr
 // `window.document` is in place for the import and removed right after.
 const globals = globalThis as { window?: unknown }
 globals.window = { document: { addEventListener() {} } }
-const { JSONUIProvider, Renderer } = await import("@json-render/solid")
+const { JSONUIProvider, Renderer, useStateStore } = await import("@json-render/solid")
 delete globals.window
 
 const flatten = (value: unknown): unknown[] =>
@@ -238,6 +238,80 @@ describe("rendering with json-render", () => {
     expect(view.text()).toEqual(["<list>", "t=onexyz@/todos/0/title", "t=two@/todos/1/title"])
     expect(count(view.mounts)).toEqual({ Box: 1, Field: 2 })
     view.dispose()
+  })
+
+  test("rows over equal primitives or a shared object stay mounted while the user edits one of them", () => {
+    const spec: Spec = {
+      root: "list",
+      elements: {
+        list: { type: "Box", props: { title: "list" }, children: ["row"], repeat: { statePath: "/items" } },
+        row: { type: "Field", props: { label: "e", value: { $bindItem: "" } }, children: [] },
+      },
+    }
+    // Empty strings (a list of e-mail fields), booleans (switches), and one object twice (a patch `copy`).
+    const shared = { done: false }
+    for (const [items, path, values] of [
+      [["", "", ""], "/items/1", ["a", "ab", "abc"]],
+      [["", "", ""], "/items/0", ["a", "ab"]],
+      [[false, false, false], "/items/1", [true, false, true]],
+      [[shared, { done: true }, shared], "/items/0", [{ done: true }, { done: false }]],
+    ] as const) {
+      const view = render(() => spec, { items }, { Box, Field })
+      for (const value of values) view.store.set(path, value)
+      // Before, the edited row took a new id (an unedited duplicate took its old one) and remounted on each write.
+      expect(count(view.mounts)).toEqual({ Box: 1, Field: 3 })
+      view.dispose()
+    }
+  })
+
+  test("a watch that keeps triggering itself through an awaited action stops instead of freezing the window", async () => {
+    const spec: Spec = {
+      root: "box",
+      elements: {
+        box: {
+          type: "Kick",
+          props: {},
+          children: [],
+          watch: {
+            "/t": [
+              { action: "validateForm" },
+              {
+                action: "setState",
+                params: { statePath: "/t", value: { $cond: { $state: "/t" }, $then: false, $else: true } },
+              },
+            ],
+          },
+        },
+      },
+    }
+    let set: ((path: string, value: unknown) => void) | undefined
+    const Kick: ElementImpl = () => {
+      set = useStateStore().set
+      return "kick" as never
+    }
+    const warn = console.warn
+    const warnings: string[] = []
+    console.warn = (...args: unknown[]) => void warnings.push(String(args[0]))
+    try {
+      const view = render(() => spec, { t: true }, { Kick })
+      let writes = 0
+      view.store.subscribe(() => writes++)
+      set!("/t", false)
+      // Without the bound, each round passed through a microtask only and this timer never fired.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      // 64 watch runs, each writing /formValidation and /t, then the loop ends.
+      expect(writes).toBeGreaterThan(10)
+      expect(writes).toBeLessThanOrEqual(2 * 64 + 1)
+      expect(warnings.some((warning) => warning.includes('Skipped the watch on "/t"'))).toBe(true)
+      // The next change (a new task) runs the watch again.
+      const before = writes
+      set!("/t", !view.store.get("/t"))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(writes).toBeGreaterThan(before + 10)
+      view.dispose()
+    } finally {
+      console.warn = warn
+    }
   })
 
   test("a prop or condition that throws leaves its parent and siblings rendered", async () => {

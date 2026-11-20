@@ -63,6 +63,11 @@ export interface SurfaceContext {
 
 export const HostContext = createContext<Host>()
 export const SurfaceInfoContext = createContext<SurfaceContext>()
+/**
+ * Writes the surface's state without telling its `watch` bindings, for a write that is genui's own bookkeeping rather
+ * than a change a watch should react to (an untrusted modal that refused to open, see overlay.tsx).
+ */
+export const QuietWriteContext = createContext<(path: string, value: unknown) => void>()
 
 export function useHost(): Host {
   const host = useContext(HostContext)

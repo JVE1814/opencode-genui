@@ -20,7 +20,7 @@ import { createHandlers, type ChainLink } from "./actions.ts"
 import { ChainBridge } from "./chain.ts"
 import { reserveToolbar } from "./components/shared.tsx"
 import { ErrorCard, IssuesFooter } from "./fallback.tsx"
-import { HostContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
+import { HostContext, QuietWriteContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
 import { allowOutward } from "./outward.ts"
 import { getRendering } from "./registry.tsx"
 
@@ -206,7 +206,9 @@ function Render(props: {
         validationFunctions={VALIDATION_FUNCTIONS}
       >
         <ChainBridge link={link} />
-        <Renderer spec={props.compiled().spec} registry={registry} loading={props.streaming()} fallback={fallback} />
+        <QuietWriteContext.Provider value={(path, value) => store.set(path, value)}>
+          <Renderer spec={props.compiled().spec} registry={registry} loading={props.streaming()} fallback={fallback} />
+        </QuietWriteContext.Provider>
       </JSONUIProvider>
     </ErrorBoundary>
   )
