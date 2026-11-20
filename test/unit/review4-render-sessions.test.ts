@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createRoot, createSignal } from "solid-js"
 import type { SessionRef } from "@opencode/plugin/gui"
 import type { SessionStore } from "../../src/gui/persist.ts"
-import { createSessionRegistry, SNAPSHOT_SAVE_DELAY_MS } from "../../src/gui/sessions.ts"
+import { createSessionRegistry, SNAPSHOT_SAVE_DELAY_MS, VERIFY_RETRY_MS } from "../../src/gui/sessions.ts"
 import {
   EMPTY_PERSISTED,
   readCanvasSnapshots,
@@ -75,6 +75,9 @@ function setup(
 ) {
   const [messages, setMessages] = createSignal<Message[]>(history)
   const [revert, setRevert] = createSignal<string | undefined>()
+  let failure = server.failure
+  const gets: string[] = []
+  const lists: number[] = []
   const [value, setValue] = createSignal<PersistedSession | undefined>(initial)
   const store: SessionStore = {
     get value() {
@@ -100,26 +103,29 @@ function setup(
       // The server lists every message it still has: a staged revert keeps them until it is committed.
       client: {
         message: {
-          list: async () => ({
-            data: [...(server.older ?? []), ...messages()]
-              .filter((message) => message.type === "assistant")
-              .toReversed(),
-            cursor: { next: null },
-          }),
+          list: async () => {
+            lists.push(1)
+            return {
+              data: [...(server.older ?? []), ...messages()]
+                .filter((message) => message.type === "assistant")
+                .toReversed(),
+              cursor: { next: null },
+            }
+          },
         },
         session: {
           message: {
             get: async (input: { sessionID: string; messageID: string }) => {
+              gets.push(input.messageID)
+              if (failure) throw failure
               const found = [...(server.older ?? []), ...messages()].find((message) => message.id === input.messageID)
               if (found) return found
-              throw (
-                server.failure ?? {
-                  _tag: "MessageNotFoundError",
-                  sessionID: input.sessionID,
-                  messageID: input.messageID,
-                  message: "Message not found",
-                }
-              )
+              throw {
+                _tag: "MessageNotFoundError",
+                sessionID: input.sessionID,
+                messageID: input.messageID,
+                message: "Message not found",
+              }
             },
           },
         },
@@ -141,6 +147,12 @@ function setup(
   const entry = registry.get(session)
   return {
     entry,
+    gets,
+    lists,
+    /** The server answers again. */
+    heal: () => (failure = undefined),
+    /** The app reconnects: the same session through a new server connection. */
+    reconnect: () => registry.get({ ...session, server: { ...(session.server as object) } } as unknown as SessionRef),
     canvases: () =>
       entry.index.canvases().map((state) => `${state.id}:${Object.keys(state.spec?.elements ?? {}).join("+")}`),
     snapshots: () =>
@@ -304,5 +316,75 @@ describe("stored edits of canvas generations nobody shows go [review4 RENDER#6]"
     current.setMessages((list) => [...list, user("msg_03"), assistant("msg_04", close)])
     await settle()
     expect(current.surfaces()).toEqual(["canvas/other@3"])
+  })
+})
+
+describe("a canvas's base and its check, when they are not loaded [review5#F2, review5#F8]", () => {
+  const createWithDone = fence(
+    "canvas",
+    lines(
+      { canvas: "plan", title: "Plan" },
+      { op: "add", path: "/root", value: "main" },
+      { op: "add", path: "/elements/main", value: { type: "Text", props: { text: "running" } } },
+      { op: "add", path: "/elements/done", value: { type: "Text", props: { text: "done view" } } },
+    ),
+  )
+  const switchRoot = fence("canvas", lines({ canvas: "plan" }, { op: "replace", path: "/root", value: "done" }))
+
+  test("a root switch whose canvas was created before the loaded messages loads them and keeps the canvas", async () => {
+    // No snapshot is stored (cleared, another machine). Before, the switch counted as a whole new canvas: an empty
+    // spec, saved as the canvas's snapshot, and the older messages were never loaded.
+    const run = setup([user("msg_07"), assistant("msg_08", switchRoot)], EMPTY_PERSISTED, {
+      older: [user("msg_01"), assistant("msg_02", createWithDone)],
+    })
+    await settle()
+    await settle()
+    expect(run.lists.length).toBeGreaterThan(0)
+    expect(run.canvases()).toEqual(["plan:main+done"])
+    expect(run.entry.index.canvas("plan")?.spec?.root).toBe("done")
+    expect(run.snapshots()).toEqual(["plan@msg_08"])
+  })
+
+  test("a check that failed for a passing reason is asked again, later and when the connection changes", async () => {
+    // msg_02 is gone from the server, but the first check fails offline: the canvas stays for now.
+    const offline = setup(
+      [user("msg_05")],
+      (() =>
+        writeCanvasSnapshot(EMPTY_PERSISTED, "plan", {
+          spec: { root: "main", elements: { main: { type: "Text", props: { text: "the plan" }, children: [] } } },
+          after: { messageID: "msg_02", part: 0, ordinal: 0 },
+          generation: 1,
+        }))(),
+      { failure: new Error("connection lost") },
+    )
+    await settle()
+    expect(offline.gets).toEqual(["msg_02"])
+    expect(offline.canvases()).toEqual(["plan:main"])
+    // Back online and reconnected: asked again at once, and the reverted canvas goes. Before, it was never asked again
+    // while the session's entry lived.
+    offline.heal()
+    offline.reconnect()
+    await settle()
+    expect(offline.gets).toEqual(["msg_02", "msg_02"])
+    expect(offline.canvases()).toEqual([])
+    expect(offline.snapshots()).toEqual([])
+
+    // Without a reconnect, after a while.
+    const later = setup(
+      [user("msg_05")],
+      (() =>
+        writeCanvasSnapshot(EMPTY_PERSISTED, "plan", {
+          spec: { root: "main", elements: { main: { type: "Text", props: { text: "the plan" }, children: [] } } },
+          after: { messageID: "msg_02", part: 0, ordinal: 0 },
+          generation: 1,
+        }))(),
+      { failure: new Error("timeout") },
+    )
+    await settle()
+    later.heal()
+    await sleep(VERIFY_RETRY_MS[0]! + 100)
+    await settle()
+    expect(later.gets).toEqual(["msg_02", "msg_02"])
+    expect(later.canvases()).toEqual([])
   })
 })

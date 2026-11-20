@@ -114,4 +114,71 @@ describe("canvas root switches [review4 USE#2]", () => {
       expect(state.spec?.state).toEqual({ note: "" })
     }
   })
+
+  test("a copy or move of one of the canvas's elements to the root patches it [review5#F5]", () => {
+    // Before, it counted as the block adding its own root, so the block replayed onto an empty spec where the copy
+    // had no source: an empty canvas, its state and the user's edits gone.
+    for (const [lines, shown] of [
+      [
+        [
+          { op: "copy", from: "/elements/running", path: "/elements/done" },
+          { op: "replace", path: "/root", value: "done" },
+        ],
+        "Deploying…",
+      ],
+      [
+        [
+          { op: "move", from: "/elements/done", path: "/elements/done2" },
+          { op: "replace", path: "/root", value: "done2" },
+        ],
+        "Deployed.",
+      ],
+    ] as const) {
+      const state = foldCanvases({}, [deploy, block("msg_02", json({ canvas: "deploy" }, ...lines))]).canvases.get(
+        "deploy",
+      )!
+      expect(state.generation).toBe(1)
+      expect(state.spec?.elements?.[state.spec.root]).toEqual({ type: "Text", props: { text: shown } })
+      expect(state.spec?.state).toEqual({ note: "" })
+    }
+    // A copy of an element the block added itself is still a whole new canvas.
+    const own = block(
+      "msg_02",
+      json(
+        { canvas: "deploy" },
+        text("draft", "New"),
+        { op: "copy", from: "/elements/draft", path: "/elements/page" },
+        add("/root", "page"),
+      ),
+    )
+    const state = foldCanvases({}, [deploy, own]).canvases.get("deploy")!
+    expect(state.generation).toBe(2)
+    expect(Object.keys(state.spec?.elements ?? {}).sort()).toEqual(["draft", "page"])
+  })
+
+  test("a root switch while the canvas's base is unknown patches, so the base is looked for [review5#F2]", () => {
+    // The creation is in messages not loaded and no snapshot is stored. Before, the switch counted as a whole new
+    // canvas: an empty spec with root "done", settled and saved, and nothing looked for the older messages.
+    const switched = block("msg_08", json({ canvas: "deploy" }, { op: "replace", path: "/root", value: "done" }))
+    const unknown = foldCanvases({}, [switched]).canvases.get("deploy")!
+    expect(unknown.missingBase).toBe(true)
+    expect(unknown.settled).toBeUndefined()
+    // With the base loaded, the switch applies to it.
+    const found = foldCanvases({}, [deploy, switched]).canvases.get("deploy")!
+    expect(found.missingBase).toBe(false)
+    expect(Object.keys(found.spec?.elements ?? {}).sort()).toEqual(["done", "running"])
+    expect(found.settled?.spec).toBe(found.spec!)
+    // `add /root` with no element is still a new canvas whose elements may come later, and so is a switch while it
+    // streams (the first line of a whole canvas).
+    expect(
+      foldCanvases({}, [block("msg_08", json({ canvas: "deploy" }, add("/root", "done")))]).canvases.get("deploy")!
+        .missingBase,
+    ).toBe(false)
+    const streaming = block(
+      "msg_08",
+      json({ canvas: "deploy" }, { op: "replace", path: "/root", value: "done" }),
+      false,
+    )
+    expect(foldCanvases({}, [streaming]).canvases.get("deploy")!.missingBase).toBe(false)
+  })
 })

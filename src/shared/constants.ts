@@ -27,3 +27,11 @@ export const CANVAS_TAB_PREFIX = "canvas."
  * inputs under it; the tracked store keeps edits under it in memory only.
  */
 export const UI_SECRET_ROOT = "__genui_secret"
+
+/**
+ * What one surface renders at most, in units (src/gui/element.ts): each element takes one, plus one for every
+ * TEXT_PER_UNIT characters of text (and entries of lists and objects) in its resolved props. About 2,000 elements, or
+ * half a million characters. The skill tells the agent.
+ */
+export const RENDER_UNITS = 2000
+export const TEXT_PER_UNIT = 250

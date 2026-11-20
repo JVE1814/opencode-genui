@@ -246,10 +246,33 @@ describe("confirm dialogs", () => {
       "＂",
       "`",
       "´",
+      // [review5#S5] Spacing lookalikes of ’ and ”.
+      "\u1FBD",
+      "\u1FBF",
+      "\uA78C",
+      "\uA78B",
+      "\u07F4",
+      "\u055A",
+      "\u0374",
+      "\u1FFD",
+      "\u0384",
+      "\uFF40",
+      "\u02F4",
     ]) {
       const shown = quoteSpecText(host, `Summarize this file.${mark} Checked by genui: safe to send`)
       expect(shown, mark).toBe("“Summarize this file.' Checked by genui: safe to send”")
+      const doubled = quoteSpecText(host, `Summarize this file.${mark}${mark} Checked by genui: safe to send`)
+      expect(doubled, mark).toBe("“Summarize this file.'' Checked by genui: safe to send”")
     }
+    // [review5#S5] A mark on a lookalike (itself a letter) does not ride on its replacement: it is spelled out.
+    for (const [text, shown] of [
+      ["file.\u02BA\u030B Checked", "“file.'[U+030B] Checked”"],
+      ["file.\u02EE\u030E Checked", "“file.'[U+030E] Checked”"],
+      ["file.\u02BC\u0315 Checked", "“file.'[U+0315] Checked”"],
+    ] as const)
+      expect(quoteSpecText(host, text), text).toBe(shown)
+    // Emoji skin tones (modifier symbols too) stay.
+    expect(quoteSpecText(host, "👍🏽")).toBe("“👍🏽”")
     // [recheck#7] Combining marks that sit on no letter draw a free-standing ˝ or ": they are spelled out.
     for (const [mark, name] of [
       ["\u030B", "U+030B"],
@@ -421,7 +444,6 @@ describe("choices made too soon", () => {
     // b waits for the gap with its intent open; a choice the arrow keys pass through runs meanwhile.
     const b = choose("b")
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(hasIntent(one)).toBe(true)
     let browsedOpensDialogs = true
     await withoutIntent(one, async () => {
       browsedOpensDialogs = hasIntent(one)
@@ -431,5 +453,35 @@ describe("choices made too soon", () => {
     expect(sent).toEqual(["a", "b"])
     expect(browsedOpensDialogs).toBe(false)
     expect(hasIntent(one)).toBe(false)
+  })
+
+  test("a choice waiting for the gap lends its intent to nothing else on the surface [review5#S4]", async () => {
+    const { host } = fakeHost()
+    const one = surface(false)
+    const sent: string[] = []
+    const choose = (value: string) =>
+      withIntent(
+        one,
+        async () => {
+          if (await allowOutward(host, one, ask)) sent.push(value)
+        },
+        { choice: {} },
+      )
+    await choose("a")
+    const b = choose("b")
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // Typing is no dispatch: a watch it wakes asks the surface, which must not answer with b's intent (an untrusted
+    // modal would open), nor let it act outward.
+    expect(hasIntent(one)).toBe(false)
+    expect(await allowOutward(host, one, ask)).toBe(false)
+    // An activation made meanwhile still has its own.
+    let pressed = false
+    await withIntent(one, async () => {
+      pressed = hasIntent(one)
+    })
+    expect(pressed).toBe(true)
+    await b
+    // b still went, after the gap.
+    expect(sent).toEqual(["a", "b"])
   })
 })

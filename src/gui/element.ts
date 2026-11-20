@@ -1,6 +1,18 @@
-import { createComponent, createMemo, untrack, type Accessor, type Component, type JSX } from "solid-js"
+import {
+  createComponent,
+  createContext,
+  createMemo,
+  createSignal,
+  onCleanup,
+  untrack,
+  useContext,
+  type Accessor,
+  type Component,
+  type JSX,
+} from "solid-js"
 import type { DirectiveDefinition } from "@json-render/core"
 import type { BaseComponentProps, ComponentRegistry, ComponentRenderProps } from "@json-render/solid"
+import { RENDER_UNITS, TEXT_PER_UNIT } from "../shared/constants.ts"
 
 // How genui plugs its components into json-render's renderer. Kept free of JSX so unit tests can run it without a DOM
 // (test/unit/element.test.ts); src/gui/registry.tsx feeds it the real components.
@@ -36,6 +48,77 @@ export function stableChildren(props: Pick<ComponentRenderProps, "element" | "ch
   })
 }
 
+export { RENDER_UNITS, TEXT_PER_UNIT }
+
+/**
+ * An element's units (see RENDER_UNITS): one, plus its props' size over TEXT_PER_UNIT. The walk stops once the size
+ * passes the whole budget.
+ */
+export function unitsOf(props: unknown): number {
+  const limit = RENDER_UNITS * TEXT_PER_UNIT
+  let size = 0
+  const stack: unknown[] = [props]
+  while (stack.length > 0 && size <= limit) {
+    const value = stack.pop()
+    if (typeof value === "string") size += value.length
+    else if (Array.isArray(value)) {
+      size += value.length
+      for (const item of value) stack.push(item)
+    } else if (value && typeof value === "object") {
+      const entries = Object.values(value)
+      size += entries.length
+      for (const item of entries) stack.push(item)
+    }
+  }
+  return 1 + Math.floor(Math.min(size, limit + 1) / TEXT_PER_UNIT)
+}
+
+/**
+ * What one surface renders, in units (see RENDER_UNITS). A repeat inside a repeat renders the product of their lists
+ * (300 × 300 items made 90,000 elements from a block of 3 KB), and a long string in state shows in every row that reads
+ * it (2,000 rows of a 40 KB string made 80 MB of text): both froze the window for seconds. An element that does not fit
+ * in what is left renders nothing, and its children are not even built; the surface reports it. It renders again when
+ * its own props change and then fit, or when it is mounted again; not when others go away meanwhile.
+ */
+export interface RenderBudget {
+  used: number
+  /** How many mounted elements render nothing because they did not fit. */
+  readonly skipped: Accessor<number>
+  readonly setSkipped: (update: (count: number) => number) => void
+}
+
+export function createRenderBudget(): RenderBudget {
+  const [skipped, setSkipped] = createSignal(0)
+  return { used: 0, skipped, setSkipped }
+}
+
+/** The surface's render budget (none outside a surface: unit tests render without a limit unless they provide one). */
+export const RenderBudgetContext = createContext<RenderBudget>()
+
+/** Whether the element fits in the surface's budget, as its props change; takes its units while it does. */
+function useFit(budget: RenderBudget, props: ComponentRenderProps): Accessor<boolean> {
+  let taken = 0
+  let skipped = false
+  const skip = (now: boolean) => {
+    if (now === skipped) return
+    skipped = now
+    budget.setSkipped((count) => count + (now ? 1 : -1))
+  }
+  onCleanup(() => {
+    budget.used -= taken
+    taken = 0
+    skip(false)
+  })
+  return createMemo(() => {
+    const units = unitsOf(props.element?.props)
+    budget.used -= taken
+    taken = budget.used + units <= RENDER_UNITS ? units : 0
+    budget.used += taken
+    untrack(() => skip(taken === 0))
+    return taken > 0
+  })
+}
+
 /**
  * The one renderer json-render calls for every element, known type or not.
  *
@@ -45,7 +128,7 @@ export function stableChildren(props: Pick<ComponentRenderProps, "element" | "ch
  * own component when it changes; its children (see `stableChildren`) are kept and move into the new component.
  *
  * Components are looked up as own properties only, so a type such as "toString" or "__proto__" is unknown, not
- * `Object.prototype`'s member.
+ * `Object.prototype`'s member. Inside a surface, an element renders only while it fits in the surface's RenderBudget.
  */
 export function createElementRenderer(
   components: Readonly<Record<string, ElementImpl>>,
@@ -54,7 +137,7 @@ export function createElementRenderer(
   const lookup = (type: unknown): ElementImpl | undefined =>
     typeof type === "string" && Object.hasOwn(components, type) ? components[type] : undefined
 
-  return function GenuiElement(props: ComponentRenderProps): JSX.Element {
+  function renderElement(props: ComponentRenderProps): JSX.Element {
     const kids = stableChildren(props)
     const impl = createMemo(() => lookup(props.element?.type))
     const ctx: BaseComponentProps & { readonly [ELEMENT_KEY]?: string } = {
@@ -107,6 +190,13 @@ export function createElementRenderer(
       )
     })
     return rendered as unknown as JSX.Element
+  }
+
+  return function GenuiElement(props: ComponentRenderProps): JSX.Element {
+    const budget = useContext(RenderBudgetContext)
+    if (!budget) return renderElement(props)
+    const fits = useFit(budget, props)
+    return createMemo(() => (fits() ? untrack(() => renderElement(props)) : undefined)) as unknown as JSX.Element
   }
 }
 

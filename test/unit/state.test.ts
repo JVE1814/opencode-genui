@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { createTrackedStore, isJsonValue, isSecretPath, MAX_OVERRIDES } from "../../src/runtime/state.ts"
+import {
+  createTrackedStore,
+  isJsonValue,
+  isSecretPath,
+  MAX_EDIT_SIZE,
+  MAX_OVERRIDES,
+  tooLarge,
+} from "../../src/runtime/state.ts"
 import { UI_SECRET_ROOT } from "../../src/shared/constants.ts"
 
 function counter(subscribe: (listener: () => void) => () => void) {
@@ -19,6 +26,21 @@ describe("createTrackedStore", () => {
     expect(store.get("/missing/x")).toBeUndefined()
     expect(store.get("/")).toBe(base)
     expect(store.getServerSnapshot?.()).toBe(base)
+  })
+
+  test("an edit larger than MAX_EDIT_SIZE is ignored", () => {
+    const store = createTrackedStore({ a: "x" })
+    const subscribers = counter(store.subscribe)
+    store.set("/a", "y".repeat(MAX_EDIT_SIZE + 1))
+    store.update({ "/a": ["z".repeat(MAX_EDIT_SIZE)] })
+    store.set("/b", { deep: [{ text: "w".repeat(MAX_EDIT_SIZE) }] })
+    expect(store.get("/a")).toBe("x")
+    expect(store.get("/b")).toBeUndefined()
+    expect(subscribers.count).toBe(0)
+    store.set("/a", "y".repeat(MAX_EDIT_SIZE))
+    expect(String(store.get("/a")).length).toBe(MAX_EDIT_SIZE)
+    expect(tooLarge(Array.from({ length: MAX_EDIT_SIZE + 1 }, () => 0))).toBe(true)
+    expect(tooLarge({ a: "x", b: [1, 2] })).toBe(false)
   })
 
   test("set records an override, updates the snapshot immutably and notifies", () => {

@@ -28,7 +28,7 @@ A canvas is a sidebar tab, about 360px wide, that stays open across turns: use i
 - {"canvas":"<id>","close":true} on its own removes the canvas.
 - The canvas renders while the block streams, so write /root and the layout first and the data after.
 - Several canvases can exist, one tab each; give each its own id.
-- If you are not sure what a canvas holds right now (for example after the conversation was compacted), send the whole canvas again, with /root.
+- If unsure what a canvas holds now (say, the chat was compacted), send the whole canvas again, with /root.
 - In your reply the block shows as a small chip that opens the canvas.
 
 A canvas, then a later block that patches it:
@@ -79,7 +79,7 @@ Inputs keep what the user enters. Bind each input you want back to a state path 
 
 The UI always takes the app's design and follows the user's theme and light or dark mode, so there are no color, style or className props: choose components and variants, not looks.
 
-- Keep it compact. Prefer Card, Stack and Grid for layout, Card titles or Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
+- Keep it compact: a UI shows at most about 2,000 elements, or 500,000 characters of text, in all. Prefer Card, Stack and Grid for layout, Card titles or Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
 - Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.

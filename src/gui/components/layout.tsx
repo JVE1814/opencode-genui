@@ -208,19 +208,21 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
   const select = (index: number, how: "choose" | "browse" = "choose") => {
     const tab = tabs()[index]
     if (!tab) return
-    if (tab.value === active()) {
-      if (how === "choose") choice.commit("change")
+    const previous = active()
+    if (tab.value === previous) {
+      if (how === "choose") choice.commit("change", previous)
       return
     }
     setValue(tab.value)
-    choice[how]("change")
+    if (how === "browse") choice.browse("change", previous)
+    else choice.choose("change")
   }
 
   const onKeyDown = (event: KeyboardEvent, index: number) => {
     const count = tabs().length
     if (count === 0) return
     if (isCommitKey(event)) {
-      if (index === activeIndex() && choice.commit("change")) event.preventDefault()
+      if (index === activeIndex() && choice.commit("change", active())) event.preventDefault()
       return
     }
     const rtl = !!listRef && getComputedStyle(listRef).direction === "rtl"

@@ -55,6 +55,11 @@ interface ModalContext {
  * model-written modal over the whole window is a phishing tool. An open it refuses writes false back, so the user's own
  * press can open it later; that write bypasses the surface's watches (a watch that wrote true again would otherwise
  * loop with the refusal, see QuietWriteContext). The modal then says where it comes from.
+ *
+ * On any surface a modal opens at most once per task, and not in a task in which it closed: such an open is refused the
+ * same way. Opening a modal moves focus into it and closing it gives focus back, so a spec that opens it on a field's
+ * focus and closes it on blur looped within one task until the stack overflowed; and a watch that re-opened it as the
+ * user closed it (Escape, the close button, the backdrop) kept the whole window behind it.
  */
 function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
   const host = useHost()
@@ -90,6 +95,14 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
     disposed = true
   })
 
+  // Whether the modal opened or closed in the current task (cleared by the next timer task).
+  let toggled = false
+  const markToggled = () => {
+    if (toggled) return
+    toggled = true
+    setTimeout(() => (toggled = false))
+  }
+
   // showModal() needs the element in the document; an inline surface may render before the host attaches it.
   const show = (element: HTMLDialogElement, attempt = 0) => {
     if (disposed || element.open || !open()) return
@@ -99,10 +112,11 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
       }
       return
     }
-    if (untrusted && !hasIntent(surface)) {
+    if (toggled || (untrusted && !hasIntent(surface))) {
       refuse()
       return
     }
+    markToggled()
     try {
       element.showModal()
     } catch {
@@ -115,10 +129,14 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
     const element = dialog
     if (!element) return
     if (want) show(element)
-    else if (element.open) element.close()
+    else if (element.open) {
+      markToggled()
+      element.close()
+    }
   })
 
   const close = () => {
+    markToggled()
     setOpen(false)
     if (dialog?.open) dialog.close()
   }
@@ -143,6 +161,7 @@ function modal(ctx: ModalContext, kind: "dialog" | "drawer") {
         undefined
       }
       onClose={() => {
+        markToggled()
         if (!disposed && open()) setOpen(false)
       }}
       onPointerDown={(event) => {

@@ -12,6 +12,7 @@ import {
   splitMarkdown,
   stripJoiners,
 } from "../../src/gui/components/markdown.ts"
+import { seeded } from "./random.ts"
 
 // The app renders ui.Markdown with this parser (@opencode/ui marked-base plus its code and math extensions), so the
 // tests check what marked makes of the neutralized text.
@@ -29,10 +30,15 @@ function render(text: string): string {
 }
 
 /** Tags marked and its code highlighting generate from Markdown syntax; anything else came from raw HTML. */
+// Markdown's tags, then the MathML and SVG that KaTeX writes for math (the app's renderer, not the text).
 const MARKDOWN_TAGS = new Set(
-  "p a em strong code pre ul ol li blockquote h1 h2 h3 h4 h5 h6 hr br table thead tbody tr th td del input span div math semantics mrow mi mn mo mtext mspace annotation".split(
-    " ",
-  ),
+  [
+    "p a em strong code pre ul ol li blockquote h1 h2 h3 h4 h5 h6 hr br table thead tbody tr th td del input span div",
+    "math semantics mrow mi mn mo mtext mspace annotation msub msup msubsup mfrac msqrt mroot mstyle mpadded mphantom",
+    "menclose munder mover munderover mtable mtr mtd mlabeledtr merror ms svg path line",
+  ]
+    .join(" ")
+    .split(" "),
 )
 
 /** The real tags of rendered HTML (text from the source is escaped, so every `<` left starts a tag). */
@@ -297,6 +303,62 @@ describe("neutralizeMarkdown", () => {
     }
   })
 
+  test("unmatched brackets in ordinary prose never stop later links [review5#F1]", () => {
+    // Scanning from every `[` used a budget for the whole run that about 50 of these spent, after which every later link
+    // showed as raw `[text](url)`.
+    const intervals = Array.from({ length: 200 }, (_, index) => `[${index}, ${index + 10})`).join(" ")
+    const lines = Array.from({ length: 200 }, (_, index) => `values in [a${index}, b${index})`).join("\n")
+    const ansi = Array.from({ length: 200 }, (_, index) => `\u001b[32mok ${index}\u001b[0m`).join("\n")
+    const tokens = Array.from({ length: 3000 }, (_, index) => `x[${index}`).join(" ")
+    for (const text of [intervals, lines, ansi, tokens]) {
+      const out = render(`${text}\n\nSee [the docs](https://docs.example.com/intervals) for details.`)
+      expect(hrefs(out).map(linkTarget), text.slice(0, 20)).toEqual(["https://docs.example.com/intervals"])
+      expect(out).not.toContain("[the docs]")
+      // In the same paragraph too.
+      const same = render(`${text} See [the docs](https://docs.example.com/intervals).`)
+      expect(hrefs(same).map(linkTarget), text.slice(0, 20)).toEqual(["https://docs.example.com/intervals"])
+    }
+    // Nesting, escapes and code spans still decide where a link text ends.
+    const nested: [string, string, string[]][] = [
+      ["[a [b] c](https://x.example/1)", "a [b] c", ["https://x.example/1"]],
+      ["[a \\] b](https://x.example/2)", "a ] b", ["https://x.example/2"]],
+      ["[a `]` b](https://x.example/3)", "a ] b", ["https://x.example/3"]],
+      // A blank line ends the link text: the address after it is only a bare URL.
+      ["[a\n\nb](https://x.example/4)", "[a b](https://x.example/4)", ["https://x.example/4"]],
+      ["[0, 1) and [c](https://x.example/5)", "[0, 1) and c", ["https://x.example/5"]],
+    ]
+    for (const [text, visible, targets] of nested) {
+      const out = render(text)
+      expect(hrefs(out).map(linkTarget), text).toEqual(targets)
+      if (targets.length > 0) expect(shown(out), text).toBe(visible)
+    }
+  })
+
+  test("a reference image becomes a link like an inline one, without a stray `!` [review5#F7]", () => {
+    const text = [
+      "![alt](https://x.example/a.png) and ![ref][r] and ![coll][] and ![short] and ![][r] and ![x][missing]",
+      "",
+      "[r]: https://x.example/r.png",
+      "[coll]: https://x.example/c.png",
+      "[short]: https://x.example/s.png 'Short'",
+    ].join("\n")
+    const out = render(text)
+    expect(shown(out)).toBe("alt and ref and coll and short and Image and ![x][missing]")
+    expect(hrefs(out).map(linkTarget)).toEqual([
+      "https://x.example/a.png",
+      "https://x.example/r.png",
+      "https://x.example/c.png",
+      "https://x.example/s.png",
+      "https://x.example/r.png",
+    ])
+    // A definition before its use, and one the link policy refuses.
+    expect(hrefs(render("[d]: https://x.example/d.png\n\n![D][d]")).map(linkTarget)).toEqual([
+      "https://x.example/d.png",
+    ])
+    expect(hrefs(render("![x][j]\n\n[j]: javascript:alert(1)")).map(linkTarget)).toEqual([""])
+    expectOwnLinks(out)
+  })
+
   test("an address the link policy refuses gives a link to nothing", () => {
     for (const text of ["[x](javascript:alert(1))", "[x](src/app.ts)", "[x](data:text/html,hi)", "[x]()"]) {
       const out = render(text)
@@ -389,20 +451,20 @@ describe("neutralizeMarkdown", () => {
       "](",
       "![",
     ]
-    let seed = 20261120
-    const next = () => {
-      seed = (seed * 1103515245 + 12345) & 0x7fffffff
-      return seed
-    }
+    const draw = seeded(20261120)
+    const seen = new Set<string>()
     for (let round = 0; round < 3000; round++) {
       let text = ""
-      const length = 4 + (next() % 40)
-      for (let index = 0; index < length; index++) text += pieces[next() % pieces.length]
+      const length = 4 + draw(40)
+      for (let index = 0; index < length; index++) text += pieces[draw(pieces.length)]
+      seen.add(text)
       const html = render(text)
       expect(decorated(html), JSON.stringify(text)).toEqual([])
       expectOwnLinks(html)
       for (const tag of tags(html)) expect(MARKDOWN_TAGS.has(tag.name), `${JSON.stringify(text)} -> ${html}`).toBe(true)
     }
+    // [review5#S6] The texts are distinct (a generator that lost precision repeated 831 of them over and over).
+    expect(seen.size).toBeGreaterThan(2950)
   })
 
   test("stays fast on text built to make the link scan quadratic", () => {
@@ -450,11 +512,12 @@ describe("neutralizeMarkdown", () => {
       /\$\$(?!\$)((?:\\.|[^\\\n])*?(?:\\.|[^\\\n$]))\$\$|\$(?=[^\s$])((?:\\.|[^\\\n$])*?(?:\\\S|[^\s\\$]))\$(?!\w)/y
     const paren = /\\\(((?:\\.|[^\\\n])*?)\\\)/y
     const pieces = ["$", "$$", "\\(", "\\)", "\\", "\\$", "a", " ", "\n", "\r", "\u2028", "_", "x$"]
-    let seed = 7
-    const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff)
+    const draw = seeded(7)
+    const seen = new Set<string>()
     for (let round = 0; round < 3000; round++) {
       let src = ""
-      for (let count = 4 + (next() % 30); count > 0; count--) src += pieces[next() % pieces.length]
+      for (let count = 4 + draw(30); count > 0; count--) src += pieces[draw(pieces.length)]
+      seen.add(src)
       const scan = mathScanner(src)
       for (let index = 0; index < src.length; index++) {
         const pattern = src[index] === "$" ? dollar : src.startsWith("\\(", index) ? paren : undefined
@@ -464,6 +527,7 @@ describe("neutralizeMarkdown", () => {
         expect(scan(index), `${JSON.stringify(src)} at ${index}`).toBe(match ? index + match[0].length : -1)
       }
     }
+    expect(seen.size).toBeGreaterThan(2900)
   })
 
   test("ends a bare URL where marked does, after giving back trailing punctuation", () => {
@@ -484,18 +548,20 @@ describe("neutralizeMarkdown", () => {
     }
     const pieces = ["www.", "http://", "a", "-", ".", ",", ";", ":", "!", "?", "*", "_", "'", '"', "~", "(", ")"]
     const more = ["&", "&amp;", "&a1;", "/", " ", "|", "<", "é", "ww", "h"]
-    let seed = 11
-    const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff)
+    const draw = seeded(11)
+    const seen = new Set<string>()
     for (let round = 0; round < 5000; round++) {
       let src = ""
-      for (let count = 2 + (next() % 24); count > 0; count--) {
-        const set = next() % 4 === 0 ? more : pieces
-        src += set[next() % set.length]
+      for (let count = 2 + draw(24); count > 0; count--) {
+        const set = draw(4) === 0 ? more : pieces
+        src += set[draw(set.length)]
       }
+      seen.add(src)
       const scan = bareUrlScanner(src)
       for (let index = 0; index < src.length; index++)
         expect(scan(index), `${JSON.stringify(src)} at ${index}`).toBe(reference(src, index))
     }
+    expect(seen.size).toBeGreaterThan(4500)
   })
 
   test("defuse breaks every construct with an invisible joiner", () => {

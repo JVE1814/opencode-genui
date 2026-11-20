@@ -876,9 +876,11 @@ test.describe("blocks from tool output", () => {
   }) => {
     await boot(page, "scenario=empty&speed=instant&persist=0")
     // Each round unmounts the watching element and mounts a fresh copy, which validateForm wakes again: with a bound
-    // per element mount, every round started a new count, and one key press froze the window.
+    // per element mount, every round started a new count, and one key press froze the window. (validateForm between
+    // the writes lets each one render: writes in a row run in one batch.)
     const loop = [
       { action: "setState", params: { statePath: "/p", value: false } },
+      { action: "validateForm" },
       { action: "setState", params: { statePath: "/p", value: true } },
       { action: "pushState", params: { statePath: "/runs", value: 1 } },
       { action: "validateForm" },

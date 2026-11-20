@@ -93,29 +93,34 @@ export const isCommitKey = (event: KeyboardEvent) => (event.key === "Enter" || e
 /**
  * For a choice control whose selection follows focus (Radio, Tabs). Call it while the component is created.
  *
- * - `browse(event)`: arrow keys, Home or End moved the choice. The event fires as a passive one (see `usePassive`): its
- *   state actions run, but nothing leaves the surface for a choice the user may only be passing through.
- * - `commit(event)`: Space, Enter or a click on the current choice. If the last change came from browsing, the event
- *   fires again, now as an activation, and it returns true (the caller then prevents the key's default); otherwise it
- *   does nothing.
+ * - `browse(event, previous)`: arrow keys, Home or End moved the choice away from `previous`. The event fires as a
+ *   passive one (see `usePassive`): its state actions run, but nothing leaves the surface for a choice the user may
+ *   only be passing through.
+ * - `commit(event, current)`: Space, Enter or a click on the current choice. If browsing moved the choice to a value
+ *   other than the one it started from, the event fires again, now as an activation, and it returns true (the caller
+ *   then prevents the key's default); otherwise it does nothing (browsing away and back changed nothing to send).
  * - `choose(event)`: a click, or Space on another option: an activation.
  */
 export function useChoice(ctx: { emit: (event: string) => void }): {
-  browse: (event: string) => void
-  commit: (event: string) => boolean
+  browse: (event: string, previous: unknown) => void
+  commit: (event: string, current: unknown) => boolean
   choose: (event: string) => void
 } {
   const activate = useActivation(ctx)
   const passive = usePassive(ctx)
   let browsed = false
+  // The value before browsing began.
+  let from: unknown
   return {
-    browse: (event) => {
+    browse: (event, previous) => {
+      if (!browsed) from = previous
       browsed = true
       void passive(event)
     },
-    commit: (event) => {
+    commit: (event, current) => {
       if (!browsed) return false
       browsed = false
+      if (Object.is(current, from)) return false
       void activate(event)
       return true
     },
@@ -360,6 +365,21 @@ const Textarea: GenuiComponent<"Textarea"> = (ctx) => {
  */
 const SELECT_TRIGGER_CLASS = "genui-select-trigger"
 
+/**
+ * Keeps keys on a closed select's trigger from changing its value: the app's select (Kobalte's) picks the previous or
+ * next option on ArrowLeft and ArrowRight, and the first match of typed letters, without opening its list. Each pick
+ * is a choice, which genui sends, so arrowing through the options sent the ones passed on the way. The list opens
+ * with ArrowDown, ArrowUp, Enter or Space as before, and a pick from it is the choice.
+ */
+function closedTriggerKeys(event: KeyboardEvent) {
+  const trigger = event.target
+  if (!(trigger instanceof Element) || trigger.getAttribute("aria-expanded") !== "false") return
+  const typed = event.key.length === 1 && event.key !== " " && !event.ctrlKey && !event.metaKey && !event.altKey
+  if (!typed && event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
+  event.preventDefault()
+  event.stopPropagation()
+}
+
 const Select: GenuiComponent<"Select"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
@@ -378,7 +398,7 @@ const Select: GenuiComponent<"Select"> = (ctx) => {
           {label()}
         </span>
       </Show>
-      <div data-slot="control">
+      <div data-slot="control" ref={(element) => element.addEventListener("keydown", closedTriggerKeys, true)}>
         <ui.Select
           options={options()}
           value={value() || undefined}
@@ -531,19 +551,20 @@ const Radio: GenuiComponent<"Radio"> = (ctx) => {
                       navigating = true
                       // After the key's default action, which is part of this task.
                       setTimeout(() => (navigating = false))
-                    } else if (isCommitKey(event) && event.currentTarget.checked && choice.commit("change"))
+                    } else if (isCommitKey(event) && event.currentTarget.checked && choice.commit("change", value()))
                       event.preventDefault()
                   }}
                   onChange={(event) => {
                     if (!event.currentTarget.checked) return
+                    const previous = value()
                     setValue(option.value)
                     validateEdit(checks)
-                    if (navigating) choice.browse("change")
+                    if (navigating) choice.browse("change", previous)
                     else choice.choose("change")
                   }}
                   // A click on the option already chosen fires no change: it sends a choice the arrow keys moved to.
                   onClick={() => {
-                    if (!navigating && selected()) choice.commit("change")
+                    if (!navigating && selected()) choice.commit("change", value())
                   }}
                 />
                 <label data-slot="box" for={optionId()}>

@@ -65,6 +65,33 @@ export interface TrackedStore extends StateStore {
 
 export const MAX_OVERRIDES = 500
 
+/**
+ * How large a value one edit may write, in characters of its strings plus entries of its lists and objects. A larger
+ * one is ignored: a pair of watches can double a string on every round (`{"$template":"${/a}${/a}"}`), which reached a
+ * billion characters, and the window ran out of memory, before any other bound stopped it.
+ */
+export const MAX_EDIT_SIZE = 1_000_000
+
+/** Whether a value is larger than MAX_EDIT_SIZE (see there); the walk stops once it is. */
+export function tooLarge(value: unknown): boolean {
+  let size = 0
+  const stack: unknown[] = [value]
+  while (stack.length > 0) {
+    const item = stack.pop()
+    if (typeof item === "string") size += item.length
+    else if (Array.isArray(item)) {
+      size += item.length
+      for (const entry of item) stack.push(entry)
+    } else if (item && typeof item === "object") {
+      const entries = Object.values(item)
+      size += entries.length
+      for (const entry of entries) stack.push(entry)
+    }
+    if (size > MAX_EDIT_SIZE) return true
+  }
+  return false
+}
+
 /** How many characters of JSON an edit's stored levels may take. */
 const MAX_STORED_LEVELS = 2048
 
@@ -498,7 +525,7 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
     get: read,
     set(path, value) {
       const target = pointer(path)
-      if (target === undefined || Object.is(read(target), value)) return
+      if (target === undefined || Object.is(read(target), value) || tooLarge(value)) return
       write([[target, value]])
     },
     update(updates) {
@@ -509,7 +536,7 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
         const target = pointer(path)
         if (target === undefined) continue
         const tokens = parsePointer(target)!
-        if (Object.is(getAt(preview, tokens), value)) continue
+        if (Object.is(getAt(preview, tokens), value) || tooLarge(value)) continue
         preview = replace(preview, target, value)
         entries.push([target, value])
       }

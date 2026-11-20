@@ -11,6 +11,7 @@ import {
   SAFE_CHECKS,
   VALIDATION_FUNCTIONS,
 } from "../../src/protocol/pattern.ts"
+import { seeded } from "./random.ts"
 
 const safePattern = VALIDATION_FUNCTIONS[SAFE_CHECKS.pattern]!
 const safeEmail = VALIDATION_FUNCTIONS[SAFE_CHECKS.email]!
@@ -153,12 +154,11 @@ describe("safe pattern checks", () => {
       "\x05b",
     ])
       out.add(text)
-    let seed = 7
-    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31)
+    const draw = seeded(7)
     const chars = [...POOL, ...MORE]
     for (let index = 0; index < 300; index++) {
       let text = ""
-      for (let length = next() % 5; length > 0; length--) text += chars[next() % chars.length]
+      for (let length = draw(5); length > 0; length--) text += chars[draw(chars.length)]
       out.add(text)
     }
     return [...out]

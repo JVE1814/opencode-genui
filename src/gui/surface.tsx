@@ -20,6 +20,7 @@ import { VALIDATION_FUNCTIONS } from "../protocol/pattern.ts"
 import { createHandlers, type ChainLink } from "./actions.ts"
 import { ChainBridge } from "./chain.ts"
 import { reserveToolbar, SurfaceMemoryContext } from "./components/shared.tsx"
+import { createRenderBudget, RENDER_UNITS, RenderBudgetContext, TEXT_PER_UNIT } from "./element.ts"
 import { ErrorCard, IssuesFooter } from "./fallback.tsx"
 import { HostContext, QuietWriteContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
 import { allowOutward } from "./outward.ts"
@@ -91,10 +92,21 @@ export function SurfaceView(props: SurfaceViewProps): JSX.Element {
   )
 }
 
+/** The issue a surface reports while elements do not fit in its render budget (see RenderBudget). */
+export const TOO_LARGE: SurfaceIssue = {
+  severity: "warning",
+  code: "too_large",
+  message: `the UI is too large, so part of it is not shown: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all (a repeat inside a repeat renders the product of both lists, and a long text read in every row of a repeat counts once per row): show fewer items or less text`,
+}
+
 function Frame(props: SurfaceViewProps) {
   const host = props.host
   const streaming = () => props.streaming?.() ?? false
-  const issues = () => props.compiled().issues
+  const budget = createRenderBudget()
+  const issues = () => {
+    const compiled = props.compiled().issues
+    return budget.skipped() > 0 ? [...compiled, TOO_LARGE] : compiled
+  }
   const lineErrors = () => (streaming() ? NO_LINES : (props.lineErrors?.() ?? NO_LINES))
   const canFix = () => (props.canFix ? props.canFix() : !!props.info.sendPrompt)
   const fix = () => void askToFix(host, props.info, { issues: issues(), lineErrors: lineErrors() })
@@ -178,14 +190,16 @@ function Frame(props: SurfaceViewProps) {
         <Show when={props.runtime()} keyed>
           {(runtime) => (
             <SurfaceMemoryContext.Provider value={runtime.memory}>
-              <Render
-                host={host}
-                info={props.info}
-                runtime={runtime}
-                compiled={props.compiled}
-                streaming={streaming}
-                canFix={canFix}
-              />
+              <RenderBudgetContext.Provider value={budget}>
+                <Render
+                  host={host}
+                  info={props.info}
+                  runtime={runtime}
+                  compiled={props.compiled}
+                  streaming={streaming}
+                  canFix={canFix}
+                />
+              </RenderBudgetContext.Provider>
             </SurfaceMemoryContext.Provider>
           )}
         </Show>

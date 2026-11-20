@@ -325,9 +325,10 @@ const MAX_LABEL = 1000
 const MAX_ADDRESS = 8192
 
 /**
- * What the link scans of one prose run may still read, in characters. A scan starts at every `[`, and a text built
- * for it (`[` repeated) would make the scans quadratic; once the budget is spent, no further link is recognized, and
- * the rest stays text (defused like everything else). Ordinary text uses a small part of it.
+ * What the scans after a link's `](` (its address and title), and the rare bracket scans `bracketEnds` does not cover,
+ * may still read in one prose run, in characters. A text built for it (`[a](x` repeated) would make those scans
+ * quadratic; once the budget is spent, no further link is recognized, and the rest stays text (defused like everything
+ * else). Ordinary text uses a small part of it: brackets alone never spend it.
  */
 interface LinkWork {
   left: number
@@ -335,8 +336,44 @@ interface LinkWork {
 
 const linkWork = (src: string): LinkWork => ({ left: 16 * src.length + 4 * MAX_LABEL })
 
-/** The `]` that closes the link text opened at `open`, with nesting, escapes and code spans; -1 when there is none. */
+// The `]` that closes each `[` of a text, computed in one pass with a stack: nesting, escapes, code spans, a blank line
+// (which closes nothing), and at most MAX_LABEL characters from the `[`. Cached per text for one `neutralizeMarkdown`
+// call. Scanning from every `[` instead cost a budget that about 50 unmatched brackets in ordinary prose spent ("[0, 10)",
+// ANSI colour codes), after which later links in the run showed as raw text.
+const bracketCache = new Map<string, Map<number, number>>()
+
+function bracketEnds(src: string): Map<number, number> {
+  const cached = bracketCache.get(src)
+  if (cached) return cached
+  const ends = new Map<number, number>()
+  const open: number[] = []
+  for (let index = 0; index < src.length; index++) {
+    const char = src[index]
+    if (char === "\\" && isEscapable(src[index + 1])) index++
+    else if (char === "`") {
+      const end = codeSpanEnd(src, index)
+      index = (end === -1 ? runEnd(src, index, "`") : end) - 1
+    } else if (char === "\n" && blankAfter(src, index)) open.length = 0
+    else if (char === "[") {
+      open.push(index)
+      ends.set(index, -1)
+    } else if (char === "]") {
+      const start = open.pop()
+      if (start !== undefined && index - start < MAX_LABEL) ends.set(start, index)
+    }
+  }
+  bracketCache.set(src, ends)
+  return ends
+}
+
+/**
+ * The `]` that closes the link text opened at `open`, with nesting, escapes and code spans; -1 when there is none. A
+ * `[` that the text's own pass reads as part of something else (an escape at the end of a bare URL that `inline`
+ * skipped) is scanned on its own, from the work budget.
+ */
 function closingBracket(src: string, open: number, work: LinkWork): number {
+  const known = bracketEnds(src).get(open)
+  if (known !== undefined) return known
   let depth = 0
   const limit = Math.min(src.length, open + MAX_LABEL, open + work.left)
   let index = open
@@ -614,8 +651,32 @@ export function bareUrlScanner(src: string): (index: number) => number {
   }
 }
 
+/** A reference definition of the text, by its label as `definitionKey` reads it: the first one of a label counts. */
+type Definitions = ReadonlyMap<string, { readonly url: string; readonly title: string }>
+
+/** A reference label as marked matches it: case-insensitive, runs of whitespace as one space. */
+const definitionKey = (label: string) => label.trim().toLowerCase().replace(/\s+/g, " ")
+
+/**
+ * A reference image whose `[` is at `open` (`![alt][label]`, `![alt][]` or `![alt]`) when its label is defined in the
+ * text: the alt text, the definition's address and title, and where it ends.
+ */
+function referenceImage(src: string, open: number, work: LinkWork, definitions: Definitions): ParsedLink | undefined {
+  const close = closingBracket(src, open, work)
+  if (close === -1) return undefined
+  const label = src.slice(open + 1, close)
+  if (src[close + 1] === "[") {
+    const end = closingBracket(src, close + 1, work)
+    const reference = end === -1 ? undefined : src.slice(close + 2, end)
+    const found = reference === undefined ? undefined : definitions.get(definitionKey(reference || label))
+    if (found) return { label, ...found, end: end + 1 }
+  }
+  const found = definitions.get(definitionKey(label))
+  return found && { label, ...found, end: close + 1 }
+}
+
 /** Rewrites the links, images, autolinks and bare URLs of a prose run (step 2), defusing everything else (step 1). */
-function inline(src: string, imageLabel: string): string {
+function inline(src: string, imageLabel: string, definitions: Definitions): string {
   let out = ""
   let pending = ""
   const flush = (before: "link" | "math" | "end") => {
@@ -680,7 +741,10 @@ function inline(src: string, imageLabel: string): string {
     }
     if (char === "[" || (char === "!" && src[index + 1] === "[")) {
       const image = char === "!"
-      const parsed = parseLink(src, image ? index + 1 : index, work)
+      // A reference image becomes a link here too (marked would show its `!`, then a reference link).
+      const parsed =
+        parseLink(src, image ? index + 1 : index, work) ??
+        (image ? referenceImage(src, index + 1, work, definitions) : undefined)
       if (parsed) {
         const text = linkText(parsed.label, work)
         link(image && !text.trim() ? literal(imageLabel) : label(text), parsed.url, parsed.title)
@@ -708,28 +772,54 @@ function inline(src: string, imageLabel: string): string {
 const DEFINITION =
   /^( {0,3})\[((?:\\[\s\S]|[^\\[\]])+)\]:[ \t]*(?:<((?:\\.|[^\\<>\n])*)>|(\S+))(?:[ \t]+("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?[ \t]*$/
 
-/** A prose run: reference definitions (which cannot interrupt a paragraph) written again, the rest through `inline`. */
-function prose(lines: readonly string[], imageLabel: string): string {
+interface DefinitionLine {
+  readonly indent: string
+  readonly label: string
+  readonly url: string
+  readonly title: string
+}
+
+/**
+ * The reference definitions of a prose group, by line (undefined for other lines): a definition cannot interrupt a
+ * paragraph, so it starts the group, follows a blank line or follows another definition.
+ */
+function definitionLines(lines: readonly string[]): (DefinitionLine | undefined)[] {
+  let previousBlank = true
+  let previousDefinition = false
+  return lines.map((line) => {
+    const found: RegExpExecArray | null = previousBlank || previousDefinition ? DEFINITION.exec(line) : null
+    const match: RegExpExecArray | null = found && /\S/.test(found[2]!) ? found : null
+    previousDefinition = !!match
+    previousBlank = line.trim() === ""
+    if (!match) return undefined
+    return {
+      indent: match[1]!,
+      label: match[2]!,
+      url: unescape(match[3] ?? match[4]!),
+      title: match[5] ? unescape(match[5].slice(1, -1)) : "",
+    }
+  })
+}
+
+/** A prose run: reference definitions written again, the rest through `inline`. */
+function prose(lines: readonly string[], imageLabel: string, definitions: Definitions): string {
   const out: string[] = []
   let run: string[] = []
   const flush = () => {
-    if (run.length > 0) out.push(inline(run.join("\n"), imageLabel))
+    if (run.length > 0) out.push(inline(run.join("\n"), imageLabel, definitions))
     run = []
   }
-  let previousBlank = true
-  let previousDefinition = false
-  for (const line of lines) {
-    const found: RegExpExecArray | null = previousBlank || previousDefinition ? DEFINITION.exec(line) : null
-    const match: RegExpExecArray | null = found && /\S/.test(found[2]!) ? found : null
-    if (match) {
+  const found = definitionLines(lines)
+  lines.forEach((line, index) => {
+    const definition = found[index]
+    if (definition) {
       flush()
-      const target = safeUrl(unescape(match[3] ?? match[4]!), "link") ?? ""
-      const title = match[5] ? unescape(match[5].slice(1, -1)) : ""
-      out.push(`${match[1]}[${defuse(match[2]!)}]: ${LINK_PREFIX}${encodeTarget(target)}${titlePart(target, title)}`)
+      const target = safeUrl(definition.url, "link") ?? ""
+      out.push(
+        `${definition.indent}[${defuse(definition.label)}]: ${LINK_PREFIX}${encodeTarget(target)}${titlePart(target, definition.title)}`,
+      )
     } else run.push(line)
-    previousDefinition = !!match
-    previousBlank = line.trim() === ""
-  }
+  })
   flush()
   return out.join("\n")
 }
@@ -745,25 +835,35 @@ export function neutralizeMarkdown(text: string, imageLabel: string): string {
     return neutralizeLines(text.split("\n"), imageLabel)
   } finally {
     spanCache.clear()
+    bracketCache.clear()
   }
 }
 
 function neutralizeLines(lines: readonly string[], imageLabel: string): string {
   const kinds = lineKinds(lines)
-  const out: string[] = []
+  const groups: { readonly kind: (typeof kinds)[number]; readonly lines: readonly string[] }[] = []
   for (let start = 0; start < lines.length; ) {
     let end = start
     while (end < lines.length && kinds[end] === kinds[start]) end++
-    const group = lines.slice(start, end)
-    const kind = kinds[start]
-    out.push(
-      kind === "prose"
-        ? prose(group, imageLabel)
-        : kind === "math"
-          ? defuseMath(group.join("\n"))
-          : defuse(group.join("\n")),
-    )
+    groups.push({ kind: kinds[start]!, lines: lines.slice(start, end) })
     start = end
   }
-  return out.join("\n")
+  // A reference may come before its definition: all of the text's definitions are read first.
+  const definitions = new Map<string, { url: string; title: string }>()
+  for (const group of groups) {
+    if (group.kind !== "prose") continue
+    for (const definition of definitionLines(group.lines)) {
+      const key = definition && definitionKey(definition.label)
+      if (key && !definitions.has(key)) definitions.set(key, { url: definition.url, title: definition.title })
+    }
+  }
+  return groups
+    .map((group) =>
+      group.kind === "prose"
+        ? prose(group.lines, imageLabel, definitions)
+        : group.kind === "math"
+          ? defuseMath(group.lines.join("\n"))
+          : defuse(group.lines.join("\n")),
+    )
+    .join("\n")
 }

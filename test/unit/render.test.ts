@@ -2,7 +2,17 @@ import { describe, expect, test } from "bun:test"
 import { createComponent, createComputed, createRoot, createSignal, type JSX } from "solid-js"
 import { createStateStore, type Spec, type StateStore } from "@json-render/core"
 import type { BaseComponentProps, ComponentRegistry } from "@json-render/solid"
-import { buildRegistry, createElementRenderer, type ElementImpl } from "../../src/gui/element.ts"
+import { createTrackedStore, MAX_EDIT_SIZE } from "../../src/runtime/state.ts"
+import {
+  buildRegistry,
+  createElementRenderer,
+  createRenderBudget,
+  RENDER_UNITS,
+  RenderBudgetContext,
+  TEXT_PER_UNIT,
+  type ElementImpl,
+  type RenderBudget,
+} from "../../src/gui/element.ts"
 
 // json-render's real renderer, without a DOM: components return strings, and the rendered tree is a nest of accessors
 // and arrays that `text()` flattens. @json-render/solid only touches the DOM at load, to delegate events, so a stub
@@ -34,6 +44,8 @@ function render(
   state: Record<string, unknown>,
   components: Record<string, ElementImpl>,
   directives?: readonly unknown[],
+  budget?: RenderBudget,
+  given?: StateStore,
 ): Mounted {
   const mounts: string[] = []
   const recorded = Object.fromEntries(
@@ -48,22 +60,31 @@ function render(
   const unknown = () => "unknown" as unknown as JSX.Element
   const element = createElementRenderer(recorded, unknown)
   const registry: ComponentRegistry = buildRegistry(Object.keys(components), element)
-  const store = createStateStore(state)
+  const store = given ?? createStateStore(state)
   return createRoot((dispose) => {
-    const tree = createComponent(JSONUIProvider, {
-      registry,
-      store,
-      ...(directives ? { directives: directives as never } : {}),
-      get children() {
-        return createComponent(Renderer, {
-          get spec() {
-            return spec()
+    const provider = () =>
+      createComponent(JSONUIProvider, {
+        registry,
+        store,
+        ...(directives ? { directives: directives as never } : {}),
+        get children() {
+          return createComponent(Renderer, {
+            get spec() {
+              return spec()
+            },
+            registry,
+            fallback: element,
+          })
+        },
+      })
+    const tree = budget
+      ? createComponent(RenderBudgetContext.Provider, {
+          value: budget,
+          get children() {
+            return provider()
           },
-          registry,
-          fallback: element,
         })
-      },
-    })
+      : provider()
     return { text: () => flatten(tree).map(String), store, mounts, dispose }
   })
 }
@@ -264,7 +285,13 @@ describe("rendering with json-render", () => {
     }
   })
 
-  test("a watch that keeps triggering itself through an awaited action stops instead of freezing the window", async () => {
+  test("a watch is not woken by its own writes: one change runs it once, its whole action list", async () => {
+    // Upstream, a watch that writes the path it watches ran again on its own write, through a microtask only, so the
+    // window froze. Then a bound of 64 runs per task still ran the action list 64 times: 64 × K writes for one change.
+    const toggle = (index: number) => ({
+      action: "setState",
+      params: { statePath: "/t", value: index % 2 === 0 },
+    })
     const spec: Spec = {
       root: "box",
       elements: {
@@ -272,15 +299,52 @@ describe("rendering with json-render", () => {
           type: "Kick",
           props: {},
           children: [],
-          watch: {
-            "/t": [
-              { action: "validateForm" },
-              {
-                action: "setState",
-                params: { statePath: "/t", value: { $cond: { $state: "/t" }, $then: false, $else: true } },
-              },
-            ],
-          },
+          watch: { "/t": [{ action: "validateForm" }, ...Array.from({ length: 200 }, (_, index) => toggle(index))] },
+        },
+      },
+    }
+    let set: ((path: string, value: unknown) => void) | undefined
+    const Kick: ElementImpl = () => {
+      set = useStateStore().set
+      return "kick" as never
+    }
+    const view = render(() => spec, { t: true }, { Kick })
+    let writes = 0
+    view.store.subscribe(() => writes++)
+    set!("/t", false)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // The change, validateForm's result, then the 200 toggles.
+    expect(writes).toBe(1 + 1 + 200)
+    // The next change runs the watch again (its first toggle now writes the value /t already has).
+    set!("/t", !view.store.get("/t"))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(writes).toBe(202 + 1 + 1 + 199)
+    view.dispose()
+  })
+
+  test("watches that keep waking each other through awaited actions stop at the store's budget", async () => {
+    // Each watch writes the other's path after an awaited action (validateForm), so neither is running its own write
+    // any more when the other wakes it: only the budget for watches set off by other watches ends the loop.
+    const flip = (path: string) => ({
+      action: "setState",
+      params: { statePath: path, value: { $cond: { $state: path }, $then: false, $else: true } },
+    })
+    const spec: Spec = {
+      root: "box",
+      elements: {
+        box: { type: "Box", props: { title: "loop" }, children: ["kick", "a", "b"] },
+        kick: { type: "Kick", props: {}, children: [] },
+        a: {
+          type: "Field",
+          props: { label: "a", value: "" },
+          children: [],
+          watch: { "/a": [{ action: "validateForm" }, flip("/b")] },
+        },
+        b: {
+          type: "Field",
+          props: { label: "b", value: "" },
+          children: [],
+          watch: { "/b": [{ action: "validateForm" }, flip("/a")] },
         },
       },
     }
@@ -293,19 +357,19 @@ describe("rendering with json-render", () => {
     const warnings: string[] = []
     console.warn = (...args: unknown[]) => void warnings.push(String(args[0]))
     try {
-      const view = render(() => spec, { t: true }, { Kick })
+      const view = render(() => spec, { a: false, b: false }, { Box, Field, Kick })
       let writes = 0
       view.store.subscribe(() => writes++)
-      set!("/t", false)
-      // Without the bound, each round passed through a microtask only and this timer never fired.
+      set!("/a", true)
+      // Without a budget the loop passed through microtasks only and this timer never fired.
       await new Promise((resolve) => setTimeout(resolve, 20))
-      // 64 watch runs, each writing /formValidation and /t, then the loop ends.
       expect(writes).toBeGreaterThan(10)
-      expect(writes).toBeLessThanOrEqual(2 * 64 + 1)
-      expect(warnings.some((warning) => warning.includes('Skipped the watch on "/t"'))).toBe(true)
-      // The next change (a new task) runs the watch again.
+      // The change and the first watch's two actions, then at most 64 actions of watches the others set off.
+      expect(writes).toBeLessThanOrEqual(1 + 2 + 64)
+      expect(warnings.some((warning) => warning.includes("Skipped the watch on"))).toBe(true)
+      // The next change, a task later, runs the watches again.
       const before = writes
-      set!("/t", !view.store.get("/t"))
+      set!("/a", !view.store.get("/a"))
       await new Promise((resolve) => setTimeout(resolve, 20))
       expect(writes).toBeGreaterThan(before + 10)
       view.dispose()
@@ -315,9 +379,11 @@ describe("rendering with json-render", () => {
   })
 
   test("the watch bound holds across remounts: a watch that hides and re-shows its own parent stops", async () => {
-    // Each round unmounts the watching element and mounts a fresh copy; validateForm wakes the copy again.
+    // Each round unmounts the watching element and mounts a fresh copy (validateForm between the writes lets each one
+    // render: writes in a row run in one batch); the last validateForm wakes the copy again.
     const loop = [
       { action: "setState", params: { statePath: "/p", value: false } },
+      { action: "validateForm" },
       { action: "setState", params: { statePath: "/p", value: true } },
       { action: "validateForm" },
     ]
@@ -400,9 +466,9 @@ describe("rendering with json-render", () => {
     }
   })
 
-  test("the watch bound is per surface and per task: other surfaces and the next change run as usual", async () => {
-    // Each row's watch appends to /log when /filter changes. One change wakes a hundred watches: 64 run (a reaction in
-    // every row belongs in its props, as $state or $item expressions), and the next change, a task later, runs 64 more.
+  test("one change wakes a watch in every row, each once; the budget is per surface and per task", async () => {
+    // A "select all": each row's watch reacts to /filter. Under a bound of 64 runs per task, rows past the 64th were
+    // skipped without a sign. A watch woken by a change no watch made is not charged.
     const spec: Spec = {
       root: "box",
       elements: {
@@ -432,16 +498,184 @@ describe("rendering with json-render", () => {
       // In the same task, the other surface's watches still run.
       setters[1]!("/filter", "x")
       await new Promise((resolve) => setTimeout(resolve, 20))
-      expect((first.store.get("/log") as unknown[]).length).toBe(64)
-      expect((second.store.get("/log") as unknown[]).length).toBe(3)
+      // A built-in's $item param is the item's path.
+      expect(first.store.get("/log")).toEqual(rows.map((row) => `/rows/${row}`))
+      expect(second.store.get("/log")).toEqual(["/rows/0", "/rows/1", "/rows/2"])
       setters[0]!("/filter", "y")
       await new Promise((resolve) => setTimeout(resolve, 20))
-      expect((first.store.get("/log") as unknown[]).length).toBe(128)
+      expect((first.store.get("/log") as unknown[]).length).toBe(200)
       first.dispose()
       second.dispose()
     } finally {
       console.warn = warn
     }
+  })
+
+  test("watches that double a string each round stop growing it at the edit size limit", async () => {
+    // Two watches that each write the other's path doubled, with an awaited action between: the string reached a
+    // billion characters in two seconds, and the window ran out of memory before the watch budget stopped the loop.
+    const double = (from: string, to: string) => ({
+      action: "setState",
+      params: { statePath: to, value: { $template: `\${${from}}\${${from}}` } },
+    })
+    const spec: Spec = {
+      root: "box",
+      elements: {
+        box: { type: "Box", props: { title: "x" }, children: ["kick", "a", "b"] },
+        kick: { type: "Kick", props: {}, children: [] },
+        a: {
+          type: "Field",
+          props: { label: "a", value: "" },
+          children: [],
+          watch: { "/a": [{ action: "validateForm" }, double("/a", "/b")] },
+        },
+        b: {
+          type: "Field",
+          props: { label: "b", value: "" },
+          children: [],
+          watch: { "/b": [{ action: "validateForm" }, double("/b", "/a")] },
+        },
+      },
+    }
+    let set: ((path: string, value: unknown) => void) | undefined
+    const Kick: ElementImpl = () => {
+      set = useStateStore().set
+      return "kick" as never
+    }
+    const warn = console.warn
+    console.warn = () => {}
+    try {
+      const store = createTrackedStore({ a: "", b: "" })
+      const view = render(() => spec, {}, { Box, Field, Kick }, undefined, undefined, store)
+      const started = performance.now()
+      set!("/a", "0123456789")
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(performance.now() - started).toBeLessThan(2000)
+      const longest = Math.max(String(store.get("/a")).length, String(store.get("/b")).length)
+      expect(longest).toBeGreaterThan(MAX_EDIT_SIZE / 2)
+      expect(longest).toBeLessThanOrEqual(MAX_EDIT_SIZE)
+      view.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
+
+  test("a list of state actions re-evaluates the UI once, not once per write [review5#S1]", async () => {
+    // Every write re-evaluates every element: a press of 200 writes in a UI of 100 rows cost 20,000 evaluations
+    // (a 260 KB block with 1,000 writes and 1,500 rows froze the window for over a minute).
+    const writes = Array.from({ length: 200 }, (_, index) => ({
+      action: "setState",
+      params: { statePath: "/q", value: `v${index}` },
+    }))
+    const rows = Array.from({ length: 100 }, (_, index) => `r${index}`)
+    const spec: Spec = {
+      root: "box",
+      elements: {
+        box: { type: "Box", props: { title: "rows" }, children: ["press", ...rows] },
+        press: { type: "Press", props: {}, children: [], on: { press: writes } },
+        ...Object.fromEntries(
+          rows.map((key) => [key, { type: "Counted", props: { value: { $state: "/q" } }, children: [] }]),
+        ),
+      },
+    }
+    let evaluations = 0
+    let emit: ((event: string) => unknown) | undefined
+    const Press: ElementImpl = (ctx) => {
+      emit = ctx.emit as never
+      return "press" as never
+    }
+    const Counted: ElementImpl = (ctx) => {
+      createComputed(() => {
+        evaluations++
+        return ctx.props.value
+      })
+      return "row" as never
+    }
+    const view = render(() => spec, { q: "" }, { Box, Press, Counted })
+    view.text()
+    evaluations = 0
+    await emit!("press")
+    expect(view.store.get("/q")).toBe("v199")
+    expect(evaluations).toBeLessThanOrEqual(2 * rows.length)
+    view.dispose()
+  })
+
+  test("a surface renders at most RENDER_UNITS elements: nested repeats stop there [review5#S3]", () => {
+    // 300 × 300 items: 90,301 elements, which froze the window for seconds before the surface showed an error.
+    const spec: Spec = {
+      root: "outer",
+      elements: {
+        outer: { type: "Box", props: { title: "outer" }, children: ["row"], repeat: { statePath: "/a" } },
+        row: { type: "Box", props: { title: "row" }, children: ["cell"], repeat: { statePath: "/b" } },
+        cell: { type: "Field", props: { label: "x", value: "" }, children: [] },
+      },
+    }
+    const items = Array.from({ length: 300 }, (_, index) => index)
+    const budget = createRenderBudget()
+    const view = render(() => spec, { a: items, b: items }, { Box, Field }, undefined, budget)
+    view.text()
+    // Each of these elements takes one unit.
+    expect(view.mounts.length).toBe(RENDER_UNITS)
+    expect(budget.used).toBe(RENDER_UNITS)
+    // The outer box, 6 rows of 1 + 300, then the 7th row's box and 192 of its cells: the rest of that row is skipped,
+    // and each later outer row is skipped whole (its inner list is never built).
+    expect(budget.skipped()).toBe(300 - 192 + (300 - 7))
+    // Removing items frees the budget for elements mounted later.
+    view.store.set("/a", items.slice(0, 2))
+    view.text()
+    expect(budget.skipped()).toBe(0)
+    expect(budget.used).toBe(1 + 2 * (1 + 300))
+    view.dispose()
+    expect(budget.used).toBe(0)
+  })
+
+  test("text counts toward the budget: a long string read in every row renders in the first rows only [review5#S3]", () => {
+    // 2,000 rows of a 40 KB string made 80 MB of text: 22 s of frozen window.
+    const spec: Spec = {
+      root: "list",
+      elements: {
+        list: { type: "Box", props: { title: "list" }, children: ["row"], repeat: { statePath: "/rows" } },
+        row: { type: "Field", props: { label: "r", value: { $state: "/doc" } }, children: [] },
+      },
+    }
+    const doc = "x".repeat(40_000)
+    const budget = createRenderBudget()
+    const view = render(
+      () => spec,
+      { rows: Array.from({ length: 2000 }, (_, index) => index), doc },
+      { Box, Field },
+      undefined,
+      budget,
+    )
+    view.text()
+    // Each row: one unit, one per TEXT_PER_UNIT characters of its props (the label, the value, and one per entry).
+    const perRow = 1 + Math.floor((1 + 40_000 + 2) / TEXT_PER_UNIT)
+    const fit = Math.floor((RENDER_UNITS - 1) / perRow)
+    expect(count(view.mounts).Field).toBe(fit)
+    expect(budget.skipped()).toBe(2000 - fit)
+    // Rows whose props shrink fit again, as far as the budget has room when each re-evaluates (rows re-evaluated before
+    // the long rows gave their units back stay empty until they are mounted again).
+    view.store.set("/doc", "short")
+    view.text()
+    expect(budget.skipped()).toBeLessThan(2000 - fit)
+    expect(budget.used).toBeLessThanOrEqual(RENDER_UNITS)
+    expect(count(view.mounts).Field).toBeGreaterThan(1900)
+    view.dispose()
+    expect(budget.used).toBe(0)
+  })
+
+  test("a repeat renders at most 2,000 rows, also without a surface's budget [review5#S3]", () => {
+    const spec: Spec = {
+      root: "list",
+      elements: {
+        list: { type: "Box", props: { title: "list" }, children: ["row"], repeat: { statePath: "/rows" } },
+        row: { type: "Field", props: { label: "r", value: "" }, children: [] },
+      },
+    }
+    const view = render(() => spec, { rows: Array.from({ length: 5000 }, (_, index) => index) }, { Box, Field })
+    view.text()
+    expect(count(view.mounts).Field).toBe(2000)
+    view.dispose()
   })
 
   test("a prop or condition that throws leaves its parent and siblings rendered", async () => {

@@ -1,5 +1,5 @@
 import type { Spec } from "@json-render/core"
-import { applyPatches, EMPTY_SPEC, type Patch } from "./patch.ts"
+import { applyPatches, EMPTY_SPEC, parsePointer, type Patch } from "./patch.ts"
 import type { LineError, ParsedBlock } from "./surface.ts"
 
 /** Where a block sits in the transcript. Message ids are time-ordered, so comparing refs compares transcript order. */
@@ -152,35 +152,76 @@ interface CanvasCache {
 
 const refKey = (ref: BlockRef) => `${ref.messageID}\u0000${ref.part}\u0000${ref.ordinal}`
 
-const pointer = (key: string) => key.replace(/~/g, "~0").replace(/\//g, "~1")
+/** The element key of a path `/elements/<key>`, or undefined for any other path. */
+function elementKey(path: string | undefined): string | undefined {
+  const tokens = path === undefined ? undefined : parsePointer(path)
+  return tokens?.length === 2 && tokens[0] === "elements" ? tokens[1] : undefined
+}
+
+/**
+ * Where a block's root element comes from: "block" when the block writes it itself (an `add` of `/elements/<root>`, an
+ * `/elements` map that holds it, or a `copy` or `move` from an element the block added before), "canvas" when it copies
+ * or moves it from an element it did not add (one the canvas has), undefined when the block does not write it at all
+ * (a `replace` of it, which RFC 6902 allows only on a member that exists, updates the canvas's).
+ */
+function rootSource(patches: readonly Patch[], root: string): "block" | "canvas" | undefined {
+  const added = new Set<string>()
+  let source: "block" | "canvas" | undefined
+  for (const patch of patches) {
+    if (patch.path === "/elements" && (patch.op === "add" || patch.op === "replace")) {
+      const map = typeof patch.value === "object" && patch.value !== null ? patch.value : {}
+      added.clear()
+      for (const key of Object.keys(map)) added.add(key)
+      source = Object.hasOwn(map, root) ? "block" : undefined
+      continue
+    }
+    const key = elementKey(patch.path)
+    if (key === undefined) continue
+    if (patch.op === "add") {
+      added.add(key)
+      if (key === root) source = "block"
+    } else if (patch.op === "copy" || patch.op === "move") {
+      const from = elementKey(patch.from)
+      const own = from !== undefined && added.has(from)
+      if (patch.op === "move" && from !== undefined) {
+        added.delete(from)
+        if (from === root) source = undefined
+      }
+      if (own) added.add(key)
+      if (key === root) source = own ? "block" : "canvas"
+    } else if (patch.op === "remove") {
+      added.delete(key)
+      if (key === root) source = undefined
+    }
+  }
+  return source
+}
 
 /**
  * Whether a block replaces the canvas rather than patching it. The header's `mode` decides when there is one;
- * otherwise a block that sets `/root` replaces, unless the canvas already has the element it points at and the block
- * does not add that element itself: a patch that switches the view (`{"op":"replace","path":"/root","value":"done"}`).
- * Adding it is an `add`, `copy` or `move` to `/elements/<root>`, or an `/elements` map that holds it; a `replace` of
- * that element (which RFC 6902 allows only on a member that exists) updates it as part of the patch. While a whole
- * canvas streams with the same root key, its first lines patch (the old canvas stays in view) until the root element
- * arrives.
+ * otherwise a block that sets `/root` replaces when it writes that root element itself (see `rootSource`), and patches
+ * when it takes it from the canvas: a copy or move of one of its elements, or no write at all to an element the canvas
+ * has (a patch that switches the view, `{"op":"replace","path":"/root","value":"done"}`). A block that points `/root`
+ * at an element neither has replaces too (its elements may come in later blocks), except a complete `replace` of
+ * `/root` while no canvas is known (its base is in messages not loaded, or it was closed): that is a switch, so it
+ * patches, and the missing base is looked for instead of an empty canvas being saved. While a whole canvas streams
+ * with the same root key, its first lines patch (the old canvas stays in view) until the root element arrives.
  */
-function replaces(block: ParsedBlock, current: Spec | null): boolean {
+function replaces(block: ParsedBlock, current: Spec | null, streaming: boolean): boolean {
   if (block.header.mode !== undefined) return block.header.mode === "replace"
   if (!block.hasRoot) return false
-  if (current === null) return true
   let root: unknown
+  let switched = false
   for (const patch of block.patches)
-    if ((patch.op === "add" || patch.op === "replace") && patch.path === "/root") root = patch.value
-  if (typeof root !== "string" || !Object.hasOwn(current.elements ?? {}, root)) return true
-  const own = `/elements/${pointer(root)}`
-  return block.patches.some(
-    (patch) =>
-      ((patch.op === "add" || patch.op === "copy" || patch.op === "move") && patch.path === own) ||
-      ((patch.op === "add" || patch.op === "replace") &&
-        patch.path === "/elements" &&
-        typeof patch.value === "object" &&
-        patch.value !== null &&
-        Object.hasOwn(patch.value, root)),
-  )
+    if ((patch.op === "add" || patch.op === "replace") && patch.path === "/root") {
+      root = patch.value
+      switched = patch.op === "replace"
+    }
+  if (typeof root !== "string") return true
+  const source = rootSource(block.patches, root)
+  if (source !== undefined) return source === "block"
+  if (current === null) return !switched || streaming
+  return !Object.hasOwn(current.elements ?? {}, root)
 }
 
 /**
@@ -267,7 +308,7 @@ export function createCanvasFolder(): Fold {
       const { header, patches } = item.block
       const before = prev.state
       const input = before?.spec ?? null
-      const replace = replaces(item.block, input)
+      const replace = replaces(item.block, input, !item.closed && !item.complete)
       let spec: Spec | null
       let missingBase: boolean
       if (replace) {

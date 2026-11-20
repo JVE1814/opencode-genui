@@ -365,6 +365,23 @@ function Select(props: {
           } else if ((event.key === "Enter" || event.key === " ") && open()) {
             event.preventDefault()
             pick(props.options[active()])
+          } else if (!open() && !props.disabled) {
+            // As Kobalte's trigger does while closed: ArrowLeft and ArrowRight pick the previous or next option, and a
+            // typed letter the next option whose label starts with it, without opening the list.
+            const index = props.options.findIndex((option) => option.value === props.value)
+            let next: UiSelectOption | undefined
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault()
+              next = index === -1 ? props.options[0] : props.options[index + (event.key === "ArrowLeft" ? -1 : 1)]
+            } else if (event.key.length === 1 && event.key !== " " && !event.ctrlKey && !event.metaKey) {
+              const letter = event.key.toLowerCase()
+              const count = props.options.length
+              for (let step = 1; step <= count && !next; step++) {
+                const option = props.options[(index + step + count) % count]
+                if (option?.label.toLowerCase().startsWith(letter)) next = option
+              }
+            }
+            if (next && next.value !== props.value) props.onChange(next.value)
           }
         }}
       >

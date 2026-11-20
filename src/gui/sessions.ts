@@ -21,6 +21,9 @@ import {
 import { canvasEntryOf, writeStore, type SessionStore } from "./persist.ts"
 
 /** How long settled canvases wait before they are written, so a burst of closing blocks writes once. */
+/** When to ask the server again whether a snapshot's message exists, after a failure that said nothing (per attempt). */
+export const VERIFY_RETRY_MS: readonly number[] = [2000, 10_000, 30_000]
+
 export const SNAPSHOT_SAVE_DELAY_MS = 300
 
 /**
@@ -269,8 +272,13 @@ function createEntry(
     // A revert committed while no window had the session open (a prompt from another window or the terminal, or the
     // app restarting) deleted the messages; when nothing older than the snapshot's message is left, the loaded
     // messages cannot tell. The server deletes messages only when a revert is committed, so a message it reports as
-    // not found was reverted. Any other failure leaves the snapshot as it is.
+    // not found was reverted. Any other failure (offline, a timeout, a server error) leaves the snapshot as it is, and
+    // the server is asked again: after VERIFY_RETRY_MS (a few times), and at once when the connection changes.
     const checked = new Set<string>()
+    const failures = new Map<string, number>()
+    const [retries, setRetries] = createSignal(0)
+    const timers = new Set<ReturnType<typeof setTimeout>>()
+    onCleanup(() => timers.forEach(clearTimeout))
     const verify = async (messageID: string) => {
       try {
         const client = untrack(server).client as unknown as {
@@ -279,12 +287,34 @@ function createEntry(
           }
         }
         await client.session.message.get({ sessionID: id, messageID })
+        failures.delete(messageID)
       } catch (error) {
-        if (disposed || !isMessageNotFound(error)) return
-        setDeleted((previous) => new Set([...previous, messageID]))
+        if (disposed) return
+        if (isMessageNotFound(error)) {
+          failures.delete(messageID)
+          setDeleted((previous) => new Set([...previous, messageID]))
+          return
+        }
+        const failed = (failures.get(messageID) ?? 0) + 1
+        failures.set(messageID, failed)
+        const delay = VERIFY_RETRY_MS[failed - 1]
+        if (delay === undefined) return
+        const timer = setTimeout(() => {
+          timers.delete(timer)
+          if (checked.delete(messageID)) setRetries((count) => count + 1)
+        }, delay)
+        timers.add(timer)
       }
     }
+    let asked: SessionRef["server"] | undefined
     createEffect(() => {
+      retries()
+      const current = server()
+      if (current !== asked) {
+        asked = current
+        // A new connection: what failed before is asked again now.
+        for (const messageID of failures.keys()) checked.delete(messageID)
+      }
       for (const messageID of index.unverified()) {
         if (checked.has(messageID)) continue
         checked.add(messageID)

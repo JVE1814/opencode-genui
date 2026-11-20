@@ -25,6 +25,8 @@ interface Intent {
   readonly choice?: object
   /** Not an activation: a dispatch that may not act outward at all (see `withoutIntent`). */
   readonly passive?: true
+  /** A choice waiting for the gap (see `choiceTurn`): its dispatch runs nothing meanwhile, and it counts for nothing else. */
+  waiting?: boolean
 }
 
 // The newest choice intent of each control (see `withIntent`).
@@ -39,14 +41,15 @@ export const INTENT_TTL_MS = 5000
 // The intents of the activations each surface is dispatching right now, newest last.
 const intents = new WeakMap<object, Intent[]>()
 
-// The newest intent of the surface that has not expired.
+// The newest intent of the surface that has not expired, leaving out choices that wait for the gap: while one waits, a
+// write that is no dispatch of its own (typing, which wakes watches) must not find its intent and open a modal with it.
 function liveIntent(key: object): Intent | undefined {
   const list = intents.get(key)
   if (!list) return undefined
   const now = Date.now()
   for (let index = list.length - 1; index >= 0; index--) {
     const intent = list[index]!
-    if (now - intent.since <= INTENT_TTL_MS) return intent
+    if (!intent.waiting && now - intent.since <= INTENT_TTL_MS) return intent
   }
   return undefined
 }
@@ -222,9 +225,11 @@ export function showPayload(host: Host, text: string): string {
   })
 }
 
-// Quotation marks of every script, and characters that look like one (primes, modifier letters, accents, ditto marks).
+// Quotation marks of every script, and characters that look like one: primes, ditto marks, spacing accents and other
+// modifier symbols (\p{Sk}, but the emoji skin tones), modifier letters (U+02B9-02FF, U+0374-0375), the Armenian,
+// N'Ko and Latin apostrophes and saltillos.
 const QUOTE_LIKE =
-  /[\p{Pi}\p{Pf}"＂＇`´‚‛„‟〃ʹʺʻʼʽʾʿˈˊˋˮ˝˵˶״׳′″‴‵‶‷⁗「」『』﹁﹂﹃﹄〝〞〟❛❜❝❞❟❠❮❯⹂\u{1F676}-\u{1F678}]/gu
+  /(?![\u{1F3FB}-\u{1F3FF}])[\p{Pi}\p{Pf}\p{Sk}"＂＇‚‛„‟〃״׳′″‴‵‶‷⁗「」『』﹁﹂﹃﹄〝〞〟❛❜❝❞❟❠❮❯⹂\u02B9-\u02FF\u0374\u0375\u055A-\u055F\u07F4\u07F5\uA788-\uA78C\u{1F676}-\u{1F678}]/gu
 
 // Combining marks that do not sit on a letter, a digit or another mark: on their own they draw a free-standing accent,
 // and some look like a quotation mark (U+030B draws ˝, U+030E a small ").
@@ -233,13 +238,14 @@ const LOOSE_MARKS = /(?<![\p{L}\p{N}\p{M}])\p{M}+/gu
 /**
  * Text the spec wrote for a confirm, as an untrusted dialog quotes it: on one line, made visible as a payload is, with
  * every quotation mark and lookalike replaced and combining marks that sit on no letter spelled out, so it cannot close
- * genui's quote and go on as text that reads like genui's own.
+ * genui's quote and go on as text that reads like genui's own. Lookalikes go first: a mark on one (ʺ̋, itself a letter)
+ * is loose once it is replaced, rather than riding on the replacement.
  */
 export function quoteSpecText(host: Host, text: string): string {
   const flat = reveal(host, text)
+    .replace(QUOTE_LIKE, "'")
     .replace(LOOSE_MARKS, (run) => spellOut(host, run))
     .replace(/\s+/gu, " ")
-    .replace(QUOTE_LIKE, "'")
     .trim()
   return `“${flat}”`
 }
@@ -313,7 +319,7 @@ const choiceQueue = new WeakMap<object, Promise<void>>()
  * Waits until a choice made too soon after the surface's previous outward activation may go: OUTWARD_INTERVAL_MS after
  * it, and after the choices made before it on the same surface, so the agent hears them in the order the user made
  * them. A choice its control has replaced meanwhile (the user moved on: only the value the control now shows matters),
- * or whose intent expired, does not go.
+ * or whose intent expired, does not go. While it waits, its intent counts for nothing else (see `liveIntent`).
  *
  * @returns Whether the choice may go; the surface's gap then starts again from now.
  */
@@ -323,6 +329,7 @@ async function choiceTurn(key: object, intent: Intent, choice: object): Promise<
   const turn = new Promise<void>((resolve) => (done = resolve))
   const queued = ahead.then(() => turn)
   choiceQueue.set(key, queued)
+  intent.waiting = true
   try {
     await ahead
     for (;;) {
@@ -335,6 +342,7 @@ async function choiceTurn(key: object, intent: Intent, choice: object): Promise<
       await new Promise((resolve) => setTimeout(resolve, wait))
     }
   } finally {
+    intent.waiting = false
     done()
     if (choiceQueue.get(key) === queued) choiceQueue.delete(key)
   }

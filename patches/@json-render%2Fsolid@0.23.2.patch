@@ -1,8 +1,26 @@
 diff --git a/dist/index.js b/dist/index.js
-index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687fec74d6b1 100644
+index 7ddfd3c5374c35e09edb649c90805d303245f780..2129fc3b2a4ff4bd2a8d0024bb5a69915d69f968 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -715,9 +715,15 @@ function RepeatScopeProvider(props) {
+@@ -113,10 +113,14 @@ function StateProvider(props) {
+       changeListeners.delete(listener);
+     };
+   };
++  // opencode-genui patch: the watches one change wakes run their first actions in one batch, so the UI re-evaluates
++  // once for all of their writes instead of once per write (a watch in each of N rows cost N passes over N rows).
+   const notifyChanges = (changes) => {
+-    for (const listener of changeListeners) {
+-      listener(changes);
+-    }
++    (0, import_solid_js.batch)(() => {
++      for (const listener of changeListeners) {
++        listener(changes);
++      }
++    });
+   };
+   (0, import_solid_js.createEffect)(() => {
+     const s = store();
+@@ -715,9 +719,15 @@ function RepeatScopeProvider(props) {
    return (0, import_web12.createComponent)(RepeatScopeContext.Provider, {
      get value() {
        return {
@@ -21,7 +39,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
        };
      },
      get children() {
-@@ -842,6 +848,54 @@ function useDevtoolsActive() {
+@@ -842,6 +852,109 @@ function useDevtoolsActive() {
    (0, import_solid_js6.onCleanup)(unsub);
    return active;
  }
@@ -42,41 +60,96 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
 +    return resolved;
 +  }
 +}
-+// opencode-genui patch: watch runs are bounded. A watch whose actions write the state it (or another watch) watches
-+// runs again on its own write; with an awaited action in between, each round passes through a microtask, so the loop
-+// never yields to the event loop and the window freezes. The bound belongs to the state store, so it holds across
-+// elements and across remounts (a watch that hides and re-shows its own parent is mounted afresh every round, and a
-+// repeat row can add rows that watch too): the store's watches run at most WATCH_RUNS_PER_TASK times in all before
-+// the event loop gets a turn; further runs are skipped, which ends any such loop. It is small because every write
-+// re-evaluates the whole UI, so a loop that grows the UI costs the square of its runs. User input and streamed spec
-+// updates arrive in tasks of their own.
-+var WATCH_RUNS_PER_TASK = 64;
++// opencode-genui patch: an action list runs in order, and consecutive state actions (setState, pushState, removeState),
++// which settle at once, run in one batch: the UI re-evaluates once for all of their writes instead of once per write
++// (every write re-evaluates the whole UI, so a list of K writes in a UI of E elements cost K × E). Other actions are
++// awaited as before, and run after a microtask once a batch ran before them (as upstream after every action): by then
++// any batch the list runs in has ended, so what the writes showed has mounted (validateForm knows its fields).
++// `take` is asked before each action; false ends the list.
++var BATCHED_ACTIONS = /* @__PURE__ */ new Set(["setState", "pushState", "removeState"]);
++async function runActionList(bindings, run, take) {
++  let index = 0;
++  while (index < bindings.length) {
++    const name = bindings[index]?.action;
++    if (BATCHED_ACTIONS.has(name)) {
++      let ended = false;
++      (0, import_solid_js.batch)(() => {
++        while (index < bindings.length && BATCHED_ACTIONS.has(bindings[index]?.action)) {
++          if (!take()) {
++            ended = true;
++            return;
++          }
++          run(bindings[index++]).catch(console.error);
++        }
++      });
++      if (ended) return;
++      if (index < bindings.length) await void 0;
++      continue;
++    }
++    if (!take()) return;
++    await run(bindings[index++]);
++  }
++}
++// opencode-genui patch: watches are bounded. Upstream, a watch whose actions write a path it (or another watch)
++// watches runs again on its own write; with an awaited action in between, each round passes through a microtask only, so
++// such a loop never yields to the event loop and the window freezes. Three rules end every such loop:
++// - A watch is not woken by the writes of its own actions (made directly, or by the watches those writes wake in turn).
++// - A watch hears only the changes made after it subscribed: a row a watch adds is not woken by the change that woke the
++//   watch (upstream it was, as the provider's listener set grows while it is iterated).
++// - A watch woken by a write made while any watch of the same state store was running (a chain of watches) takes one
++//   unit of the store's budget per action it runs, WATCH_CHAIN_ACTIONS_PER_TASK in all before the event loop gets a
++//   turn; when the budget is spent, the rest of the chain is skipped. A chain is what a loop is made of, and the budget
++//   belongs to the store, so it also holds across remounts (a watch that hides and re-shows its own parent is mounted
++//   afresh every round) and for watches that add watching rows. It is small because every write re-evaluates the whole
++//   UI, so a loop that grows the UI costs the square of its length.
++// Watches woken directly by a user's edit, an event's actions or a streamed update are not charged: one change may wake
++// a watch in every row of a long list (a "select all"), and each runs once, its whole action list, as a press would.
++var WATCH_CHAIN_ACTIONS_PER_TASK = 64;
 +var watchBudgets = /* @__PURE__ */ new WeakMap();
-+function takeWatchRun(stateStore, path) {
++function watchBudgetOf(stateStore) {
 +  let budget = watchBudgets.get(stateStore);
 +  if (!budget) {
-+    budget = { runs: 0, warned: false, timer: void 0 };
++    budget = { running: 0, executing: [], changes: /* @__PURE__ */ new WeakMap(), seq: 0, actions: 0, warned: false, timer: void 0 };
 +    watchBudgets.set(stateStore, budget);
 +  }
++  return budget;
++}
++function noteWatchChange(budget, changes) {
++  let note = budget.changes.get(changes);
++  if (!note) {
++    note = { seq: ++budget.seq, chained: budget.running > 0 };
++    budget.changes.set(changes, note);
++  }
++  return note;
++}
++function takeWatchAction(budget, path) {
 +  if (budget.timer === void 0) budget.timer = setTimeout(() => {
 +    budget.timer = void 0;
-+    budget.runs = 0;
++    budget.actions = 0;
 +    budget.warned = false;
 +  }, 0);
-+  if (budget.runs >= WATCH_RUNS_PER_TASK) {
++  if (budget.actions >= WATCH_CHAIN_ACTIONS_PER_TASK) {
 +    if (!budget.warned) {
 +      budget.warned = true;
-+      console.warn(`[json-render] Skipped the watch on "${path}": watches ran ${WATCH_RUNS_PER_TASK} times without a break (a watch that triggers itself).`);
++      console.warn(`[json-render] Skipped the watch on "${path}": watches set off by other watches ran ${WATCH_CHAIN_ACTIONS_PER_TASK} actions without a break (watches that keep waking each other).`);
 +    }
 +    return false;
 +  }
-+  budget.runs++;
++  budget.actions++;
 +  return true;
++}
++function executeAsWatch(budget, watcher, run) {
++  budget.executing.push(watcher);
++  try {
++    return run();
++  } finally {
++    budget.executing.pop();
++  }
 +}
  function ElementRenderer(props) {
    const repeatScope = useRepeatScope();
    const {
-@@ -875,7 +929,17 @@ function ElementRenderer(props) {
+@@ -875,30 +988,40 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -92,18 +165,104 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
 +      return false;
 +    }
 +  });
++  // opencode-genui patch: the action's params resolved against the live state (as upstream), and lists run through
++  // runActionList.
++  const prepareAction = (b) => {
++    if (!b.params) return b;
++    const liveCtx = {
++      ...fullCtx(),
++      stateModel: getSnapshot()
++    };
++    const resolved = {};
++    for (const [key, val] of Object.entries(b.params)) {
++      resolved[key] = (0, import_core6.resolveActionParam)(val, liveCtx);
++    }
++    return {
++      ...b,
++      params: resolved
++    };
++  };
    const emit = async (eventName) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
-@@ -931,6 +995,7 @@ function ElementRenderer(props) {
-           if (!changedPaths.has(path)) continue;
-           const binding = watchConfig[path];
-           if (!binding) continue;
-+          if (!takeWatchRun(stateStore, path)) continue;
-           const bindings = Array.isArray(binding) ? binding : [binding];
-           for (const b of bindings) {
-             if (!b.params) {
-@@ -959,11 +1024,15 @@ function ElementRenderer(props) {
+     if (!binding) return;
+     const actionBindings = Array.isArray(binding) ? binding : [binding];
+-    for (const b of actionBindings) {
+-      if (!b.params) {
+-        await execute(b);
+-        continue;
+-      }
+-      const liveCtx = {
+-        ...fullCtx(),
+-        stateModel: getSnapshot()
+-      };
+-      const resolved = {};
+-      for (const [key, val] of Object.entries(b.params)) {
+-        resolved[key] = (0, import_core6.resolveActionParam)(val, liveCtx);
+-      }
+-      await execute({
+-        ...b,
+-        params: resolved
+-      });
+-    }
++    await runActionList(actionBindings, (b) => execute(prepareAction(b)), () => true);
+   };
+   const on = (eventName) => {
+     const onBindings = props.element.on;
+@@ -924,32 +1047,31 @@ function ElementRenderer(props) {
+     if (!watchConfig) return;
+     const paths = Object.keys(watchConfig);
+     if (paths.length === 0) return;
++    const budget = watchBudgetOf(stateStore);
++    const watcher = {};
++    const since = budget.seq;
+     const unsubscribe = stateStore.subscribeChanges((changes) => {
++      const { seq, chained } = noteWatchChange(budget, changes);
++      if (seq <= since || budget.executing.includes(watcher)) return;
+       const changedPaths = new Set(changes.map((change) => change.path));
+       void (async () => {
+-        for (const path of paths) {
+-          if (!changedPaths.has(path)) continue;
+-          const binding = watchConfig[path];
+-          if (!binding) continue;
+-          const bindings = Array.isArray(binding) ? binding : [binding];
+-          for (const b of bindings) {
+-            if (!b.params) {
+-              await execute(b);
+-              continue;
+-            }
+-            const liveCtx = {
+-              ...fullCtx(),
+-              stateModel: getSnapshot()
+-            };
+-            const resolved = {};
+-            for (const [key, val] of Object.entries(b.params)) {
+-              resolved[key] = (0, import_core6.resolveActionParam)(val, liveCtx);
+-            }
+-            await execute({
+-              ...b,
+-              params: resolved
++        budget.running++;
++        try {
++          for (const path of paths) {
++            if (!changedPaths.has(path)) continue;
++            const binding = watchConfig[path];
++            if (!binding) continue;
++            const bindings = Array.isArray(binding) ? binding : [binding];
++            let spent = false;
++            await runActionList(bindings, (b) => executeAsWatch(budget, watcher, () => execute(prepareAction(b))), () => {
++              if (!chained || takeWatchAction(budget, path)) return true;
++              spent = true;
++              return false;
+             });
++            if (spent) return;
+           }
++        } finally {
++          budget.running--;
+         }
+       })().catch(console.error);
+     });
+@@ -959,11 +1081,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = (0, import_solid_js6.createMemo)(() => {
      const rawProps = props.element.props;
@@ -121,7 +280,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -1076,10 +1145,14 @@ function ElementRendererContent(props) {
+@@ -1076,10 +1202,14 @@ function ElementRendererContent(props) {
            });
          }
        });
@@ -136,7 +295,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
          get emit() {
            return props.emit;
          },
-@@ -1111,6 +1184,70 @@ function ElementRendererContent(props) {
+@@ -1111,6 +1241,77 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -201,18 +360,25 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
 +    return ids;
 +  };
 +}
++// opencode-genui patch: a repeat renders at most MAX_REPEAT_ROWS rows (its first ones): a list of a hundred thousand
++// items, a few hundred kilobytes of state, mounted a renderer per row for seconds. genui renders at most as much per
++// surface in all, and reports the rest (src/gui/element.ts).
++var MAX_REPEAT_ROWS = 2e3;
++function limitRows(ids) {
++  return ids.length > MAX_REPEAT_ROWS ? ids.slice(0, MAX_REPEAT_ROWS) : ids;
++}
 +function sameRowKeys(a, b) {
 +  return a.length === b.length && a.every((key, i) => key === b[i]);
 +}
  function RepeatChildren(props) {
    const stateStore = useStateStore();
    const repeat = () => props.element.repeat;
-@@ -1123,17 +1260,19 @@ function RepeatChildren(props) {
+@@ -1123,17 +1324,19 @@ function RepeatChildren(props) {
      return resolved;
    };
    const items = () => statePath() === void 0 ? [] : (0, import_core6.getByPath)(stateStore.state, statePath()) ?? [];
 +  const rowIds = createRowIds();
-+  const rowKeys = (0, import_solid_js6.createMemo)(() => rowIds(items(), repeat()), void 0, {
++  const rowKeys = (0, import_solid_js6.createMemo)(() => limitRows(rowIds(items(), repeat())), void 0, {
 +    equals: sameRowKeys
 +  });
    return (0, import_web18.createComponent)(import_solid_js6.For, {
@@ -234,7 +400,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
          get index() {
            return index();
          },
-@@ -1161,6 +1300,7 @@ function RepeatChildren(props) {
+@@ -1161,6 +1364,7 @@ function RepeatChildren(props) {
                    get element() {
                      return el();
                    },
@@ -243,10 +409,37 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..54ca46953e6ed65fd3c1d2bff8b5687f
                      return props.spec;
                    },
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec1fe3fafd 100644
+index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..3289bfc8e81e3377eec79e58b8efc0b55b540312 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -664,9 +664,15 @@ function RepeatScopeProvider(props) {
+@@ -5,7 +5,7 @@ import {
+ 
+ // src/contexts/state.tsx
+ import { createComponent as _$createComponent } from "solid-js/web";
+-import { createContext, useContext, createSignal, createEffect, createMemo, onCleanup } from "solid-js";
++import { batch, createContext, useContext, createSignal, createEffect, createMemo, onCleanup } from "solid-js";
+ import { getByPath, createStateStore } from "@json-render/core";
+ import { flattenToPointers } from "@json-render/core/store-utils";
+ var StateContext = createContext(null);
+@@ -62,10 +62,14 @@ function StateProvider(props) {
+       changeListeners.delete(listener);
+     };
+   };
++  // opencode-genui patch: the watches one change wakes run their first actions in one batch, so the UI re-evaluates
++  // once for all of their writes instead of once per write (a watch in each of N rows cost N passes over N rows).
+   const notifyChanges = (changes) => {
+-    for (const listener of changeListeners) {
+-      listener(changes);
+-    }
++    batch(() => {
++      for (const listener of changeListeners) {
++        listener(changes);
++      }
++    });
+   };
+   createEffect(() => {
+     const s = store();
+@@ -664,9 +668,15 @@ function RepeatScopeProvider(props) {
    return _$createComponent5(RepeatScopeContext.Provider, {
      get value() {
        return {
@@ -265,7 +458,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
        };
      },
      get children() {
-@@ -689,7 +695,7 @@ import { insert as _$insert2 } from "solid-js/web";
+@@ -689,7 +699,7 @@ import { insert as _$insert2 } from "solid-js/web";
  import { memo as _$memo2 } from "solid-js/web";
  import { createComponent as _$createComponent6 } from "solid-js/web";
  import { createContext as createContext6, useContext as useContext6, createMemo as createMemo3, createEffect as createEffect3, createSignal as createSignal4, onCleanup as onCleanup2, ErrorBoundary, Show, For } from "solid-js";
@@ -274,7 +467,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
  var _tmpl$2 = /* @__PURE__ */ _$template2(`<span style=display:contents>`);
  var EMPTY_FUNCTIONS = {};
  var FunctionsContext = createContext6(EMPTY_FUNCTIONS);
-@@ -706,6 +712,54 @@ function useDevtoolsActive() {
+@@ -706,6 +716,109 @@ function useDevtoolsActive() {
    onCleanup2(unsub);
    return active;
  }
@@ -295,41 +488,96 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
 +    return resolved;
 +  }
 +}
-+// opencode-genui patch: watch runs are bounded. A watch whose actions write the state it (or another watch) watches
-+// runs again on its own write; with an awaited action in between, each round passes through a microtask, so the loop
-+// never yields to the event loop and the window freezes. The bound belongs to the state store, so it holds across
-+// elements and across remounts (a watch that hides and re-shows its own parent is mounted afresh every round, and a
-+// repeat row can add rows that watch too): the store's watches run at most WATCH_RUNS_PER_TASK times in all before
-+// the event loop gets a turn; further runs are skipped, which ends any such loop. It is small because every write
-+// re-evaluates the whole UI, so a loop that grows the UI costs the square of its runs. User input and streamed spec
-+// updates arrive in tasks of their own.
-+var WATCH_RUNS_PER_TASK = 64;
++// opencode-genui patch: an action list runs in order, and consecutive state actions (setState, pushState, removeState),
++// which settle at once, run in one batch: the UI re-evaluates once for all of their writes instead of once per write
++// (every write re-evaluates the whole UI, so a list of K writes in a UI of E elements cost K × E). Other actions are
++// awaited as before, and run after a microtask once a batch ran before them (as upstream after every action): by then
++// any batch the list runs in has ended, so what the writes showed has mounted (validateForm knows its fields).
++// `take` is asked before each action; false ends the list.
++var BATCHED_ACTIONS = /* @__PURE__ */ new Set(["setState", "pushState", "removeState"]);
++async function runActionList(bindings, run, take) {
++  let index = 0;
++  while (index < bindings.length) {
++    const name = bindings[index]?.action;
++    if (BATCHED_ACTIONS.has(name)) {
++      let ended = false;
++      batch(() => {
++        while (index < bindings.length && BATCHED_ACTIONS.has(bindings[index]?.action)) {
++          if (!take()) {
++            ended = true;
++            return;
++          }
++          run(bindings[index++]).catch(console.error);
++        }
++      });
++      if (ended) return;
++      if (index < bindings.length) await void 0;
++      continue;
++    }
++    if (!take()) return;
++    await run(bindings[index++]);
++  }
++}
++// opencode-genui patch: watches are bounded. Upstream, a watch whose actions write a path it (or another watch)
++// watches runs again on its own write; with an awaited action in between, each round passes through a microtask only, so
++// such a loop never yields to the event loop and the window freezes. Three rules end every such loop:
++// - A watch is not woken by the writes of its own actions (made directly, or by the watches those writes wake in turn).
++// - A watch hears only the changes made after it subscribed: a row a watch adds is not woken by the change that woke the
++//   watch (upstream it was, as the provider's listener set grows while it is iterated).
++// - A watch woken by a write made while any watch of the same state store was running (a chain of watches) takes one
++//   unit of the store's budget per action it runs, WATCH_CHAIN_ACTIONS_PER_TASK in all before the event loop gets a
++//   turn; when the budget is spent, the rest of the chain is skipped. A chain is what a loop is made of, and the budget
++//   belongs to the store, so it also holds across remounts (a watch that hides and re-shows its own parent is mounted
++//   afresh every round) and for watches that add watching rows. It is small because every write re-evaluates the whole
++//   UI, so a loop that grows the UI costs the square of its length.
++// Watches woken directly by a user's edit, an event's actions or a streamed update are not charged: one change may wake
++// a watch in every row of a long list (a "select all"), and each runs once, its whole action list, as a press would.
++var WATCH_CHAIN_ACTIONS_PER_TASK = 64;
 +var watchBudgets = /* @__PURE__ */ new WeakMap();
-+function takeWatchRun(stateStore, path) {
++function watchBudgetOf(stateStore) {
 +  let budget = watchBudgets.get(stateStore);
 +  if (!budget) {
-+    budget = { runs: 0, warned: false, timer: void 0 };
++    budget = { running: 0, executing: [], changes: /* @__PURE__ */ new WeakMap(), seq: 0, actions: 0, warned: false, timer: void 0 };
 +    watchBudgets.set(stateStore, budget);
 +  }
++  return budget;
++}
++function noteWatchChange(budget, changes) {
++  let note = budget.changes.get(changes);
++  if (!note) {
++    note = { seq: ++budget.seq, chained: budget.running > 0 };
++    budget.changes.set(changes, note);
++  }
++  return note;
++}
++function takeWatchAction(budget, path) {
 +  if (budget.timer === void 0) budget.timer = setTimeout(() => {
 +    budget.timer = void 0;
-+    budget.runs = 0;
++    budget.actions = 0;
 +    budget.warned = false;
 +  }, 0);
-+  if (budget.runs >= WATCH_RUNS_PER_TASK) {
++  if (budget.actions >= WATCH_CHAIN_ACTIONS_PER_TASK) {
 +    if (!budget.warned) {
 +      budget.warned = true;
-+      console.warn(`[json-render] Skipped the watch on "${path}": watches ran ${WATCH_RUNS_PER_TASK} times without a break (a watch that triggers itself).`);
++      console.warn(`[json-render] Skipped the watch on "${path}": watches set off by other watches ran ${WATCH_CHAIN_ACTIONS_PER_TASK} actions without a break (watches that keep waking each other).`);
 +    }
 +    return false;
 +  }
-+  budget.runs++;
++  budget.actions++;
 +  return true;
++}
++function executeAsWatch(budget, watcher, run) {
++  budget.executing.push(watcher);
++  try {
++    return run();
++  } finally {
++    budget.executing.pop();
++  }
 +}
  function ElementRenderer(props) {
    const repeatScope = useRepeatScope();
    const {
-@@ -739,7 +793,17 @@ function ElementRenderer(props) {
+@@ -739,30 +852,40 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -345,18 +593,104 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
 +      return false;
 +    }
 +  });
++  // opencode-genui patch: the action's params resolved against the live state (as upstream), and lists run through
++  // runActionList.
++  const prepareAction = (b) => {
++    if (!b.params) return b;
++    const liveCtx = {
++      ...fullCtx(),
++      stateModel: getSnapshot()
++    };
++    const resolved = {};
++    for (const [key, val] of Object.entries(b.params)) {
++      resolved[key] = resolveActionParam(val, liveCtx);
++    }
++    return {
++      ...b,
++      params: resolved
++    };
++  };
    const emit = async (eventName) => {
      const onBindings = props.element.on;
      const binding = onBindings?.[eventName];
-@@ -795,6 +859,7 @@ function ElementRenderer(props) {
-           if (!changedPaths.has(path)) continue;
-           const binding = watchConfig[path];
-           if (!binding) continue;
-+          if (!takeWatchRun(stateStore, path)) continue;
-           const bindings = Array.isArray(binding) ? binding : [binding];
-           for (const b of bindings) {
-             if (!b.params) {
-@@ -823,11 +888,15 @@ function ElementRenderer(props) {
+     if (!binding) return;
+     const actionBindings = Array.isArray(binding) ? binding : [binding];
+-    for (const b of actionBindings) {
+-      if (!b.params) {
+-        await execute(b);
+-        continue;
+-      }
+-      const liveCtx = {
+-        ...fullCtx(),
+-        stateModel: getSnapshot()
+-      };
+-      const resolved = {};
+-      for (const [key, val] of Object.entries(b.params)) {
+-        resolved[key] = resolveActionParam(val, liveCtx);
+-      }
+-      await execute({
+-        ...b,
+-        params: resolved
+-      });
+-    }
++    await runActionList(actionBindings, (b) => execute(prepareAction(b)), () => true);
+   };
+   const on = (eventName) => {
+     const onBindings = props.element.on;
+@@ -788,32 +911,31 @@ function ElementRenderer(props) {
+     if (!watchConfig) return;
+     const paths = Object.keys(watchConfig);
+     if (paths.length === 0) return;
++    const budget = watchBudgetOf(stateStore);
++    const watcher = {};
++    const since = budget.seq;
+     const unsubscribe = stateStore.subscribeChanges((changes) => {
++      const { seq, chained } = noteWatchChange(budget, changes);
++      if (seq <= since || budget.executing.includes(watcher)) return;
+       const changedPaths = new Set(changes.map((change) => change.path));
+       void (async () => {
+-        for (const path of paths) {
+-          if (!changedPaths.has(path)) continue;
+-          const binding = watchConfig[path];
+-          if (!binding) continue;
+-          const bindings = Array.isArray(binding) ? binding : [binding];
+-          for (const b of bindings) {
+-            if (!b.params) {
+-              await execute(b);
+-              continue;
+-            }
+-            const liveCtx = {
+-              ...fullCtx(),
+-              stateModel: getSnapshot()
+-            };
+-            const resolved = {};
+-            for (const [key, val] of Object.entries(b.params)) {
+-              resolved[key] = resolveActionParam(val, liveCtx);
+-            }
+-            await execute({
+-              ...b,
+-              params: resolved
++        budget.running++;
++        try {
++          for (const path of paths) {
++            if (!changedPaths.has(path)) continue;
++            const binding = watchConfig[path];
++            if (!binding) continue;
++            const bindings = Array.isArray(binding) ? binding : [binding];
++            let spent = false;
++            await runActionList(bindings, (b) => executeAsWatch(budget, watcher, () => execute(prepareAction(b))), () => {
++              if (!chained || takeWatchAction(budget, path)) return true;
++              spent = true;
++              return false;
+             });
++            if (spent) return;
+           }
++        } finally {
++          budget.running--;
+         }
+       })().catch(console.error);
+     });
+@@ -823,11 +945,15 @@ function ElementRenderer(props) {
    });
    const elementBindings = createMemo3(() => {
      const rawProps = props.element.props;
@@ -374,7 +708,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -940,10 +1009,14 @@ function ElementRendererContent(props) {
+@@ -940,10 +1066,14 @@ function ElementRendererContent(props) {
            });
          }
        });
@@ -389,7 +723,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
          get emit() {
            return props.emit;
          },
-@@ -975,6 +1048,70 @@ function ElementRendererContent(props) {
+@@ -975,6 +1105,77 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -454,18 +788,25 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
 +    return ids;
 +  };
 +}
++// opencode-genui patch: a repeat renders at most MAX_REPEAT_ROWS rows (its first ones): a list of a hundred thousand
++// items, a few hundred kilobytes of state, mounted a renderer per row for seconds. genui renders at most as much per
++// surface in all, and reports the rest (src/gui/element.ts).
++var MAX_REPEAT_ROWS = 2e3;
++function limitRows(ids) {
++  return ids.length > MAX_REPEAT_ROWS ? ids.slice(0, MAX_REPEAT_ROWS) : ids;
++}
 +function sameRowKeys(a, b) {
 +  return a.length === b.length && a.every((key, i) => key === b[i]);
 +}
  function RepeatChildren(props) {
    const stateStore = useStateStore();
    const repeat = () => props.element.repeat;
-@@ -987,17 +1124,19 @@ function RepeatChildren(props) {
+@@ -987,17 +1188,19 @@ function RepeatChildren(props) {
      return resolved;
    };
    const items = () => statePath() === void 0 ? [] : getByPath2(stateStore.state, statePath()) ?? [];
 +  const rowIds = createRowIds();
-+  const rowKeys = createMemo3(() => rowIds(items(), repeat()), void 0, {
++  const rowKeys = createMemo3(() => limitRows(rowIds(items(), repeat())), void 0, {
 +    equals: sameRowKeys
 +  });
    return _$createComponent6(For, {
@@ -487,7 +828,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..863d88333807ea12bfd8fabf4fa78bec
          get index() {
            return index();
          },
-@@ -1025,6 +1164,7 @@ function RepeatChildren(props) {
+@@ -1025,6 +1228,7 @@ function RepeatChildren(props) {
                    get element() {
                      return el();
                    },

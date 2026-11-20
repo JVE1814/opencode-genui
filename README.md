@@ -74,12 +74,14 @@ removes or reorders items around it, and goes when the agent removes the item.
 - The header names the canvas (`main` when omitted). Each canvas is a tab in the session's side panel.
 - A block that sets `/root` and adds that root element replaces the canvas; any other block **patches** it
   (`{"op":"replace","path":"/state/done/2","value":true}`). Pointing `/root` at an element the canvas already has
-  switches the view and keeps its elements and state, also when the block rewrites that element with `replace`.
+  switches the view and keeps its elements and state, also when the block rewrites that element with `replace`, or
+  copies or moves one of the canvas's elements there.
 - `{"canvas":"migration","close":true}` removes it.
 - Canvases render **while the agent is still writing**, and a new canvas opens its tab automatically (configurable).
 - They survive reloads: the transcript is the log, and each canvas's last settled state is also stored, so canvases
-  created long ago in a session still open. A canvas whose reply was reverted stays gone, also when the revert was
-  committed while the app was closed (genui asks the server whether that reply still exists).
+  created long ago in a session still open; a switch of `/root` whose canvas was created before the loaded messages
+  loads them first. A canvas whose reply was reverted stays gone, also when the revert was committed while the app was
+  closed (genui asks the server whether that reply still exists, and asks again after a failed request).
 
 ### Components
 
@@ -148,7 +150,9 @@ Specs are written by a model and treated as data:
   Pagination or Tabs. Never from `watch`, focus, blur, typing or slider movement, and never from an `onSuccess`/`onError`
   handler read from state. One activation may run up to 3 of them (copy a code, then open a page); the next activation
   of that UI needs a second's gap, and a choice made sooner is sent once the second has passed (only the control's
-  latest). Arrow keys in a Radio or Tabs only move the choice; Space, Enter or a click sends it.
+  latest). Arrow keys in a Radio or Tabs only move the choice; Space, Enter or a click sends it (nothing, when the
+  arrows brought it back to where it started). On a closed Select, arrow keys and letters do nothing (the app's select
+  would choose with them): its list opens with ArrowDown, Enter or Space.
 - **Confirms show everything.** genui asks first when your setting says so, or when the spec asks. The dialog shows the
   whole payload (the full message with its data, the URL, the copied text) last and labelled, with line breaks shown as
   ↵ (the app's dialog runs its text together), invisible and blank characters spelled out, long runs counted, its
@@ -156,15 +160,19 @@ Specs are written by a model and treated as data:
 - **Blocks outside the agent's reply are untrusted.** A ` ```spec ` block in tool output or a previewed file is marked as
   such and asks before every outward action (by default), keeping genui's own wording; the spec's text appears only
   quoted. It gets state of its own (it cannot read or change the agent's UI with the same `id`), cannot open a Dialog or
-  Drawer by itself, and has no "Ask agent to fix". Trust is decided by the block's exact text.
+  Drawer by itself (also not while another of its choices waits for the gap), and has no "Ask agent to fix". Trust is decided by the block's exact text.
 - **Passwords stay in memory.** What you type into a password Input is never written to stored UI state, also after
   the agent's next version of the UI drops that Input. Other edits are
   stored per session (up to 50 surfaces) so they survive reloads, until **Clear stored UI state**.
-- **No freezes.** Validation patterns run on a linear-time matcher (no backreferences or lookarounds) with a shared work
-  budget, Markdown is prepared in time linear in its length, and a UI's watches stop after 64 runs without a break (in
-  all, also across remounts, so a watch that hides and re-shows itself stops too), so a spec cannot hang the window.
-  One change can therefore wake at most 64 watches at once: a reaction in every row of a long list belongs in the
-  rows' props (`$state`, `$item`), not in a watch per row.
+- **Bounded work.** Validation patterns run on a linear-time matcher (no backreferences or lookarounds) with a shared work
+  budget, and Markdown is prepared in time linear in its length. State actions in a row (setState, pushState,
+  removeState), and the first actions of the watches one change wakes, run in one batch, so the UI re-evaluates once
+  instead of once per write. A watch is not woken by its own writes, and watches set off by other watches stop after 64
+  actions without a break (in all, also across remounts), while one change may still wake a watch in every row. A
+  Dialog or Drawer opens at most once per task and not in a task in which it closed, so it cannot loop on a field's
+  focus and blur, or be re-opened by a watch as you close it. A UI shows at most about 2,000 elements or 500,000
+  characters of text in all (a repeat inside a repeat renders the product of both lists; the rest is reported as an
+  issue), a repeat at most 2,000 rows, and one edit of its state holds at most a million characters.
 
 ## Development
 
@@ -211,6 +219,9 @@ playground/        fake desktop host for development and end-to-end tests
   their address shows in their tooltip rather than the status bar.
 - The app's confirm dialog cannot be selected or copied from, and runs its text together: genui shows line breaks in
   the payload as ↵.
+- Expressions that repeat a long text are not bounded while they resolve: a `$template` or `$concat` that reads one
+  long string from state many times builds the whole result before the UI's size limit leaves it out, so a very large
+  block built for it can still exhaust memory.
 - Messages a UI sends use the model picked in the composer but the session's current agent: the plugin API does not
   expose the composer's agent.
 - In windows narrower than 768 px the app has no side region: canvases show in the session's Canvas view (in the More
