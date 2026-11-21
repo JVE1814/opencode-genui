@@ -3,6 +3,7 @@ import { createMarkdownParser } from "@opencode/ui/context/marked-parser"
 import { Lexer, type Token } from "marked"
 import {
   blockStructure,
+  blockWork,
   CHARS_PER_BLOCK,
   codeBlocks,
   JOINER,
@@ -12,16 +13,18 @@ import {
   MAX_NESTING,
   MAX_PARAGRAPH,
   markdownBudget,
+  markdownWork,
   neutralizeMarkdown,
   prepareMarkdown,
   preparedCache,
+  renderMarkdown,
   SHAPE_CACHE_CHARS,
   shownLength,
   splitMarkdown,
 } from "../../src/gui/components/markdown.ts"
-import { CELLS_PER_UNIT, domUnits, markdownUnits, MAX_TABLE_CELLS } from "../../src/gui/costs.ts"
+import { CELLS_PER_UNIT, CODE_PART_UNITS, domUnits, markdownUnits, MAX_TABLE_CELLS } from "../../src/gui/costs.ts"
 import { markdownCut, tooLarge } from "../../src/gui/issues.ts"
-import { TEXT_PER_UNIT } from "../../src/shared/constants.ts"
+import { RENDER_UNITS, TEXT_PER_UNIT } from "../../src/shared/constants.ts"
 import { seeded } from "./random.ts"
 
 // Regression tests for the eighth review's Markdown findings ([review8#R7S2-2], [review8#R7S1-5], [review8#R7F2-3],
@@ -108,12 +111,17 @@ const shownSource = (text: string, shown: number) =>
 const writtenParts = (text: string, shown: number) =>
   splitMarkdown(shownSource(text, shown)).flatMap((part) => (part.kind === "markdown" ? [part.text] : []))
 
-/** The Markdown parts genui hands the renderer for a text, as MarkdownText does (cut where markdownShape says). */
+/**
+ * The Markdown parts genui hands the renderer for a text, as MarkdownText does (see renderMarkdown: cut where
+ * markdownShape says, or earlier where its check cuts it), and what the render budget charged for the text (`charged`:
+ * markdownShape, the model's reading of the text as written).
+ */
 function handed(text: string) {
-  const shape = markdownShape(text)
-  const parts = prepareMarkdown(text, "Image", shape.cut)
+  const charged = markdownShape(text)
+  const { cut, parts } = renderMarkdown(text, "Image")
   return {
-    shape,
+    charged,
+    cut,
     parts: parts.flatMap((part) => (part.kind === "markdown" ? [part.text] : [])),
     own: parts.filter((part) => part.kind === "code").length,
   }
@@ -353,7 +361,8 @@ describe("one model of marked's block structure counts and cuts [review8#R7S2-2]
       const text = base.join("\n")
       const longest = (shown: string) =>
         Math.max(0, ...splitMarkdown(shown).flatMap((part) => (part.kind === "markdown" ? marked(part.text).runs : [])))
-      const { reason, shown } = shownLength(text)
+      // What shows as MarkdownText renders it (the check's cut included).
+      const { reason, shown } = renderMarkdown(text, "Image").cut
       const given = handed(text).parts
       const added = given.join("").length - writtenParts(text, shown).join("").length
       expect(Math.max(0, ...given.flatMap((part) => lex(part).runs))).toBeLessThanOrEqual(MAX_PARAGRAPH + added)
@@ -446,8 +455,10 @@ describe("every code block marked renders is counted, and nothing else [review8#
     expect(codeBlocks(glossary)).toEqual({ total: 0, own: 0 })
     expect(markdownShape(glossary).cut).toEqual({ shown: glossary.length })
     // Its 5,100 blocks (an item and two paragraphs each, 20 characters apiece) cost about a hundred units on top of its
-    // 406: it renders, far within the budget.
-    expect(domUnits("Markdown", { content: glossary })).toBeLessThan(150)
+    // 406, and since [review10#R8D-2] its 1,700 bold terms count too, two inline elements each (two `**` runs can make
+    // two, so the count never falls short): about 440 in all. It renders, within the budget (2,000 for a UI).
+    expect(domUnits("Markdown", { content: glossary })).toBeLessThan(450)
+    expect(domUnits("Markdown", { content: glossary }) + glossary.length / TEXT_PER_UNIT).toBeLessThan(1000)
     const runbook = (count: number) =>
       Array.from(
         { length: count },
@@ -559,7 +570,7 @@ describe("a text's blocks are charged as Table cells, and cut past MAX_MARKDOWN_
     const list = "- a\n".repeat(24_000)
     expect(shownLength(list).reason).toBe("blocks")
     expect(markdownUnits(list)).toBe(MAX_MARKDOWN_BLOCKS / CELLS_PER_UNIT)
-    expect(markdownCut(10, 20, "blocks").message).toContain("too many and too short")
+    expect(markdownCut(10, 20, "blocks").message).toContain("too many and too close")
   })
 
   test("a wide header over short rows is counted by its padded cells, without building them", () => {
@@ -578,23 +589,51 @@ describe("a text's blocks are charged as Table cells, and cut past MAX_MARKDOWN_
   })
 
   test("ordinary documents' blocks are paid for by their length: no charge, no cut", () => {
+    // Prose with a link, some emphasis and code in each paragraph: its blocks and inline elements are further apart
+    // than one per CHARS_PER_BLOCK characters, so its length pays for them.
+    const prose = (length: number) => {
+      let text = ""
+      for (let index = 1; text.length < length; index++)
+        text += `## Part ${index}\n\nThis part of the guide explains how the scheduler retries a job whose window overlaps a deploy, and what **step ${index}** changes in \`config_${index}.yaml\`; see [the runbook](https://example.com/runbook/${index}) for the details and the _notes_ on rollback.\n\n`
+      return text
+    }
+    for (const length of [20_000, 100_000, 400_000]) {
+      const text = prose(length)
+      expect(markdownShape(text)).toEqual({ cut: { shown: text.length }, code: 0, own: 0, blocks: 0 })
+      expect(markdownUnits(text)).toBe(0)
+    }
+    expect(markdownUnits("plain")).toBe(0)
+  })
+
+  test("dense ones pay for their blocks and inline elements beyond that, and show whole up to 100 KB", () => {
+    // A heading, a paragraph with three formatted spans and two items every 130 characters (one node per 16) paid
+    // nothing before [review10#R8D-2], when only blocks counted: its emphasis and code spans count now (bold as two,
+    // as two `**` runs can be), so it pays the rest, as a text of tiny links or emphases must.
     const doc = (length: number, table: string) => {
       let text = ""
       for (let index = 1; text.length < length; index++)
         text += `## Section ${index}\n\nThis section explains **step ${index}** of the rollout, with \`config_${index}.yaml\` and _notes_.\n\n- item one for ${index}\n- item two for ${index}\n\n${table}`
       return text
     }
-    for (const length of [20_000, 100_000, 400_000]) {
+    for (const length of [20_000, 100_000]) {
       const text = doc(length, "")
-      expect(markdownShape(text)).toEqual({ cut: { shown: text.length }, code: 0, own: 0, blocks: 0 })
-      expect(markdownUnits(text)).toBe(0)
-      // With a table of one-character cells in each section, its blocks cost a little: it still shows whole, and its
-      // length's units (1,600 at 400 KB) and these stay within the budget.
+      expect(markdownShape(text).cut).toEqual({ shown: text.length })
+      expect(markdownUnits(text)).toBeGreaterThan(0)
+      expect(markdownUnits(text)).toBeLessThan((0.45 * text.length) / TEXT_PER_UNIT)
+      // With a table of one-character cells in each section, its blocks cost a little more: it still shows whole, and
+      // its length's units and these stay within the budget.
       const tables = doc(length, "| a | b |\n|---|---|\n| 1 | x |\n\n")
       expect(markdownShape(tables).cut).toEqual({ shown: tables.length })
       expect(markdownUnits(tables) + tables.length / TEXT_PER_UNIT).toBeLessThan(2000)
     }
-    expect(markdownUnits("plain")).toBe(0)
+    // At 400 KB it builds about 20,000 nodes (22,000 with the tables), what a whole UI shows (RENDER_UNITS): the table
+    // variant is cut where they pass the bound, and the other costs more than a UI holds, as the budget then says.
+    const big = doc(400_000, "")
+    expect(markdownShape(big).cut).toEqual({ shown: big.length })
+    expect(markdownUnits(big) + big.length / TEXT_PER_UNIT).toBeGreaterThan(2000)
+    const tables = doc(400_000, "| a | b |\n|---|---|\n| 1 | x |\n\n")
+    expect(markdownShape(tables).cut.reason).toBe("blocks")
+    expect(markdownShape(tables).cut.shown).toBeGreaterThan(350_000)
   })
 })
 
@@ -650,7 +689,10 @@ describe("text built to make marked's block lexer slow is cut [review8#R7F2-2]",
       return text
     }
     const shapes: Record<string, string> = {
-      "a sentence, then a lazy sentence": fill(100_000, () => `> - ${sentence(8)}\n${sentence(6)}\n`),
+      // 80 KB since [review10#R8D-1]: marked copies and splits the rest of the quote by the character twice as slowly
+      // on text with a character outside Latin-1 (175 ms at 100 KB, against 60), as most text genui hands it is (a
+      // joiner, a "…", a dash or a quote mark of the model's), and the bound now weighs that.
+      "a sentence, then a lazy sentence": fill(80_000, () => `> - ${sentence(8)}\n${sentence(6)}\n`),
       "a wrapped paragraph": fill(
         100_000,
         () => `> - ${sentence(12)} ${sentence(10)}\n${sentence(11)} ${sentence(9)}\n`,
@@ -659,10 +701,54 @@ describe("text built to make marked's block lexer slow is cut [review8#R7F2-2]",
     }
     for (const [name, text] of Object.entries(shapes))
       expect({ name, cut: shownLength(text) }).toEqual({ name, cut: { shown: text.length } })
+    const longer = fill(100_000, () => `> - ${sentence(8)}\n${sentence(6)}\n`)
+    expect(shownLength(longer).reason).toBe("work")
+    expect(shownLength(longer).shown).toBeGreaterThan(78_000)
     // With lines of a few characters, marked takes seconds (3.6 s at 100 KB): cut, where its work passes the bound.
     const short = "> - a\nlazy\n".repeat(9000)
     expect(shownLength(short).reason).toBe("work")
     expect(shownLength(short).shown).toBeLessThan(25_000)
+  })
+
+  test("the lines marked's setext and table rules read past are weighed as marked spends on them [review9#R8C-2]", () => {
+    // marked's time on texts of these units against a reference unit, measured in Chromium (blockTokens on the text
+    // as genui hands it, with a character outside Latin-1, where marked's regexes run slowest), and the model's work
+    // on the same texts: they must agree within a quarter. The setext rule reads on past every line that is not a
+    // blank line, an underline or another block's start, from every paragraph's start: at each line it tries eight
+    // other rules' starts, each of which backs up over the line's leading spaces, and the table rule's over a run of
+    // `|`, `:`, `-` and spaces. A header whose delimiter row has another number of columns is tried with all the rows
+    // after it. Weighed by their characters alone, the first two took marked twice the time a unit of the other shapes
+    // did, and the third half (6 to 14 ns a unit against 2 to 3).
+    const measured: [string, string, string, number][] = [
+      ["lines of three spaces and a letter, between rules", "   a\n***\n", "a\n***\n", 3.5],
+      ["runs of `|-`, between rules", "|-|-|-|-|-|-|-|-|-|-|-|-|-|-|x\n***\n", "a\n***\n", 12.2],
+      ["lines of 30 letters, between rules", "a".repeat(30) + "\n***\n", "a\n***\n", 3.1],
+      ["one-column table rows, between rules", "|r|\n***\nx\n***\n", "r|r\n***\nx\n***\n", 1.23],
+      ["six-column headers over two-column delimiter rows", "a|b|c|d|e|f\n-|-\n", "a\n-|-\n", 1.39],
+      // [review10#R8D-1] The table rule backs up over a run of `|` and spaces again for each number of leading spaces
+      // it may take: weighed by the run alone, these took 5 to 6 ns a unit. And marked copies and splits the rest of a
+      // quote by the character, on text outside Latin-1, more slowly than the model weighed (4.3 to 5.4 ns a unit).
+      ["three spaces, then a run of `| `, between rules", "   | | | | | | | |x\n***\n", "a\n***\n", 19.5],
+      ["one space, then a run of `| `, between rules", " | | | | | | | |x\n***\n", "a\n***\n", 10.25],
+      [
+        "quoted items of eight words, lazy lines of six",
+        "> - the scheduler retries jobs whose window overlaps a\ndeploy cache config the scheduler retries\n",
+        "> - a\nlazy\n",
+        3.42,
+      ],
+      ["quoted items of two words, lazy lines of one", "> - the scheduler\nretries\n", "> - a\nlazy\n", 1.61],
+    ]
+    for (const [name, unit, reference, time] of measured) {
+      const ratio = blockWork(unit.repeat(1500)) / blockWork(reference.repeat(1500))
+      expect({ name, agrees: ratio > time * 0.75 && ratio < time * 1.25 }).toEqual({ name, agrees: true })
+    }
+    // So 100 KB of each is cut where marked would take about 0.1 s.
+    for (const [name, unit] of measured) {
+      const text = unit.repeat(Math.ceil(100_000 / unit.length))
+      const { reason, shown } = shownLength(text)
+      expect({ name, reason }).toEqual({ name, reason: "work" })
+      expect(blockWork(text, shown)).toBeLessThanOrEqual(MAX_BLOCK_WORK)
+    }
   })
 })
 
@@ -749,8 +835,11 @@ describe("what genui hands marked is what the model read [review9#R8S-1] [review
     // every `*` raw took marked 25 s in V8 (b943538 cut it at 20,000).
     for (const tail of ["*a ".repeat(13_333), "word ".repeat(5000), "*a ".repeat(150_000)]) {
       const text = "1.   *\n<i>xx#\n\t" + tail
-      const { shape, parts } = handed(text)
-      expect(shape.cut).toEqual({ shown: "1.   *\n<i>xx#\n".length, reason: "lines" })
+      const { charged, cut, parts } = handed(text)
+      // Cut where it renders. The render budget charged for the text as the model reads it as written (one code block,
+      // whole): never less than what shows [review9#R8C-1].
+      expect(cut).toEqual({ shown: "1.   *\n<i>xx#\n".length, reason: "lines" })
+      expect(charged).toEqual({ cut: { shown: text.length }, code: 1, own: 0, blocks: 0 })
       expect(Math.max(...parts.flatMap((part) => lex(part).runs))).toBeLessThan(100)
       expect(parts.reduce((total, part) => total + rawDelimiters(part), 0)).toBeLessThan(5)
       // Unchecked, marked got all of it in one run, every delimiter raw.
@@ -762,39 +851,45 @@ describe("what genui hands marked is what the model read [review9#R8S-1] [review
 
   test("indented code after such a line is counted where it shows: 4,310 uncounted code blocks in 98 KB before", () => {
     const text = Array.from({ length: 5800 }, () => "1.   *\n<i> #\n\t-").join("\n\n")
-    const { shape, parts } = handed(text)
-    expect(shape.cut).toEqual({ shown: "1.   *\n<i> #\n".length, reason: "lines" })
-    expect(shape.code).toBe(parts.reduce((total, part) => total + lex(part).code, 0))
+    const { charged, cut, parts } = handed(text)
+    expect(cut).toEqual({ shown: "1.   *\n<i> #\n".length, reason: "lines" })
+    // What shows renders no code block, as the model read it, and the charge (the text as written, read whole up to
+    // its cut for blocks) counted none either.
+    expect(parts.reduce((total, part) => total + lex(part).code, 0)).toBe(0)
+    expect(charged.code).toBe(0)
     // Unchecked, marked rendered a code block for most of them, and the model counted none.
     expect(unchecked(text).reduce((total, part) => total + lex(part).code, 0)).toBeGreaterThan(4000)
-    expect(markdownShape(text.slice(0, 73_270)).code).toBe(0)
+    expect(renderMarkdown(text.slice(0, 73_270), "Image").cut).toEqual(cut)
     // A line neutralizing leaves alone is read as written: each code block that shows counts (the text is cut for its
     // many small blocks), and the text is too large to render.
     const plain = Array.from({ length: 5800 }, () => "1.   *\nabcd #\n\t-").join("\n\n")
     const given = handed(plain)
-    expect(given.shape.cut.reason).toBe("blocks")
-    expect(given.shape.code).toBe(given.parts.reduce((total, part) => total + lex(part).code, 0))
-    expect(given.shape.code).toBeGreaterThan(4000)
+    expect(given.cut.reason).toBe("blocks")
+    expect(given.charged.cut).toEqual(given.cut)
+    expect(given.charged.code).toBe(given.parts.reduce((total, part) => total + lex(part).code, 0))
+    expect(given.charged.code).toBeGreaterThan(4000)
     expect(domUnits("Markdown", { content: plain })).toBeGreaterThan(2000)
   })
 
   test("through the real neutralizer, the model's counts and runs are marked's for what it gets", () => {
     // Generated documents through genui's own pipeline (cut, split, neutralized), lexed by the app's marked as they are:
-    // the code blocks charged are the ones marked renders, and each part's blocks, code and runs (in number; longer
-    // only by what neutralizing wrote) are what the model read in the part as written. (The test above the fold
-    // compares the model with marked on texts as written, through a stand-in that keeps every length.)
+    // the code blocks charged are the ones marked renders (fewer when the check cut the text earlier than the charge
+    // did [review9#R8C-1]), and each part's blocks, code and runs (in number; longer only by what neutralizing wrote)
+    // are what the model read in the part as written. (The test above the fold compares the model with marked on texts
+    // as written, through a stand-in that keeps every length.)
     const failures: string[] = []
     let checked = 0
     for (let seed = 1; seed <= 3000 && failures.length < 5; seed++) {
       const draw = seeded(seed * 104_729)
       const text =
         seed % 3 === 0 ? lazyDocument(draw) : seed % 3 === 1 ? lineDocument(draw) : structured(draw).join("\n")
-      const { shape, parts, own } = handed(text)
-      if (shape.cut.reason === "lines") checked++
-      const written = writtenParts(text, shape.cut.shown)
+      const { charged, cut, parts, own } = handed(text)
+      if (cut.reason === "lines") checked++
+      const written = writtenParts(text, cut.shown)
       const out: string[] = []
       const rendered = parts.reduce((total, part) => total + lex(part).code + lex(part).math, own)
-      if (rendered !== shape.code) out.push(`code blocks: charged ${shape.code}, marked ${rendered}`)
+      if (cut.reason === "lines" ? rendered > charged.code : rendered !== charged.code)
+        out.push(`code blocks: charged ${charged.code}, marked ${rendered}`)
       if (written.length !== parts.length) out.push(`parts: ${written.length} written, ${parts.length} handed`)
       written.forEach((source, index) => {
         const model = blockStructure(source)
@@ -827,13 +922,388 @@ describe("what genui hands marked is what the model read [review9#R8S-1] [review
     expect(Math.max(...parts.flatMap((part) => (part.kind === "markdown" ? lex(part.text).runs : [])))).toBeLessThan(
       100,
     )
-    // The parts markdownShape prepared to check a text are kept for MarkdownText: at most 64 texts, and 2,000,000
-    // characters of texts and parts (and the newest).
-    for (let index = 0; index < 300; index++) markdownShape(`text ${index}`)
+    // The parts MarkdownText rendered are kept for it (a remount, a repeat's rows): at most 64 texts, and 2,000,000
+    // characters of texts and parts (and the newest). (markdownShape prepared and kept them before: it now prepares
+    // nothing [review9#R8C-1].)
+    for (let index = 0; index < 300; index++) renderMarkdown(`text ${index}`, "Image")
     expect(preparedCache().texts).toBeLessThanOrEqual(64)
     const long = (index: number) => `${index} ${"word ".repeat(80_000)}`
-    for (let index = 0; index < 12; index++) markdownShape(long(index))
+    for (let index = 0; index < 12; index++) renderMarkdown(long(index), "Image")
     expect(preparedCache().chars).toBeLessThanOrEqual(SHAPE_CACHE_CHARS + long(0).length + 2 * MAX_PARAGRAPH)
     expect(preparedCache().texts).toBeLessThan(12)
   })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The charge is the model's reading; the check runs where a text renders [review9#R8C-1]
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Lines of `size` characters in all, line `i` being `line(i)`. */
+function linesOf(size: number, line: (i: number) => string): string {
+  const out: string[] = []
+  for (let i = 0, length = 0; length < size; i++) {
+    out.push(line(i))
+    length += out.at(-1)!.length + 1
+  }
+  return out.join("\n")
+}
+
+/**
+ * Paragraphs of links, which neutralizing writes again, ending in a list item whose lazy line it lengthens. (With words
+ * between them since [review10#R8D-2]: four links in 40 characters are more inline elements than their length pays
+ * for, and such a text is cut for them long before its end.)
+ */
+const linkText = (size: number, end: string) =>
+  linesOf(size, (i) =>
+    i % 3 === 2
+      ? ""
+      : "[a](b) [c](http://d.e) <i>x</i> www.f.g, then a sentence of ordinary words that goes on for a while before it ends.",
+  ) + `\n\n1.   *\n<i> #\n\t-\n${end}`
+
+const rowCount = (text: string) => text.split(/\r\n|\r|\n/).length
+
+describe("the render budget charges the model's reading alone; the check runs where a text renders [review9#R8C-1]", () => {
+  test("charging texts never neutralizes them: four 495 KB Accordion items cost one reading each", () => {
+    // markdownShape neutralized and checked every text it measured, so the render charge of a closed Accordion of four
+    // such items, in a 103 KB spec the budget then refused, blocked the window 2 s (0.11 s before), whether or not any
+    // of it showed.
+    const items = [0, 1, 2, 3].map((k) => ({ title: `Item ${k}`, content: linkText(495_000, `end ${k}`) }))
+    const before = markdownWork()
+    expect(domUnits("Accordion", { items, type: "multiple", defaultOpen: [] })).toBeGreaterThan(0)
+    for (const { content } of items) markdownUnits(content)
+    const after = markdownWork()
+    expect(after.neutralized - before.neutralized).toBe(0)
+    expect(after.modeled - before.modeled).toBe(items.reduce((total, item) => total + rowCount(item.content), 0))
+    // Each still diverges where it renders, and is cut there (within its charge: see below).
+    const { cut } = renderMarkdown(items[0]!.content, "Image")
+    expect(cut.reason).toBe("lines")
+    expect(cut.shown).toBeLessThan(markdownShape(items[0]!.content).cut.shown)
+  })
+
+  test("a text cut where it renders is neutralized once, and read once more only up to the cut", () => {
+    // It was neutralized twice and read five times (the cut text checked again from scratch): 1.25 to 1.74 s for one
+    // 495 KB text of links that diverges at its end, against 0.5 to 0.7 s before the check.
+    const text = linkText(400_000, "end")
+    const rows = rowCount(text)
+    markdownShape(text)
+    const before = markdownWork()
+    const { cut, parts } = renderMarkdown(text, "Image")
+    const after = markdownWork()
+    expect(cut).toEqual({ shown: text.indexOf("<i> #\n\t-") + "<i> #\n".length, reason: "lines" })
+    // Once over the text and the lines a cut text ends with; the model reads it as written, neutralized, and the
+    // neutralized rows up to the cut once more.
+    expect(after.neutralized - before.neutralized).toBeLessThanOrEqual(rows + 3)
+    expect(after.modeled - before.modeled).toBeLessThanOrEqual(3 * rows + 6)
+    // What it hands the renderer: the rows before the cut, as neutralized in the first pass.
+    expect(parts.length).toBe(1)
+    expect(parts[0]!.kind === "markdown" && parts[0]!.text.endsWith("\n\n\n…")).toBe(true)
+    // Rendered again (a remount, a repeat's rows), it is not prepared again.
+    const again = markdownWork()
+    expect(renderMarkdown(text, "Image")).toEqual({ cut, parts })
+    expect(markdownWork()).toEqual(again)
+  })
+
+  test("what renders never costs more than its charge, on generated documents and the check's cuts", () => {
+    // The render budget charges a text by the model's reading of it as written (markdownShape, markdownUnits); what
+    // MarkdownText hands the renderer is that text neutralized, cut earlier where the check finds the model reads it
+    // otherwise (renderMarkdown). Lexed by the app's marked, what renders is within the charge: its code blocks, those
+    // shown on their own, and its blocks beyond what the text's length pays for (counted as the charge counts them: the
+    // element's props pay for the text's length, so its blocks are allowed one per CHARS_PER_BLOCK of the text as
+    // written up to the charged cut).
+    const texts: string[] = []
+    for (let seed = 1; seed <= 1500; seed++) {
+      const draw = seeded(seed * 15_485_863)
+      const kind = seed % 4
+      let text = kind === 0 ? lazyDocument(draw) : kind === 1 ? lineDocument(draw) : structured(draw).join("\n")
+      // Some lines grown past a paragraph's length, and some ending in a lazy line neutralizing lengthens.
+      if (kind === 3) {
+        const lines = text.split("\n")
+        const index = draw(lines.length)
+        lines[index] = lines[index] + " " + "word ".repeat(1000 + draw(4200))
+        text = lines.join("\n")
+      }
+      if (draw(4) === 0) text += "\n" + lazyDocument(draw)
+      texts.push(text)
+    }
+    // [review9#R8S-1] and [review9#R8S-2], and a long text that diverges at its end.
+    texts.push("1.   *\n<i>xx#\n\t" + "*a ".repeat(13_333))
+    texts.push(Array.from({ length: 5800 }, () => "1.   *\n<i> #\n\t-").join("\n\n"))
+    texts.push(Array.from({ length: 5800 }, () => "1.   *\nabcd #\n\t-").join("\n\n"))
+    texts.push(linkText(60_000, "end"))
+    // Tiny blocks, more than their length pays for, before a paragraph cut, or before a line the check cuts at where
+    // the rows it takes away held no block: what renders ends with a paragraph "…" of its own, which the charge counts
+    // (one of these ten crosses a unit with it).
+    for (let items = 3000; items < 3010; items++) texts.push("- a\n".repeat(items) + "\n" + "word ".repeat(5000))
+    texts.push(
+      "- a\n".repeat(400) + "\n   1. x\n  ![a](u) ---\nx",
+      "- a\n".repeat(400) + "\n  10. x\n a<b*\n  ![a](u)x\n\tx",
+    )
+    const failures: string[] = []
+    let lines = 0
+    for (const text of texts) {
+      const charged = markdownShape(text)
+      const { cut, parts } = renderMarkdown(text, "Image")
+      if (cut.reason === "lines") lines++
+      let code = 0
+      let own = 0
+      let blocks = 0
+      for (const part of parts) {
+        if (part.kind === "code") {
+          own++
+          code++
+          continue
+        }
+        const read = lex(part.text)
+        code += read.code + read.math
+        for (const count of Object.values(read.blocks)) blocks += count
+      }
+      const allowed = Math.floor(charged.cut.shown / CHARS_PER_BLOCK)
+      const units =
+        own * CODE_PART_UNITS +
+        (code - own) +
+        Math.floor(Math.min(MAX_MARKDOWN_BLOCKS, Math.max(0, blocks - allowed)) / CELLS_PER_UNIT)
+      const out: string[] = []
+      // (The charge counts the blocks beyond `allowed`, up to MAX_MARKDOWN_BLOCKS.)
+      if (charged.blocks < MAX_MARKDOWN_BLOCKS && blocks > charged.blocks + allowed)
+        out.push(`blocks: ${blocks}, charged ${charged.blocks} beyond ${allowed}`)
+      if (cut.shown > charged.cut.shown) out.push(`shows ${cut.shown}, charged ${charged.cut.shown}`)
+      if (code > charged.code) out.push(`code blocks: ${code}, charged ${charged.code}`)
+      if (own > charged.own) out.push(`code blocks on their own: ${own}, charged ${charged.own}`)
+      if (units > markdownUnits(text)) out.push(`units: ${units}, charged ${markdownUnits(text)}`)
+      if (out.length && failures.length < 5)
+        failures.push(`${JSON.stringify(text.slice(0, 300))}\n  ${out.join("\n  ")}`)
+    }
+    expect(failures).toEqual([])
+    // The check cut some of them where they render.
+    expect(lines).toBeGreaterThan(50)
+  }, 120_000)
+})
+
+/** marked's block work on what renderMarkdown hands it, each part lexed on its own (see MAX_BLOCK_WORK). */
+const handedWork = (parts: readonly { kind: string; text?: string }[]) =>
+  parts.reduce((total, part) => total + (part.kind === "markdown" ? blockStructure(part.text!).work : 0), 0)
+
+describe("marked's block work is bounded on the text it gets, not on the text as written [review10#R8D-1]", () => {
+  test("lines neutralizing lengthens (tenfold, a bare `www.` address) are cut where marked's work on them passes", () => {
+    // The bound was tallied on the text as written, but marked reads the neutralized text, whose lines are up to 10.7
+    // times longer, by the character (its setext and lazy-line scans): these took it 0.2 to 0.93 s each, at 5 to 24 ns
+    // a unit as written, against about 0.1 s.
+    const repeat = (unit: string, length: number) => unit.repeat(Math.ceil(length / unit.length)).slice(0, length)
+    const shapes: Record<string, string> = {
+      "a list item's lines of `www.a`": "- a\n" + "www.a\n".repeat(20_000),
+      "a quoted item's lines of `www.a`": "> - a\n" + "www.a\n".repeat(20_000),
+      "addresses between rules": repeat("www.a.b www.c.d\n***\n", 100_000),
+      "table cells of addresses between rules": "h|h\n-|-\n" + repeat("www.a.b|www.c.d\n***\nx\n***\n", 100_000),
+      "links between rules": repeat("[a](http://b.c)[a](http://b.c)\n***\n", 100_000),
+      // Here what follows the cut is lost by marked's blockquote, which lexes the list again after each lazy line:
+      // MarkdownText's note still says the text is cut.
+      "quoted items with lazy addresses": repeat("> - a\nwww.b.c\n", 100_000),
+    }
+    for (const [name, text] of Object.entries(shapes)) {
+      const charged = markdownShape(text).cut
+      const { cut, parts } = renderMarkdown(text, "Image")
+      // Within the bound as written, the text the model cut at is far past it as marked gets it.
+      expect(blockWork(text, charged.shown)).toBeLessThanOrEqual(MAX_BLOCK_WORK)
+      const unbounded = blockStructure(neutralizeMarkdown(text.slice(0, charged.shown), "Image")).work
+      expect({ name, past: unbounded > 1.5 * MAX_BLOCK_WORK }).toEqual({ name, past: true })
+      // Cut where it renders, for marked's work, which is within the bound on what it gets.
+      expect({ name, reason: cut.reason, shows: cut.shown > 1000 }).toEqual({ name, reason: "work", shows: true })
+      expect(cut.shown).toBeLessThan(charged.shown)
+      expect({ name, within: handedWork(parts) <= MAX_BLOCK_WORK }).toEqual({ name, within: true })
+      expect(markdownCut(cut.shown, text.length, "work").message).toContain("blank lines")
+    }
+  })
+
+  test("the bound is shared by a text's parts, in their order, as marked gets them", () => {
+    // Fenced code blocks split a text into parts marked lexes one by one: their work adds up to the one bound.
+    const piece = "- a\n" + "www.a\n".repeat(550)
+    const text = Array.from({ length: 6 }, () => piece).join("\n```\ncode\n```\n")
+    expect(markdownShape(text).cut).toEqual({ shown: text.length })
+    const { cut, parts } = renderMarkdown(text, "Image")
+    expect(cut.reason).toBe("work")
+    expect(parts.filter((part) => part.kind === "code").length).toBeGreaterThan(0)
+    expect(handedWork(parts)).toBeLessThanOrEqual(MAX_BLOCK_WORK)
+    // Each part alone is within it: only their sum is not.
+    expect(blockStructure(neutralizeMarkdown(piece, "Image")).work).toBeLessThan(MAX_BLOCK_WORK)
+  })
+
+  test("ordinary documents with links show whole", () => {
+    // Paragraphs, lists and quotes of links and addresses, separated as people write them, lengthen as much and cost
+    // marked nothing to speak of.
+    const words = "deploy the service behind the proxy and check the dashboard".split(" ")
+    const draw = seeded(11)
+    const sentence = () => Array.from({ length: 10 }, () => words[draw(words.length)]).join(" ")
+    let text = ""
+    for (let index = 0; text.length < 100_000; index++)
+      text +=
+        index % 3 === 0
+          ? `## Section ${index}\n\n${sentence()} [docs](https://example.com/${index}) and www.example.com/${index}.\n\n`
+          : index % 3 === 1
+            ? `- ${sentence()} <https://example.com/a/${index}>\n- ${sentence()} [link](https://b.example/${index})\n\n`
+            : `> ${sentence()} http://example.org/${index}\n> ${sentence()}\n\n`
+    const { cut, parts } = renderMarkdown(text, "Image")
+    expect(cut).toEqual({ shown: text.length })
+    expect(handedWork(parts)).toBeLessThan(MAX_BLOCK_WORK / 10)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Inline elements count with blocks [review10#R8D-2]
+// ---------------------------------------------------------------------------------------------------------------------
+
+const INLINE_TOKENS = new Set(["link", "image", "em", "strong", "del", "codespan", "br", "inlineKatex", "html"])
+
+/** The blocks and inline elements the app's marked builds for a text (all its tokens, inline ones included). */
+function nodesOf(source: string): { blocks: number; inline: number } {
+  let blocks = 0
+  let inline = 0
+  const walk = (list: readonly Token[] | undefined) => {
+    for (const token of list ?? []) {
+      if (INLINE_TOKENS.has(token.type)) inline++
+      if (["paragraph", "heading", "hr", "blockquote"].includes(token.type)) blocks++
+      if (token.type === "list")
+        for (const item of token.items) {
+          blocks++
+          walk(item.tokens)
+        }
+      else if (token.type === "table") {
+        blocks += token.header.length * (1 + token.rows.length)
+        for (const cell of token.header) walk(cell.tokens)
+        for (const row of token.rows) for (const cell of row) walk(cell.tokens)
+      } else if ("tokens" in token) walk(token.tokens as Token[])
+    }
+  }
+  walk(parser.lexer(source) as Token[])
+  return { blocks, inline }
+}
+
+/** The blocks and inline elements marked builds for what renderMarkdown hands it, against what the charge allows. */
+function renderedNodes(text: string) {
+  const charged = markdownShape(text)
+  const { cut, parts } = renderMarkdown(text, "Image")
+  let nodes = 0
+  for (const part of parts)
+    if (part.kind === "markdown") {
+      const counted = nodesOf(part.text)
+      nodes += counted.blocks + counted.inline
+    }
+  // The charge counts the nodes beyond one per CHARS_PER_BLOCK of the text as written, up to its cut.
+  return { charged, cut, nodes, allowed: charged.blocks + Math.floor(charged.cut.shown / CHARS_PER_BLOCK) }
+}
+
+describe("a text's links, emphases and code spans count with its blocks, charged and cut past the bound [review10#R8D-2]", () => {
+  test("texts of tiny links, addresses, emphases or code spans are cut where they pass it, and charged for them", () => {
+    // Only blocks counted: 480 KB of bare addresses (53,000 links), emphases or code spans (80,000 to 96,000) in a
+    // 99 KB spec blocked the playground 1.5 to 2.1 s in one task (genui's own part up to 0.66 s), each a node the
+    // renderer builds.
+    const lines = (line: string, size = 150_000) => linesOf(size, (i) => (i % 3 === 2 ? "" : line))
+    const shapes: Record<string, string> = {
+      "bare addresses": lines("www.a www.b www.c www.d"),
+      links: lines("[a](http://b.c) [c](http://d.e) [f](http://g.h) [i](j)"),
+      "references to a definition": `[x]: http://a.b\n\n${lines("[a][x] [b][x] [x] [x][]")}`,
+      "e-mail addresses": lines("a@b.cd e@f.gh i@j.kl"),
+      autolinks: lines("<ab:c> <de:f> <gh:i>"),
+      emphases: lines("*a* *b* *c* *d* *e*"),
+      "strong emphases": lines("**a** **b** **c** **d**"),
+      strikethrough: lines("~a~ ~~b~~ ~c~ ~~d~~"),
+      "code spans": lines("`a` `b` `c` `d` `e`"),
+      math: lines("$a$ $b$ $c$ $d$"),
+      "hard line breaks": linesOf(150_000, (i) => (i % 50 === 49 ? "" : "abc  ")),
+    }
+    for (const [name, text] of Object.entries(shapes)) {
+      const { charged, cut, nodes, allowed } = renderedNodes(text)
+      expect({ name, reason: charged.cut.reason }).toEqual({ name, reason: "blocks" })
+      expect(cut.shown).toBeLessThanOrEqual(charged.cut.shown)
+      expect({ name, charged: charged.blocks > 0.99 * MAX_MARKDOWN_BLOCKS }).toEqual({ name, charged: true })
+      // What marked builds of what shows is within what the charge counted.
+      expect({ name, within: nodes <= allowed }).toEqual({ name, within: true })
+      // A 480 KB text of them costs more than a UI holds: the budget refuses it, as the playground showed.
+      const big = text.repeat(5)
+      expect(markdownUnits(big) + big.length / TEXT_PER_UNIT).toBeGreaterThan(RENDER_UNITS)
+    }
+    expect(markdownCut(10, 20, "blocks").message).toContain("links, emphases or code spans")
+  })
+
+  test("the count never falls short of what marked builds, on generated documents of inline syntax", () => {
+    // Links (inline, reference, images, autolinks, addresses, e-mail), emphasis of every kind, code spans, math and
+    // line breaks, in paragraphs, list items, quotes, headings and table rows, with stray delimiters and nesting.
+    const atoms = [
+      "*a*",
+      "**b**",
+      "***c***",
+      "_d_",
+      "__e__",
+      "~f~",
+      "~~g~~",
+      "`h`",
+      "``i``",
+      "[j](k)",
+      "[l](http://m.n)",
+      "![o](p)",
+      "![](http://q.r)",
+      "[s][x]",
+      "[x]",
+      "[x][]",
+      "![t][x]",
+      "www.u.v",
+      "http://w.x",
+      "https://www.y.z",
+      "<foo:bar>",
+      "<http://a.b>",
+      "<c@d.ef>",
+      "g@h.ij",
+      "$k$",
+      "$$l$$",
+      "\\(m\\)",
+      "n_o_p",
+      "*",
+      "**",
+      "_",
+      "~",
+      "`",
+      "[",
+      "]",
+      "!",
+      "<",
+      "\\*",
+      "word",
+      "words here",
+      "q*r*s",
+      "t**u**v",
+      "*w**x*",
+      "**y*z**",
+      "[*a*](b)",
+      "[`c`](d)",
+      "[www.e.f](g)",
+      "*[h](i)*",
+      "`[j](k)`",
+      "<i>x</i>",
+    ]
+    const prefixes = ["", "", "", "- ", "* ", "1. ", "> ", "> - ", "## ", "  ", "    ", "| ", "\t"]
+    const failures: string[] = []
+    let total = 0
+    for (let seed = 1; seed <= 1500; seed++) {
+      const draw = seeded(seed * 2_654_435_761)
+      const out: string[] = []
+      if (draw(3) === 0) out.push("[x]: http://def.example 'T'", "")
+      for (let line = 0, count = 1 + draw(40); line < count; line++) {
+        const parts = Array.from({ length: draw(12) }, () => atoms[draw(atoms.length)]!)
+        let row = prefixes[draw(prefixes.length)]! + parts.join(draw(4) === 0 ? "" : " ")
+        if (draw(10) === 0) row += "  "
+        if (draw(15) === 0) row += "\\"
+        if (draw(8) === 0) row += ` | ${atoms[draw(atoms.length)]} |`
+        out.push(row)
+        if (draw(4) === 0) out.push("")
+        if (draw(20) === 0) out.push(draw(2) ? "---" : "|-|-|")
+      }
+      let text = out.join("\n")
+      if (seed % 5 === 0) text = text.repeat(1 + draw(30))
+      const { charged, nodes, allowed } = renderedNodes(text)
+      total += nodes
+      if (charged.blocks < MAX_MARKDOWN_BLOCKS && nodes > allowed && failures.length < 5)
+        failures.push(`${nodes} nodes, ${allowed} allowed: ${JSON.stringify(text.slice(0, 300))}`)
+    }
+    expect(failures).toEqual([])
+    expect(total).toBeGreaterThan(100_000)
+  }, 120_000)
 })

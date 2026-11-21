@@ -124,18 +124,18 @@ export function chartCut(points: number, totalPoints: number, series: number, to
   }
 }
 
-/** Why a Markdown text is cut, as the issue says it (see markdownShape in components/markdown.ts). */
+/** Why a Markdown text is cut, as the issue says it (see markdownShape and renderMarkdown in components/markdown.ts). */
 const CUT_REASONS: Readonly<Record<MarkdownCutReason, string>> = {
   text: `a Markdown text shows at most ${count(MAX_MARKDOWN_TEXT)}`,
   paragraph: `a paragraph (or a list item, or a table row) runs past ${count(MAX_PARAGRAPH)} characters there: split it into shorter ones`,
-  blocks: `its paragraphs, list items or table cells are too many and too short there (a text shows at most ${count(MAX_MARKDOWN_BLOCKS)} beyond one per ${CHARS_PER_BLOCK} characters): use fewer, longer ones`,
+  blocks: `its paragraphs, list items, table cells, links, emphases or code spans are too many and too close there (a text shows at most ${count(MAX_MARKDOWN_BLOCKS)} beyond one per ${CHARS_PER_BLOCK} characters): use fewer, longer ones`,
   nesting: `lists and quotes nest more than ${MAX_NESTING} deep there: nest them less`,
   work: "the renderer would read the lines there again and again (lines with no blank line between them, in a list item or a quote, or around rules): put blank lines between paragraphs and items",
   lines:
     "the renderer would read the lines there otherwise once genui made their links and tags inert (a line of a list item or a quote without its indentation): indent such lines, or put a blank line before them",
 }
 
-/** A Markdown text showed only its first `shown` of `total` characters (see markdownShape in components/markdown.ts). */
+/** A Markdown text showed only its first `shown` of `total` characters (see renderMarkdown in components/markdown.ts). */
 export function markdownCut(shown: number, total: number, reason: MarkdownCutReason): SurfaceIssue {
   return {
     severity: "warning",

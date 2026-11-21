@@ -51,6 +51,30 @@ describe("safeUrl for links", () => {
       expect(safeUrl(url, "link")).toBeUndefined()
     },
   )
+
+  test("refuses an address without a scheme before parsing it, without the exception the parser would throw", () => {
+    // Each caught exception cost microseconds (more with DevTools open), and a Markdown text can hold 100,000 relative
+    // links: 41 s of the render charge with an inspector attached [review9#R8C-1].
+    const Parser = globalThis.URL
+    let parsed = 0
+    globalThis.URL = class extends Parser {
+      constructor(url: string | URL, base?: string | URL) {
+        parsed++
+        super(url, base)
+      }
+    } as typeof URL
+    try {
+      for (const url of ["b", "/relative/path", "./relative", "//example.com/x", "#anchor", "1http://x", "-a:b", "é:x"])
+        expect(safeUrl(url, "link")).toBeUndefined()
+      expect(safeUrl("b", "image")).toBeUndefined()
+      expect(parsed).toBe(0)
+      expect(safeUrl("HTTPS://example.com", "link")).toBe("https://example.com/")
+      expect(safeUrl("a+b.c-d:x", "link")).toBeUndefined()
+      expect(parsed).toBe(2)
+    } finally {
+      globalThis.URL = Parser
+    }
+  })
 })
 
 describe("safeUrl for images", () => {

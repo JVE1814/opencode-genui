@@ -196,19 +196,25 @@ Specs are written by a model and treated as data:
     paragraph's first 100 backslash escapes, escapes are written as character references, which display the same, and
     so is the text of the links genui writes for bare addresses. genui reads a text's blocks with one model of marked's
     block lexer (the app's parser; the tests compare the two on generated documents), so what it counts is what marked
-    renders. It reads the text as written and as it hands it to marked: making links and tags inert lengthens lines,
-    and marked decides some blocks by a line's length (a list item's or a quote's lines that are not indented), so
-    where the model reads the two differently the text is cut, at that line. A text shows up to 500,000 characters, and
-    is cut where one run of inline text (a paragraph, a list item's text, a heading or a table cell, as marked lexes
-    them) passes 20,000 characters, since marked's inline work grows faster than a paragraph; where lists or quotes
-    nest deeper than 8; where its paragraphs, headings, rules, quotes, list items and table cells pass 10,000 beyond
-    one per 25 characters; or where marked's block lexer would do more than 40 million characters' worth of scanning
-    beyond what it reads (about 0.1 s; it reads lines again where no blank line separates them in a list item or a
-    quote, or between rules: a quoted list of 100 KB whose items go on to lines without the `>` shows whole). A note says "Showing the first N of M characters", and the agent gets
-    an issue that says why. A text shows its first 32 fenced code blocks as code blocks of their own (the app's code
-    block component) and the rest as code within its Markdown; every code block marked renders (fenced or indented, in
-    a quote or a list item too) and every display math block costs the render budget, 4 units on its own and 1 within
-    the Markdown, and so do its blocks beyond one per 25 characters, a tenth of a unit each, as Table cells.
+    renders. The render budget charges a text by the model's reading of it as written, in time linear in its length,
+    whether or not the text then shows. A text that renders is read once more as genui hands it to marked: making links
+    and tags inert lengthens lines, and marked decides some blocks by a line's length (a list item's or a quote's lines
+    that are not indented), so where the model reads the two differently the text is cut, at that line; it then shows
+    less than it was charged for, never more. A text shows up to 500,000 characters, and is cut where one run of
+    inline text (a paragraph, a list item's text, a heading or a table cell, as marked lexes them) passes 20,000
+    characters, since marked's inline work grows faster than a paragraph; where lists or quotes nest deeper than 8;
+    where its paragraphs, headings, rules, quotes, list items and table cells, with its links, emphases, code spans,
+    math and line breaks (each a node the renderer builds; counted so as never to fall short of what marked builds),
+    pass 10,000 beyond one per 25 characters; or where marked's block lexer would do more than 40 million characters'
+    worth of scanning beyond what it reads, in the text as genui hands it (about 0.1 s; making an address inert makes
+    its line up to ten times longer; marked reads lines again where no blank line separates them in a list item or a
+    quote, or between rules, and lines that start with spaces or with `|`, `:` or `-` cost it more: a quoted list of
+    80 KB whose items go on to lines without the `>` shows whole). A note says "Showing the first N of M characters",
+    and the agent gets an issue that says why. A text shows its first 32 fenced code blocks as code blocks of their own
+    (the app's code block component) and the rest as code within its Markdown; every code block marked renders (fenced
+    or indented, in a quote or a list item too) and every display math block costs the render budget, 4 units on its
+    own and 1 within the Markdown, and so do its blocks and inline elements beyond one per 25 characters, a tenth of a
+    unit each, as Table cells (a large text of tiny links or emphases costs more than a UI holds, and is refused).
   - State actions in a row (setState, pushState, removeState), and the first actions of the watches one change wakes,
     run in one batch, so the UI re-evaluates once instead of once per write; a write calls only the watches of its own
     path, and a watch is not woken by its own writes. `validateForm` checks every field and writes all results at once;
@@ -340,10 +346,16 @@ playground/        fake desktop host for development and end-to-end tests
   address goes on to another line shows as text.
 - A Markdown text is cut at a list item's or a quote's line that goes on without its indentation when making a tag,
   image, link or address in it inert changes how marked reads the lines after it (and at display math past the math
-  budget in such lines, which genui shows as a code block); the note and the issue say so, and indenting those lines
-  avoids it. A quoted list whose items each go on to a line without the `>` is cut for marked's work past about 100 KB
-  when those lines are sentences, and sooner when they are shorter (with lines of a few characters marked took 3.6 s
-  for 100 KB).
+  budget in such lines, which genui shows as a code block); where the lines before it would then read otherwise too,
+  it is cut after the fenced code block before them, or shows nothing. The note and the issue say so, and indenting
+  those lines avoids it. A quoted list whose items each go on to a line without the `>` is cut for marked's work past
+  about 80 KB when those lines are sentences, and sooner when they are shorter (with lines of a few characters marked
+  took 3.6 s for 100 KB).
+- A Markdown text's links, emphases, code spans, math and line breaks are counted by the characters each needs, so as
+  never to count fewer than marked builds: bold counts as two (its two `**` could make two emphases), and so does a
+  `[link](…)` whose address holds `://` or `www.`. A text dense with them is charged up to twice what it builds, and
+  cut sooner: a 100 KB list of `- **key**: value` items costs about 650 units on top of the 400 its length costs, and
+  one of 300 KB is cut at about 150 KB.
 - The app's confirm dialog cannot be selected or copied from, and runs its text together: genui shows line breaks in
   the payload as ↵.
 - What the bounds above send to later tasks still runs there: a spec at the bounds can keep the window busy in short
@@ -352,8 +364,9 @@ playground/        fake desktop host for development and end-to-end tests
   a select-all changed, and one element's own rendering (a Table of 10,000 cells, a Markdown text of 100 KB or of
   10,000 table cells or list items, an open Select of 500 options). Measured in the playground with nothing else
   running: under 0.4 s per task for each (a Markdown text of 11,000 table cells about 0.25 s, of 12,000 list items
-  about 0.35 s), and 0.4 to 0.65 s for a Markdown text of 450,000 characters written to be slow (built with
-  `$template` from state).
+  about 0.35 s, of 450,000 characters written to be slow, built with `$template` from state, 0.1 to 0.4 s). A
+  Markdown text with as many links as its length pays for (one per 25 characters: 18,000 in 450,000 characters) takes
+  0.5 s, most of it the renderer building the links (genui's own part, up to 0.2 s); a denser one is cut, or refused.
 - A message of thousands of small blocks keeps the window busy in short tasks for a few seconds while its UIs mount
   (1,700 blocks in 100 KB: about 2 s of work, the longest task 0.25 to 0.45 s here; 4,000 header-only blocks in
   110 KB: one task of 0.55 to 0.7 s, most of it the app's own rendering of the message). Each mounted UI holds about

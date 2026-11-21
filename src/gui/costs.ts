@@ -152,10 +152,11 @@ export function textCodeUnits(text: string): number {
 
 /**
  * The units of a Markdown text beyond its length: its code blocks (see textCodeUnits), and its blocks (paragraphs,
- * headings, rules, quotes, list items, table cells) charged as Table cells are, as far as its length does not pay for
- * them already (see CHARS_PER_BLOCK in components/markdown.ts; at most MAX_MARKDOWN_BLOCKS such show). A text of tiny
- * blocks built 47,000 table cells, or 24,000 list items, in one element; charged, the time slice keeps such texts in
- * tasks of their own.
+ * headings, rules, quotes, list items, table cells) and inline elements (links, emphasis, code spans, line breaks)
+ * charged as Table cells are, as far as its length does not pay for them already (see CHARS_PER_BLOCK in
+ * components/markdown.ts; at most MAX_MARKDOWN_BLOCKS such show). A text of tiny blocks built 47,000 table cells, or
+ * 24,000 list items, and one of tiny links or emphases 80,000 of them, in one element; charged, the time slice keeps
+ * such texts in tasks of their own, and the budget refuses those too large for a UI.
  */
 export function markdownUnits(text: string): number {
   return textCodeUnits(text) + Math.floor(Math.min(MAX_MARKDOWN_BLOCKS, markdownShape(text).blocks) / CELLS_PER_UNIT)

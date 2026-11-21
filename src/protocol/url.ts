@@ -8,6 +8,9 @@ export const MAX_DATA_IMAGE = 2_000_000
  */
 const DATA_IMAGE = /^data:image\/(png|jpeg|jpg|gif|webp|avif);base64,[a-z0-9+/=\s]+$/i
 
+/** A URL's scheme and its colon, as the URL parser reads one (an ASCII letter, then letters, digits, `+`, `-`, `.`). */
+const SCHEME = /^[a-z][a-z\d+.-]*:/i
+
 /**
  * The URL policy for model-written specs. Links may be http, https or mailto; images may be http(s) or a base64
  * data:image of a raster format. Everything else (javascript:, file:, relative paths, SVG and other data: types) is
@@ -22,6 +25,9 @@ export function safeUrl(url: unknown, kind: "link" | "image"): string | undefine
     return trimmed.length <= MAX_DATA_IMAGE && DATA_IMAGE.test(trimmed) ? trimmed : undefined
   }
 
+  // Without a base, `new URL` throws for anything that does not start with a scheme: refused here without the
+  // exception, which costs microseconds (more with DevTools open), and a Markdown text can hold 100,000 relative links.
+  if (!SCHEME.test(trimmed)) return undefined
   let parsed: URL
   try {
     parsed = new URL(trimmed)

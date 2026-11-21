@@ -1,12 +1,13 @@
 import { fileURLToPath } from "node:url"
 import { expect, test, type Locator, type Page } from "@playwright/test"
 import "../../playground/hooks.ts"
-import { block, element, root } from "../../playground/scenarios/build.ts"
+import { add, block, element, root } from "../../playground/scenarios/build.ts"
 
 // Regression tests for the eighth review's Markdown findings ([R7S2-2], [R7S1-5], [R7F2-3], [R7F2-2], [R7F1-1],
-// [R7S2-4]) and the ninth's ([R8S-1], [R8S-2], [R8F-2]) in the playground. Timing is the page's own long tasks (PerformanceObserver "longtask"), with each message
-// appended in a task of the page's own. The playground's ui.Markdown is not marked, so marked's block lexing is timed in
-// the page on its own (the model's cut decides what it gets). See test/unit/review8-markdown.test.ts.
+// [R7S2-4]), the ninth's ([R8S-1], [R8S-2], [R8F-2], [R8C-1], [R8C-2]) and the tenth's ([R8D-1], [R8D-2], [R8E-1]) in
+// the playground. Timing is the page's own long tasks (PerformanceObserver "longtask"), with each message appended in a
+// task of the page's own. The playground's ui.Markdown is not marked, so marked's block lexing is timed in the page on
+// its own (the model's cut decides what it gets). See test/unit/review8-markdown.test.ts.
 
 const pageErrors = new WeakMap<Page, string[]>()
 test.beforeEach(({ page }) => {
@@ -191,7 +192,7 @@ test.describe("a text of tiny blocks is cut and charged as a Table is [R7S2-4]",
     await toolOutput(page, spec("Markdown", { content: markdown }))
     const surface = untrusted(page)
     await expect(surface.locator("[data-gu-cut]")).toContainText("Showing the first")
-    expect(await issueText(surface)).toContain("too many and too short")
+    expect(await issueText(surface)).toContain("too many and too close")
     await settle(page)
     const longest = await longestTask(page)
     const cells = await surface.locator("td, th").count()
@@ -223,6 +224,123 @@ test.describe("Markdown built to make marked's block lexer slow is cut, and says
     const deep = page.locator('[data-genui][data-surface="canvas"]').filter({ hasText: "before" })
     await expect(deep.locator("[data-gu-cut]")).toContainText("Showing the first")
     expect(await issueText(deep)).toContain("nest more than 8 deep")
+  })
+
+  test("the render charge of Markdown that never shows neutralizes nothing: a closed Accordion of 495 KB texts [R8C-1]", async ({
+    page,
+  }) => {
+    // Charging each text neutralized and checked it, and one that diverges at its end twice: four such items in a
+    // 103 KB spec, which the budget then refuses, blocked the window 2 s (0.11 s before), and 41 s with relative links
+    // (each a caught exception, slow with an inspector attached).
+    await boot(page)
+    // The markdown.ts the page runs (the playground serves the sources: imported by the very URL the page loaded it
+    // from, it is the same module), for its count of the lines the model read and neutralizing wrote.
+    const work = () =>
+      page.evaluate(async () => {
+        const url = performance
+          .getEntriesByType("resource")
+          .map((entry) => entry.name)
+          .find((name) => /\/src\/gui\/components\/markdown\.ts(\?|$)/.test(name))
+        const markdown = await import(/* @vite-ignore */ url!)
+        return markdown.markdownWork() as { modeled: number; neutralized: number }
+      })
+    const lines = (line: string) => {
+      const out: string[] = []
+      for (let length = 0, index = 0; length < 99_000; index++) {
+        out.push(index % 3 === 2 ? "" : line)
+        length += out.at(-1)!.length + 1
+      }
+      return out.join("\n")
+    }
+    for (const line of ["[a](http://b.c) [c](http://d.e) [f](http://g.h)", "[a](b) [c](d) [e](f) [g](h)"]) {
+      await page.evaluate(() => window.__genui.appendUser("go"))
+      const items = [0, 1, 2, 3].map((index) => ({
+        title: `Item ${index}`,
+        content: { $template: "${/s}".repeat(5) + `\n\n1.   *\n<i> #\n\t-\nend ${index}` },
+      }))
+      const before = await work()
+      await recordLongTasks(page)
+      await say(
+        page,
+        `Here:\n\n${block("spec", undefined, [
+          add("/state", { s: lines(line) }),
+          root("a"),
+          element("a", "Accordion", { items, type: "multiple", defaultOpen: [] }),
+        ])}\n`,
+      )
+      const surface = page.locator('[data-genui][data-surface="inline"]').last()
+      expect(await issueText(surface)).toContain("the UI is too large")
+      await settle(page)
+      const after = await work()
+      // The charge read the items (the model, as written) and neutralized none of them: nothing of them renders. This
+      // is what bounds the task, whatever the machine's load (it compared the longest task with 400 ms, which a
+      // loaded machine failed now and then on these 113 to 490 ms [R8E-1]).
+      expect(after.modeled).toBeGreaterThan(before.modeled)
+      expect({ line, neutralized: after.neutralized - before.neutralized }).toEqual({ line, neutralized: 0 })
+      // And a ceiling with room for any load (the 2 s of before is past it).
+      const longest = await longestTask(page)
+      expect({ line, blocked: longest < 1000 }).toEqual({ line, blocked: true })
+    }
+  })
+
+  test("a text of tiny links, emphases or code spans is cut or refused for them, in a bounded task [R8D-2]", async ({
+    page,
+  }) => {
+    // Only blocks counted: a 99 KB spec whose `$template` built 480 KB of bare addresses (53,000 links), emphases or
+    // code spans (80,000) blocked the playground 1.5 to 2.1 s in one task, building them all.
+    test.slow()
+    await boot(page)
+    const lines = (line: string, size: number) => {
+      const out: string[] = []
+      for (let length = 0, index = 0; length < size; index++) {
+        out.push(index % 3 === 2 ? "" : line)
+        length += out.at(-1)!.length + 1
+      }
+      return out.join("\n")
+    }
+    const spec = (line: string, size: number) =>
+      `Here:\n\n${block("spec", undefined, [
+        add("/state", { s: lines(line, size) }),
+        root("m"),
+        element("m", "Markdown", { content: { $template: "${/s}".repeat(5) } }),
+      ])}\n`
+    for (const [line, tag] of [
+      ["www.a www.b www.c www.d", "a"],
+      ["*a* *b* *c* *d* *e*", "em"],
+      ["`a` `b` `c` `d` `e`", "code"],
+    ] as const) {
+      // 480 KB of them: more than a UI holds once they are charged, so the budget refuses the element, and says so.
+      await page.evaluate(() => window.__genui.appendUser("go"))
+      await recordLongTasks(page)
+      await say(page, spec(line, 96_000))
+      const big = page.locator('[data-genui][data-surface="inline"]').last()
+      expect(await issueText(big)).toContain("the UI is too large")
+      await settle(page)
+      await expect(big.locator(tag)).toHaveCount(0)
+      // A ceiling with room for any load (the 1.5 to 2.1 s of before is past it; 0.1 to 0.15 s now, unloaded).
+      expect({ line, blocked: (await longestTask(page)) < 1000 }).toEqual({ line, blocked: true })
+      // 96 KB of them: shown up to where they pass the bound, 10,000 beyond one per 25 characters, with a note, and an
+      // issue that says why; before, all 16,000 of them and their paragraphs.
+      await page.evaluate(() => window.__genui.appendUser("go"))
+      await recordLongTasks(page)
+      await say(page, spec(line, 19_200))
+      const cut = page.locator('[data-genui][data-surface="inline"]').last()
+      const note = cut.locator("[data-gu-cut]")
+      await expect(note).toContainText("Showing the first")
+      expect(await issueText(cut)).toContain("links, emphases or code spans")
+      await settle(page)
+      const shown = Number(/first ([\d,]+)/.exec((await note.textContent()) ?? "")![1]!.replaceAll(",", ""))
+      const built = await cut
+        .locator('[data-gu="markdown"]')
+        .evaluate(
+          (markdown) =>
+            markdown.querySelectorAll("p, li, h1, h2, h3, h4, blockquote, td, th, hr, a, em, strong, code, del, br")
+              .length,
+        )
+      expect(await cut.locator(`[data-gu="markdown"] ${tag}`).count()).toBeGreaterThan(5000)
+      expect({ line, built: built <= 10_000 + Math.floor(shown / 25) }).toEqual({ line, built: true })
+      expect({ line, blocked: (await longestTask(page)) < 1000 }).toEqual({ line, blocked: true })
+    }
   })
 
   test("a list item's lazy line that neutralizing lengthens is cut there, with a note and an issue [R8S-1] [R8S-2]", async ({
@@ -280,15 +398,33 @@ test.describe("Markdown built to make marked's block lexer slow is cut, and says
         "quoted list items with lazy lines": (length) => repeat("> - a\nlazy\n", length),
         "quoted code with lazy lines": (length) => repeat(">     a\nlazy\n", length),
         "a table between rules": (length) => "h|h\n-|-\n" + repeat("r|r\n***\nx\n***\n", length),
+        // The same with one column, and lines between rules that start with spaces or a run of `|-`, which marked's
+        // setext rule reads slowest [R8C-2].
+        "a one-column table between rules": (length) => "|h|\n|-|\n" + repeat("|r|\n***\nx\n***\n", length),
+        "indented lines between rules": (length) => repeat("   a\n***\n", length),
+        "runs of |- between rules": (length) => repeat("|-|-|-|-|-|-|-|-|-|-|-|-|-|-|x\n***\n", length),
+        // Lines neutralizing lengthens (a bare `www.` address tenfold), which marked's scans read by the character,
+        // and lines of spaces and `|`, and quoted lists of short lines, which it read more slowly than the model
+        // weighed: 0.2 to 0.93 s each [R8D-1].
+        "a list item's lines of www.a": (length) => "- a\n" + repeat("www.a\n", length),
+        "a quoted item's lines of www.a": (length) => "> - a\n" + repeat("www.a\n", length),
+        "addresses between rules": (length) => repeat("www.a.b www.c.d\n***\n", length),
+        "spaces and pipes between rules": (length) => repeat("   | | | | | | | |x\n***\n", length),
+        "quoted items of short lines": (length) =>
+          repeat("> - the scheduler retries jobs whose\nwindow overlaps a\n", length),
         "task items": (length) => repeat("- [ ] a\n", length),
         "tables of the wrong width": (length) => repeat("a|b\n-|-|-\n", length),
+        "headers of one column over two": (length) => repeat("a\n-|-\n", length),
         "lists nested eight deep, lazy lines": (length) => "- ".repeat(8) + "a\n" + repeat("y\n", length),
         "headings and indented code": (length) => repeat("#\n\tc\n", length),
         // A lazy line neutralizing lengthens, before a run of `*a ` [R8S-1], or before indented code [R8S-2].
         "a lengthened lazy line, then a paragraph": (length) => "1.   *\n<i>xx#\n\t" + repeat("*a ", length),
         "lengthened lazy lines, then code": (length) => repeat("1.   *\n<i> #\n\t-\n\n", length),
-        // An ordinary one, which shows whole [R8F-2]: a quoted list whose items go on to a line without the `>`.
-        "ordinary: a quoted list with lazy lines": (length) => {
+        // An ordinary one, which shows whole [R8F-2]: a quoted list whose items go on to a line without the `>`. (At
+        // 80 KB since [R8D-1]: marked takes twice as long on such lists when the text has a character outside Latin-1,
+        // and the bound weighs that, so at 100 KB it is cut at about 80.)
+        "ordinary: a quoted list with lazy lines": (size) => {
+          const length = Math.min(size, 80_000)
           const words =
             "the scheduler retries jobs whose window overlaps a deploy cache invalidation config service request handler token user session queue worker index migration rollback build release pipeline cluster node metric alert latency budget storage backup restore schema field value default option flag endpoint client server proxy route header payload response error timeout".split(
               " ",
@@ -303,40 +439,63 @@ test.describe("Markdown built to make marked's block lexer slow is cut, and says
         },
       }
       // What genui hands marked: the parts of what shows, neutralized (and checked as the model read them).
-      const lexed = (text: string, cut: { shown: number }) => {
-        for (const part of markdown.prepareMarkdown(text, "Image", cut) as { kind: string; text?: string }[])
-          if (part.kind === "markdown") new Lexer().blockTokens(part.text)
+      const handed = (text: string) =>
+        markdown.renderMarkdown(text, "Image") as {
+          cut: { shown: number; reason?: string }
+          parts: { kind: string; text?: string }[]
+        }
+      const lexed = (text: string) => {
+        const { cut, parts } = handed(text)
+        for (const part of parts) if (part.kind === "markdown") new Lexer().blockTokens(part.text)
+        return cut
       }
       // A reference measured next to each shape: marked on the ordinary document, which shows whole, at the same load.
       const ordinary = shapes["ordinary: a quoted list with lazy lines"]!(100_000)
-      const out: { name: string; length: number; model: number; marked: number; reference: number; reason?: string }[] =
-        []
+      const out: {
+        name: string
+        length: number
+        model: number
+        marked: number
+        reference: number
+        reason?: string
+        work: number
+      }[] = []
       for (const [name, shape] of Object.entries(shapes))
         for (const length of [100_000]) {
           const text = await task(() => shape(length))
           longest()
-          const { cut } = await task(() => markdownShape(text))
+          await task(() => markdown.markdownShape(text))
           const model = longest()
-          await task(() => lexed(ordinary, { shown: ordinary.length }))
+          await task(() => lexed(ordinary))
           const reference = longest()
-          await task(() => lexed(text, cut))
-          out.push({ name, length, model, marked: longest(), reference, reason: cut.reason })
+          const cut = await task(() => lexed(text))
+          const marked = longest()
+          // The model's work on the parts marked got, each lexed on its own, as marked lexes them: neutralized, not as
+          // written (which bounded it on lines up to ten times shorter [R8D-1]).
+          let work = 0
+          for (const part of handed(text).parts)
+            if (part.kind === "markdown") work += (markdown.blockStructure(part.text!) as { work: number }).work
+          out.push({ name, length, model, marked, reference, reason: cut.reason, work })
         }
-      return out
-      function markdownShape(text: string) {
-        return markdown.markdownShape(text) as { cut: { shown: number; reason?: string } }
-      }
+      return { out, bound: markdown.MAX_BLOCK_WORK as number }
     }, repo)
-    for (const { name, length, model, marked, reference, reason } of rows) {
+    for (const { name, length, model, marked, reference, reason, work } of rows.out) {
       const shape = `${name} (${length / 1000} KB)`
+      // Each adversarial shape is cut, and what marked gets of it is within the model's bound on its block work
+      // (MAX_BLOCK_WORK, calibrated in Chromium at 1 to 3.9 ns a unit on these shapes, as marked gets them, and the
+      // quoted lists of test/unit/review8-markdown.test.ts, so 40 to 155 ms): what keeps marked's time bounded,
+      // whatever the load.
       expect({ shape, cut: reason !== undefined }).toEqual({ shape, cut: !name.startsWith("ordinary") })
+      expect({ shape, work: work <= rows.bound }).toEqual({ shape, work: true })
       // The model reads a 100 KB text within the 1 s target (30 to 160 ms unloaded; test/unit/review8-markdown.test.ts
       // checks it is linear up to 500 KB).
       expect({ shape, model: model < 1000 }).toEqual({ shape, model: true })
-      // marked: 0.7 to 3.7 s for these shapes at 100 KB before. What shows of them costs it at most MAX_BLOCK_WORK
-      // (110 to 250 ms here unloaded, the ordinary document 60 to 140 ms): within BLOCKED_MS, or three times the
-      // reference when the machine is loaded [R8F-2].
-      expect({ shape, marked: marked < Math.max(BLOCKED_MS, 3 * reference) }).toEqual({ shape, marked: true })
+      // marked: 0.7 to 3.7 s for these shapes at 100 KB before; what shows of them takes it 40 to 150 ms unloaded (the
+      // ordinary document 60 to 140 ms). A ceiling with room for any load: under 1 s, or three times the ordinary
+      // document measured next to it. (This compared with 400 ms, or three times the reference, which a loaded machine
+      // passed on a table between rules only by a few percent: the model weighed its lines by their characters alone,
+      // at twice the time a unit of the other shapes took [R8C-2].)
+      expect({ shape, marked: marked < Math.max(1000, 3 * reference) }).toEqual({ shape, marked: true })
     }
   })
 })

@@ -37,11 +37,13 @@
 // first MAX_ESCAPES backslashes, escapes are written as character references, and a text is cut where a paragraph
 // runs past MAX_PARAGRAPH characters. marked's block lexer has costs of its own (setext headings, blockquotes, task
 // items and tables it scans again and again, containers it lexes again at each level), and the app builds a code block
-// with a toolbar for each code block and a node for each paragraph, item or cell: one model of marked's blocks (see
-// "Block structure" below) counts what the render budget charges and finds where a text is cut (see `markdownShape`),
-// and neutralizing writes each line as that model reads it. Neutralizing lengthens lines, and marked decides some
-// blocks by a line's length or by the characters at a column, so the model reads what neutralizing wrote too, and the
-// text is cut where it reads that otherwise (see `checkedParts`): marked only ever gets text the model counted.
+// with a toolbar for each code block and a node for each paragraph, item or cell, and for each link, emphasis or code
+// span: one model of marked's blocks (see "Block structure" below) counts what the render budget charges and finds
+// where a text is cut (see `markdownShape`), and neutralizing writes each line as that model reads it. Neutralizing
+// lengthens lines, and marked decides some blocks by a line's length or by the characters at a column, so when a text
+// renders the model reads what neutralizing wrote too, and the text is cut where it reads that otherwise, or where
+// marked's block work on it passes the bound (see `renderMarkdown`): marked only ever gets text the model counted, and
+// never more than the budget charged for.
 
 import { safeUrl } from "../../protocol/url.ts"
 
@@ -257,23 +259,26 @@ function codePart(
 export const MAX_NESTING = 8
 
 /**
- * How many blocks (paragraphs, headings, rules, blockquotes, list items and table cells) one Markdown text shows at
- * most beyond one per CHARS_PER_BLOCK characters, as many as a Table shows cells (MAX_TABLE_CELLS in src/gui/costs.ts):
- * each costs about what a cell does, and a text of tiny ones built 47,000 table cells, or 24,000 list items, in one
- * task. The rest is cut.
+ * How many blocks (paragraphs, headings, rules, blockquotes, list items and table cells) and inline elements (links,
+ * emphasis, code spans, line breaks: see `inlineSpans`) one Markdown text shows at most beyond one per CHARS_PER_BLOCK
+ * characters, as many as a Table shows cells (MAX_TABLE_CELLS in src/gui/costs.ts): each costs about what a cell does,
+ * and a text of tiny ones built 47,000 table cells, 24,000 list items, or 80,000 links or emphases (1.5 to 2 s in the
+ * playground), in one task. The rest is cut.
  */
 export const MAX_MARKDOWN_BLOCKS = 10_000
 
 /**
- * The characters of text that pay for one block: a block costs a tenth of an element in the render budget, as a Table
- * cell does, and so do this many characters (TEXT_PER_UNIT / CELLS_PER_UNIT). An ordinary text's blocks are longer, so
- * only texts of tiny blocks pay for them (see markdownUnits in src/gui/costs.ts).
+ * The characters of text that pay for one block or inline element: one costs a tenth of an element in the render
+ * budget, as a Table cell does, and so do this many characters (TEXT_PER_UNIT / CELLS_PER_UNIT). An ordinary text's
+ * blocks and links are further apart, so only texts of tiny ones pay for them (see markdownUnits in src/gui/costs.ts).
  */
 export const CHARS_PER_BLOCK = 25
 
 /**
- * What marked's block lexer may scan beyond what it consumes, in characters scanned or their worth (about 2.5 to 3 ns
- * each in Chromium, so at most about 0.1 to 0.12 s of marked's work; test/e2e/review8-markdown.spec.ts measures it). Its
+ * What marked's block lexer may scan beyond what it consumes, in characters scanned or their worth (1 to 3.9 ns each in
+ * Chromium, on text with a character outside Latin-1, where marked's regexes run slowest: so at most about 0.1 to
+ * 0.15 s of marked's work; test/e2e/review8-markdown.spec.ts measures it, and test/unit/review8-markdown.test.ts holds
+ * the weights to marked's measured costs), on the text as marked gets it, neutralized (see `checkedParts`). Its
  * setext rule scans from every paragraph start (from every line of a list item) to the next line that stops it, so
  * paragraphs between thematic breaks, or a list item's short lines, cost the square of their run: 100 KB of `a\n***\n`
  * took 3.4 s. So do a blockquote's lazy lines and one that a code block ends early, a table header with the wrong
@@ -284,13 +289,61 @@ export const MAX_BLOCK_WORK = 40_000_000
 // What marked's blockquote does again for each segment (its quoted lines up to a lazy line) with the rest of the
 // quote, in units of MAX_BLOCK_WORK (measured in Chromium): it copies the array of the rest's lines, and after a list
 // it joins the rest to the list's raw, lexes the list again and splits the rest into lines again (a copy and a scan of
-// each character, and an array entry per line). A quoted list with a lazy line per item costs marked 60 ms at 100 KB
-// with sentences for lines (36 million), and 3.6 s with lines of a few characters.
+// each character, and an array entry per line). A quoted list with a lazy line per item costs marked 175 ms at 100 KB
+// with sentences for lines, on text with a character outside Latin-1 (60 ms without), and 3.6 s with lines of a few
+// characters. (Weighed at half a unit a character, as marked spends on Latin-1 text alone, such lists took it 4.3 to
+// 5.4 ns a unit [review10#R8D-1].)
 const QUOTE_COPY_LINE = 0.5
-const QUOTE_RELIST_CHAR = 0.5
-const QUOTE_RELIST_LINE = 13
-/** A table header marked tries for each line of a paragraph, when the delimiter row has another number of columns. */
-const TABLE_RETRY = 4.5
+const QUOTE_RELIST_CHAR = 1
+const QUOTE_RELIST_LINE = 15
+/**
+ * A table header marked tries for each line of a paragraph, when the delimiter row has another number of columns: it
+ * matches the rows after it (a few lookaheads per line), and splits them into an array of lines, per character and per
+ * line.
+ */
+const TABLE_RETRY = 2
+const TABLE_RETRY_LINE = 16
+
+// What marked's setext rule does on each line it reads past (see `setextLineCost`): its lazy match tries the underline,
+// and eight other rules' starts, at every line. Each of those backs up over up to three leading spaces, and the table
+// rule's over a run of `|`, `:`, `-` and spaces at the line's start, character by character, and again from each of
+// the `|` in it, for each number of the leading spaces it may take. Measured in Chromium on text with a character
+// outside Latin-1 (any text genui neutralizes), where its regexes run slowest: 100 KB of `a\n***\n` took 6 ns a unit
+// counted by characters alone, of `   a\n***\n` 14 and of `|-|-…|x\n***\n` 12; weighed by the run alone, the run's
+// `|` after three spaces took 5 to 6 ns a unit (`   | | | | | | | |x` [review10#R8D-1]).
+const SETEXT_LINE = 4
+const SETEXT_SPACE = 10
+const SETEXT_RUN = 3
+const SETEXT_PIPE = 3
+const SETEXT_PIPE_SPACE = 4.5
+
+/**
+ * What marked's setext rule costs on a line it reads past, beyond its characters: a line's own cost, and its leading
+ * spaces and its run of table-rule characters (and the `|` in the run, for each leading space) as some level of marked
+ * sees them (after the quote markers, list markers and indentation the row may start with, any of which a level may
+ * take away).
+ */
+function setextLineCost(row: string): number {
+  let index = 0
+  let spaces = 0
+  for (;;) {
+    const c = row.charCodeAt(index)
+    if (c === 32 || c === 9) spaces++
+    else if (c === 62) spaces = 0
+    else break
+    index++
+  }
+  let run = 0
+  let pipes = 0
+  for (let at = index; at < row.length; at++) {
+    const c = row.charCodeAt(at)
+    if (c === 124) pipes++
+    else if (c !== 58 && c !== 45 && c !== 32) break
+    run++
+  }
+  const leading = Math.min(3, spaces)
+  return SETEXT_LINE + SETEXT_SPACE * leading + SETEXT_RUN * run + pipes * (SETEXT_PIPE + SETEXT_PIPE_SPACE * leading)
+}
 
 interface Line {
   /** The line as this level of marked sees it. */
@@ -334,14 +387,19 @@ class Sink {
   readonly blockTypes: string[] = []
   /**
    * marked's work (see MAX_BLOCK_WORK) by row: at the row (`work`), and of scans, the weight per character that starts
-   * reading at a row (`opens`) and stops before it (`closes`), and the same per line (`lineOpens`, `lineCloses`).
+   * reading at a row (`opens`) and stops before it (`closes`), the same per line (`lineOpens`, `lineCloses`), and how
+   * many setext scans do (`setextOpens`, `setextCloses`: each line costs those `setextLineCost`).
    */
   readonly work: Float64Array
   readonly opens: Float64Array
   readonly closes: Float64Array
   readonly lineOpens: Float64Array
   readonly lineCloses: Float64Array
+  readonly setextOpens: Float64Array
+  readonly setextCloses: Float64Array
   readonly nestRows: number[] = []
+  /** The rows of setext headings after their first: inline text too, though not `appended` to the heading's run. */
+  readonly headingRows: number[] = []
   /** Rows of setext headings and display math, as [first, last] pairs: a cut inside one moves to its first row. */
   readonly spans: number[] = []
   /** The labels of the definitions lexed so far: marked keeps the first and drops (but consumes) the rest. */
@@ -370,6 +428,8 @@ class Sink {
     this.closes = new Float64Array(rows.length + 1)
     this.lineOpens = new Float64Array(rows.length + 1)
     this.lineCloses = new Float64Array(rows.length + 1)
+    this.setextOpens = new Float64Array(rows.length + 1)
+    this.setextCloses = new Float64Array(rows.length + 1)
   }
 
   /** A new part of the text: marked lexes each part (see `splitMarkdown`) on its own. */
@@ -383,15 +443,18 @@ class Sink {
   }
   /**
    * A scan of marked's from row `from` up to (not including) row `to`, of `weight` per character and `perLine` per
-   * line.
+   * line, and for the setext rule's (`setext`), each line's `setextLineCost`.
    */
-  scan(from: number, to: number, weight: number, perLine = 0) {
+  scan(from: number, to: number, weight: number, perLine = 0, setext = false) {
     if (to <= from) return
     const end = Math.min(to, this.rows.length)
     this.opens[from] = this.opens[from]! + weight
     this.closes[end] = this.closes[end]! + weight
     this.lineOpens[from] = this.lineOpens[from]! + perLine
     this.lineCloses[end] = this.lineCloses[end]! + perLine
+    if (!setext) return
+    this.setextOpens[from] = this.setextOpens[from]! + 1
+    this.setextCloses[end] = this.setextCloses[end]! + 1
   }
   block(row: number, type: string, count = 1) {
     this.blockRows.push(row)
@@ -1093,13 +1156,13 @@ class BlockLexer {
           nl = p <= level.last
           continue
         }
-        sink.scan(line.r, level.rowAfter(end - 1), TABLE_RETRY)
+        sink.scan(line.r, level.rowAfter(end - 1), TABLE_RETRY, TABLE_RETRY_LINE)
       }
 
       // lheading
       const scan = { to: p }
       const underline = level.setext(p, scan)
-      sink.scan(line.r, level.rowAfter(Math.min(scan.to, level.last)), 1)
+      sink.scan(line.r, level.rowAfter(Math.min(scan.to, level.last)), 1, 0, true)
       if (underline >= 0) {
         let joined = level.text(p)
         for (let index = p + 1; index < underline; index++) joined += "\n" + level.text(index)
@@ -1108,6 +1171,7 @@ class BlockLexer {
         const run = sink.run(trimmed, line.r)
         if (trimmed.length > MAX_PARAGRAPH) run.over = this.overflowIn(level, p, underline, joined, trimmed)
         sink.spans.push(line.r, level.get(underline).r)
+        for (let index = p + 1; index < underline; index++) sink.headingRows.push(level.get(index).r)
         tokens.push({ type: "heading", run })
         p = underline + 1
         nl = p <= level.last
@@ -1578,9 +1642,9 @@ export interface MarkdownCut {
 
 /**
  * What a Markdown text shows and what the app builds for that: where it is cut, the code blocks (fenced, indented,
- * display math; `own` of them shown on their own, see MAX_CODE_PARTS) in what shows, and the blocks there beyond what
- * its length pays for (see MAX_MARKDOWN_BLOCKS and CHARS_PER_BLOCK). The render budget charges these
- * (src/gui/costs.ts).
+ * display math; `own` of them shown on their own, see MAX_CODE_PARTS) in what shows, and the blocks and inline
+ * elements there beyond what its length pays for (`blocks`: see MAX_MARKDOWN_BLOCKS and CHARS_PER_BLOCK). The render
+ * budget charges these (src/gui/costs.ts).
  */
 export interface MarkdownShape {
   readonly cut: MarkdownCut
@@ -1644,6 +1708,51 @@ function rowAt(starts: readonly number[], position: number): number {
   return low
 }
 
+// An autolink's start (`<scheme:`), which genui writes as a link (see AUTOLINK).
+const AUTOLINK_START = /<[A-Za-z][A-Za-z0-9+.-]{1,31}:/y
+const isWordChar = (c: number) =>
+  (c >= 48 && c <= 57) || ((c | 32) >= 97 && (c | 32) <= 122) || (c > 127 && ALPHANUMERIC.test(String.fromCharCode(c)))
+
+/**
+ * At most how many inline elements the renderer builds from a row of an inline run (see Sink.runs): each a node of
+ * the app's, as a block is (in the playground, 20 to 40 µs each with its layout), and a text of tiny ones built 80,000
+ * links, emphases or code spans in 480,000 characters (1.5 to 2.1 s in one task). It counts what each needs: a link or
+ * an image a `[` (genui writes images, autolinks and addresses as links too, and marked resolves references to the
+ * definitions genui writes), an autolink `<scheme:`, an address `://` or `www.`, an e-mail address (which marked links
+ * itself) an `@`; emphasis, strong emphasis and strikethrough two of the `*`, `~` and `_` that may delimit them (not a
+ * `_` inside a word), a code span two runs of backticks, math two `$` or a `\(`, and a hard line break the row's end.
+ * Each of these makes at most one, so the count is an upper bound of what renders: neutralizing only ever writes fewer
+ * (a delimiter past the emphasis budget as a character reference, math past the math budget as text, a link of its own
+ * for each construct it counts).
+ */
+function inlineSpans(row: string): number {
+  let spans = 0
+  let delimiters = 0
+  let ticks = 0
+  for (let index = 0; index < row.length; index++) {
+    const c = row.charCodeAt(index)
+    if (c === 91 || c === 64) spans++
+    else if (c === 42 || c === 126 || c === 36) delimiters++
+    else if (c === 92) {
+      if (row.charCodeAt(index + 1) === 40) spans++
+    } else if (c === 95) {
+      if (!(isWordChar(row.charCodeAt(index - 1)) && isWordChar(row.charCodeAt(index + 1)))) delimiters++
+    } else if (c === 96) {
+      if (row.charCodeAt(index - 1) !== 96) ticks++
+    } else if (c === 58) {
+      if (row.charCodeAt(index + 1) === 47 && row.charCodeAt(index + 2) === 47) spans++
+    } else if (c === 119) {
+      // (`www.` right after `://` is in the address that counted.)
+      if (row.startsWith("ww.", index + 1) && !(index >= 3 && row.startsWith("://", index - 3))) spans++
+    } else if (c === 60) {
+      AUTOLINK_START.lastIndex = index
+      if (AUTOLINK_START.test(row)) spans++
+    }
+  }
+  if (row.endsWith("  ") || row.endsWith("\\")) spans++
+  return spans + delimiters / 2 + ticks / 2
+}
+
 /** The model's findings for a text of rows, lexed in the parts `splitMarkdown` splits it into. */
 function lexRows(rows: readonly string[], sink: Sink, lexer: BlockLexer, own: number[]): void {
   for (const segment of fenceSegments(rows)) {
@@ -1654,8 +1763,57 @@ function lexRows(rows: readonly string[], sink: Sink, lexer: BlockLexer, own: nu
     sink.beginSegment()
     const lines: Line[] = []
     for (let row = segment.from; row < segment.to; row++) lines.push({ t: rows[row]!, r: row })
+    work.modeled += lines.length
     lexer.lex(lines)
   }
+}
+
+/** The lines the model has read, and neutralizing has written, so far (see `markdownWork`). */
+const work = { modeled: 0, neutralized: 0 }
+
+/**
+ * How many lines the model has read, and neutralizing has written, so far: what measuring texts (`markdownShape`) and
+ * rendering them (`renderMarkdown`) cost, for tests.
+ */
+export const markdownWork = (): { readonly modeled: number; readonly neutralized: number } => ({ ...work })
+
+/**
+ * marked's block work (see MAX_BLOCK_WORK) on a text of `rows` (starting at `starts`, `length` characters in all), as
+ * the model tallied it in `sink`, up to the first row it passes `limit` at (or the first that starts at `end`): that row
+ * (-1: none), and the work up to it.
+ * The work up to the start of a row is the work at earlier rows, and of each scan that starts before it, the part
+ * before it (cut there, a scan stops at the cut).
+ */
+function workPast(
+  sink: Sink,
+  rows: readonly string[],
+  starts: readonly number[],
+  length: number,
+  limit: number,
+  end = length,
+): { readonly row: number; readonly work: number } {
+  let total = 0
+  for (let row = 0, reading = 0, readingLines = 0, setext = 0; row < rows.length && starts[row]! < end; row++) {
+    reading += sink.opens[row]! - sink.closes[row]!
+    readingLines += sink.lineOpens[row]! - sink.lineCloses[row]!
+    setext += sink.setextOpens[row]! - sink.setextCloses[row]!
+    const before = total
+    total += sink.work[row]! + reading * ((starts[row + 1] ?? length) - starts[row]!) + readingLines
+    if (setext > 0) total += setext * setextLineCost(rows[row]!)
+    if (total > limit) return { row, work: before }
+  }
+  return { row: -1, work: total }
+}
+
+/**
+ * marked's block work (see MAX_BLOCK_WORK) on a text, as the model tallies it, up to the start of the row `shown` is in
+ * (for tests: what shows of a text is within the bound).
+ */
+export function blockWork(text: string, shown = text.length): number {
+  const { rows, starts } = textRows(text)
+  const sink = new Sink(rows)
+  lexRows(rows, sink, new BlockLexer(sink), [])
+  return workPast(sink, rows, starts, text.length, Infinity, shown).work
 }
 
 function measure(text: string): MarkdownShape {
@@ -1683,24 +1841,28 @@ function measure(text: string): MarkdownShape {
   for (const run of sink.runs)
     if (run.over)
       consider(starts[run.over.row]! + within(rows[run.over.row]!, run.over.allowance, run.over.exact), "paragraph")
-  // Blocks (beyond what the text before them pays for) and work, counted in the order of the text.
+  const over = workPast(sink, rows, starts, source.length, MAX_BLOCK_WORK)
+  if (over.row >= 0) consider(starts[over.row]!, "work")
+  // Blocks and inline elements (beyond what the text before them pays for), counted in the order of the text, in what
+  // shows so far (a row a paragraph cut ends shows only so far).
+  const limit = Math.min(cut, source.length)
   const perRow = new Float64Array(rows.length)
   sink.blockRows.forEach((row, index) => (perRow[row]! += sink.blockCounts[index]!))
+  const inline = new Uint8Array(rows.length)
+  for (const run of sink.runs) inline[run.row] = 1
+  for (const row of sink.appended) inline[row] = 1
+  for (const row of sink.headingRows) inline[row] = 1
+  const spans = new Float64Array(rows.length)
+  for (let row = 0; row < rows.length && starts[row]! < limit; row++) {
+    if (!inline[row]) continue
+    const line = rows[row]!
+    spans[row] = inlineSpans(starts[row]! + line.length > limit ? line.slice(0, limit - starts[row]!) : line)
+    perRow[row]! += spans[row]!
+  }
   for (let row = 0, total = 0; row < rows.length; row++) {
     total += perRow[row]!
     if (total - Math.floor((starts[row + 1] ?? source.length) / CHARS_PER_BLOCK) > MAX_MARKDOWN_BLOCKS) {
       consider(starts[row]!, "blocks")
-      break
-    }
-  }
-  // marked's work on the text up to the start of each row: the work at earlier rows, and of each scan that starts
-  // before it, the part before it (cut there, a scan stops at the cut).
-  for (let row = 0, total = 0, reading = 0, readingLines = 0; row < rows.length; row++) {
-    reading += sink.opens[row]! - sink.closes[row]!
-    readingLines += sink.lineOpens[row]! - sink.lineCloses[row]!
-    total += sink.work[row]! + reading * ((starts[row + 1] ?? source.length) - starts[row]!) + readingLines
-    if (total > MAX_BLOCK_WORK) {
-      consider(starts[row]!, "work")
       break
     }
   }
@@ -1730,20 +1892,20 @@ function measure(text: string): MarkdownShape {
     const high = text.charCodeAt(cut - 1)
     shown = high >= 0xd800 && high <= 0xdbff ? cut - 1 : cut
   } else reason = undefined
-  // What the renderer gets is the text neutralized: cut again where the model reads that otherwise.
-  const checked = checkedParts(text, starts, shown, currentImageLabel, false, settle)
-  if (checked.recut) [shown, reason] = [checked.shown, "lines"]
   const visible = (row: number) => starts[row]! < shown
   const count = (rowsOf: readonly number[]) => rowsOf.reduce((total, row) => total + (visible(row) ? 1 : 0), 0)
   const ownShown = count(own)
-  let blocks = 0
+  // A cut text ends with a paragraph of its own ("…"), and so may one that is not, where it renders (see
+  // `renderMarkdown`): counted either way.
+  let blocks = 1
   sink.blockRows.forEach((row, index) => (blocks += visible(row) ? sink.blockCounts[index]! : 0))
+  for (let row = 0; row < rows.length && visible(row); row++) blocks += spans[row]!
   return {
     cut: reason ? { shown, reason } : { shown },
     code: count(sink.codeRows) + count(sink.mathRows) + ownShown,
     own: ownShown,
-    // The blocks the text's length does not pay for (see CHARS_PER_BLOCK).
-    blocks: Math.min(MAX_MARKDOWN_BLOCKS, Math.max(0, blocks - Math.floor(shown / CHARS_PER_BLOCK))),
+    // The blocks and inline elements the text's length does not pay for (see CHARS_PER_BLOCK).
+    blocks: Math.min(MAX_MARKDOWN_BLOCKS, Math.max(0, Math.ceil(blocks) - Math.floor(shown / CHARS_PER_BLOCK))),
   }
 }
 
@@ -1765,10 +1927,12 @@ export const shapeCacheChars = (): number => shapeChars
 
 /**
  * What a Markdown text shows and builds (see MarkdownShape): up to MAX_MARKDOWN_TEXT characters, cut where marked
- * would hand its inline lexer a run past MAX_PARAGRAPH, where blocks pass MAX_MARKDOWN_BLOCKS beyond one per
- * CHARS_PER_BLOCK characters, where containers nest past MAX_NESTING, where marked's block lexer has scanned more
- * than MAX_BLOCK_WORK, or where the model reads the text neutralized otherwise than as written (see `checkedParts`);
- * on a code point's boundary.
+ * would hand its inline lexer a run past MAX_PARAGRAPH, where blocks and inline elements pass MAX_MARKDOWN_BLOCKS
+ * beyond one per CHARS_PER_BLOCK characters, where containers nest past MAX_NESTING, or where marked's block lexer has
+ * scanned more than MAX_BLOCK_WORK; on a code point's boundary. This is what the render budget charges, from the model's reading of
+ * the text as written alone: it is linear in the text and never neutralizes it, since the budget measures texts that
+ * never render (an element it then refuses, an Accordion's items of an element that does not fit). A text that renders
+ * may show less (see `renderMarkdown`), never more.
  */
 export function markdownShape(text: string): MarkdownShape {
   let shape = shapes.get(text)
@@ -1807,11 +1971,12 @@ export function codeBlocks(text: string): CodeBlocks {
 }
 
 /**
- * What the model finds in a text lexed whole (as one part), for the tests (test/unit/review8-markdown.test.ts): code
- * blocks, display math, blocks by type, each inline run's length, and the rows genui writes again as definitions.
+ * What the model finds in a text lexed whole (as one part, as marked lexes each part genui hands it), for the tests
+ * (test/unit/review8-markdown.test.ts): code blocks, display math, blocks by type, each inline run's length, the rows
+ * genui writes again as definitions, and marked's block work (see MAX_BLOCK_WORK).
  */
 export function blockStructure(text: string) {
-  const { rows } = textRows(text)
+  const { rows, starts } = textRows(text)
   const sink = new Sink(rows, new Uint8Array(rows.length), new Uint8Array(rows.length))
   new BlockLexer(sink).lex(rows.map((t, r) => ({ t, r })))
   const blocks: Record<string, number> = {}
@@ -1824,6 +1989,7 @@ export function blockStructure(text: string) {
     runs: [...sink.runs.map((run) => run.len), ...Array.from({ length: sink.runCount - sink.runs.length }, () => 0)],
     definitions: [...sink.definitions.keys()],
     rows,
+    work: workPast(sink, rows, starts, text.length, Infinity).work,
   }
 }
 
@@ -2650,6 +2816,7 @@ function partModel(lines: readonly string[]): PartModel {
   const kinds = new Uint8Array(lines.length)
   const starts = new Uint8Array(lines.length)
   const sink = new Sink(lines, kinds, starts)
+  work.modeled += lines.length
   let chars = 0
   for (const line of lines) chars += line.length + 1
   const lexer = new BlockLexer(sink, modelLimit(chars, lines.length))
@@ -2734,29 +2901,90 @@ function divergence(a: PartModel, b: PartModel, rowCount: number): number {
 }
 
 /**
- * One part's lines neutralized (as rows), and the first row where the model reads them otherwise than it reads the
- * part as written (-1: none). Neutralizing lengthens lines (a joiner, a link written again, a character reference), and
- * marked decides some structure by a line's length or by the characters at a column (a list item's lazy lines): read
- * otherwise, a line neutralized as code could reach marked's inline lexer past every budget, or a code block marked
- * renders go uncounted.
+ * How the model reads a part's lines neutralized (`rows`): that reading (`read`; the one as written, `model` of
+ * `lines`, when neutralizing changed no line), and the first row where it reads them otherwise than as written
+ * (`diverges`, -1: nowhere). Neutralizing lengthens lines (a joiner, a link written again, a character reference),
+ * and marked decides some structure by a line's length or by the characters at a column (a list item's lazy lines):
+ * read otherwise, a line neutralized as code could reach marked's inline lexer past every budget, or a code block
+ * marked renders go uncounted. And marked's setext and lazy-line scans read the lengthened lines character by
+ * character, so its block work is tallied on this reading (see `checkedParts`).
  */
-function neutralizePart(
+function readNeutralized(
   lines: readonly string[],
-  imageLabel: string,
-  budget: MarkdownBudget,
-  check: boolean,
-): { rows: string[]; diverges: number } {
-  const model = partModel(lines)
-  const rows = neutralizeLines(lines, imageLabel, budget, model)
-  if (!check) return { rows, diverges: -1 }
-  if (model.stopped >= 0) return { rows, diverges: model.stopped }
+  model: PartModel,
+  rows: readonly string[],
+): { readonly read: PartModel; readonly diverges: number } {
+  if (model.stopped >= 0) return { read: model, diverges: model.stopped }
   // (Neutralizing keeps every line: no line break is added or taken away.)
-  if (rows.length !== lines.length) return { rows, diverges: 0 }
+  if (rows.length !== lines.length) return { read: model, diverges: 0 }
   let changed = false
   for (let row = 0; row < rows.length && !changed; row++) changed = rows[row] !== lines[row]
-  if (!changed) return { rows, diverges: -1 }
-  const after = partModel(rows)
-  return { rows, diverges: after.stopped >= 0 ? after.stopped : divergence(model, after, rows.length) }
+  if (!changed) return { read: model, diverges: -1 }
+  const read = partModel(rows)
+  return { read, diverges: read.stopped >= 0 ? read.stopped : divergence(model, read, rows.length) }
+}
+
+/** Where each of `rows` starts in them joined with "\n", and their length so joined. */
+function joinedStarts(rows: readonly string[]): { readonly starts: number[]; readonly length: number } {
+  const starts: number[] = []
+  let at = 0
+  for (const row of rows) {
+    starts.push(at)
+    at += row.length + 1
+  }
+  return { starts, length: Math.max(0, at - 1) }
+}
+
+/** The lines a cut text ends with, after the line break before the cut (see `checkedParts`). */
+const ENDING = ["", "", "…"] as const
+
+/** The event of a paragraph block (see `structureEvents`). */
+const PARAGRAPH_EVENT = 16 + BLOCK_TYPES.paragraph! + 16
+
+/**
+ * Whether the model reads `rows`, a part's first `keep` rows neutralized and then ENDING, as it read those rows in the
+ * part as written (`model`), with the "…" a paragraph of its own, or gone (marked's blockquote loses the lines after a
+ * list it lexes again with lazy lines; MarkdownText's note still says the text is cut): so the rows before the cut are
+ * the ones the first reading checked, and cutting there changed nothing in them (no block before the cut was decided
+ * by a line after it).
+ */
+function readsAsCut(model: PartModel, rows: readonly string[], keep: number): boolean {
+  const read = partModel(rows)
+  if (read.stopped >= 0) return false
+  const was = structureEvents(model, model.kinds.length)
+  const is = structureEvents(read, rows.length)
+  let before = 0
+  while (before < was.rows.length && was.rows[before]! < keep) before++
+  if (is.rows.length !== before + 2 && is.rows.length !== before) return false
+  for (let index = 0; index < before; index++)
+    if (is.rows[index] !== was.rows[index] || !sameEvent(was.events[index]!, is.events[index]!)) return false
+  if (is.rows.length === before) return true
+  const dots = keep + ENDING.length - 1
+  return (
+    is.rows[before] === dots &&
+    is.events[before] === 1 &&
+    is.rows[before + 1] === dots &&
+    is.events[before + 1] === PARAGRAPH_EVENT
+  )
+}
+
+/**
+ * Where a part is cut at its row `row` (a row of the part): at the first row of a setext heading or display math the
+ * row is inside of, and before the header of a table whose delimiter row it is (cut there, those rows would be lexed
+ * again as other blocks).
+ */
+function settleRow(model: PartModel, lines: readonly string[], row: number): number {
+  const first = new Int32Array(lines.length + 1).fill(-1)
+  const spans = model.sink.spans
+  for (let index = 0; index < spans.length; index += 2)
+    for (let at = spans[index]! + 1; at <= spans[index + 1]! && at <= lines.length; at++)
+      if (first[at]! < 0 || first[at]! > spans[index]!) first[at] = spans[index]!
+  let at = Math.max(0, Math.min(row, lines.length))
+  for (;;) {
+    if (first[at]! >= 0 && first[at]! < at) at = first[at]!
+    else if (at > 0 && /[:|]/.test(lines[at] ?? "") && DELIMITER_ROW.test(lines[at]!)) at--
+    else return at
+  }
 }
 
 /** A line ending in `<…>`: marked's setext rule stops at one (see neutralizeLines). */
@@ -2770,6 +2998,7 @@ function neutralizeLines(
   model: PartModel,
 ): string[] {
   const { kinds, starts, definitions: rowDefinitions } = model
+  work.neutralized += lines.length
   // A reference may come before its definition: all of the text's definitions are read first.
   const definitions = new Map<string, { url: string; title: string }>()
   for (const text of rowDefinitions.values()) {
@@ -2835,67 +3064,84 @@ function mathGroup(lines: readonly string[], budget: MarkdownBudget): string {
   return defuse(written.join("\n"))
 }
 
+/** What MarkdownText renders of a text (see `renderMarkdown`): how much of it shows, and why not all, and its parts. */
+export interface RenderedMarkdown {
+  readonly cut: MarkdownCut
+  readonly parts: MarkdownPart[]
+}
+
 /**
  * A model-written Markdown text as MarkdownText hands it to the renderer: what `markdownShape` lets show, as parts (see
  * `splitMarkdown`), the prose ones neutralized, sharing one budget (see MarkdownBudget), so splitting a text into parts
  * gains nothing. A cut text ends with "…". What it hands the renderer is what the model checked (see `checkedParts`):
- * where the model would read the neutralized text otherwise than the text as written, the text is cut earlier (only
- * with an image label other than the one `markdownShape` measured with, since it checked the same parts).
+ * where the model would read the neutralized text otherwise than the text as written, it shows less, cut with reason
+ * `lines`, and where marked's block work on the neutralized text passes MAX_BLOCK_WORK (neutralizing lengthens lines,
+ * a `www.` address tenfold, and marked's scans read them by the character), with reason `work`. That is only ever less
+ * than `markdownShape` charged for: the parts it hands the renderer are read as the model read the text as written, up
+ * to the cut.
+ *
+ * It runs only for a text that renders. Its work is the model's reading of the parts as written and neutralized, and
+ * neutralizing them once (see `checkedParts`): 0.15 to 0.45 s for 500,000 characters of links, in the task that
+ * renders the element, which the render budget's slice gives such an element alone (see TASK_UNITS in
+ * src/runtime/budget.ts).
+ * `imageLabel` is the link text for an image without alt text.
  */
-export function prepareMarkdown(
-  text: string,
-  imageLabel: string = currentImageLabel,
-  cut: MarkdownCut = shownLength(text),
-): MarkdownPart[] {
+export function renderMarkdown(text: string, imageLabel: string): RenderedMarkdown {
+  const cut = markdownShape(text).cut
   const known = prepared.get(text)
-  if (known && known.label === imageLabel && known.shown === cut.shown) return known.parts
-  // `markdownShape` checked these very parts when it measured the text: they need no second check.
-  const checked = imageLabel === currentImageLabel && shapes.get(text)?.cut.shown === cut.shown
-  return checkedParts(text, textRows(text).starts, cut.shown, imageLabel, checked).parts
+  if (known && known.label === imageLabel && known.model === cut.shown) {
+    prepared.delete(text)
+    prepared.set(text, known)
+    return known.rendered
+  }
+  const checked = checkedParts(text, cut.shown, imageLabel)
+  const rendered: RenderedMarkdown = {
+    cut: checked.shown < cut.shown && checked.reason ? { shown: checked.shown, reason: checked.reason } : cut,
+    parts: checked.parts,
+  }
+  keepRendered(text, imageLabel, cut.shown, rendered)
+  return rendered
 }
 
 /**
- * The image label `markdownShape` measures with (see `setImageLabel`): an image without alt text is written as a link
- * with it as its text, and a line's length can change what marked reads.
+ * The parts MarkdownText hands the renderer for a text (see `renderMarkdown`); given a `cut` other than the one
+ * `markdownShape` finds, of the text's first `cut.shown` characters, checked all the same.
  */
-let currentImageLabel = "Image"
-
-/** Sets the label of images without alt text that texts are measured with (MarkdownText's, from the app's locale). */
-export function setImageLabel(label: string): void {
-  if (label === currentImageLabel) return
-  currentImageLabel = label
-  shapes.clear()
-  shapeChars = 0
-  prepared.clear()
-  preparedChars = 0
+export function prepareMarkdown(text: string, imageLabel = "Image", cut?: MarkdownCut): MarkdownPart[] {
+  if (cut === undefined || cut.shown === markdownShape(text).cut.shown) return renderMarkdown(text, imageLabel).parts
+  return checkedParts(text, cut.shown, imageLabel).parts
 }
 
 /**
- * The prepared parts of recent texts (see `checkedParts`), for at most SHAPE_CACHE_SIZE texts and SHAPE_CACHE_CHARS
- * characters of texts and parts (and the newest): `markdownShape` prepares a text to check it, and MarkdownText renders
- * those parts.
+ * What `renderMarkdown` made of recent texts, for at most SHAPE_CACHE_SIZE texts and SHAPE_CACHE_CHARS characters of
+ * texts and parts (and the newest): a text renders again when its element remounts, or in each row of a repeat.
  */
 const prepared = new Map<
   string,
-  { readonly label: string; readonly shown: number; readonly parts: MarkdownPart[]; readonly chars: number }
+  {
+    readonly label: string
+    readonly model: number
+    readonly rendered: RenderedMarkdown
+    readonly chars: number
+  }
 >()
 let preparedChars = 0
 
-/** The prepared parts of how many texts are kept, and of how many characters (for tests). */
+/** What `renderMarkdown` keeps of how many texts, and of how many characters (for tests). */
 export const preparedCache = (): { readonly texts: number; readonly chars: number } => ({
   texts: prepared.size,
   chars: preparedChars,
 })
 
-function keepPrepared(text: string, label: string, shown: number, parts: MarkdownPart[]) {
+function keepRendered(text: string, label: string, model: number, rendered: RenderedMarkdown) {
   const old = prepared.get(text)
   if (old) {
     prepared.delete(text)
     preparedChars -= old.chars
   }
   let chars = text.length
-  for (const part of parts) chars += part.kind === "code" ? part.code.length : part.text.length
-  prepared.set(text, { label, shown, parts, chars })
+  for (const part of rendered.parts) chars += part.kind === "code" ? part.code.length : part.text.length
+  prepared.set(text, { label, model, rendered, chars })
   preparedChars += chars
   for (const [oldest, entry] of prepared) {
     if (oldest === text || (prepared.size <= SHAPE_CACHE_SIZE && preparedChars <= SHAPE_CACHE_CHARS)) break
@@ -2905,20 +3151,35 @@ function keepPrepared(text: string, label: string, shown: number, parts: Markdow
 }
 
 /**
- * The first `shown` characters of a text as the renderer gets them (see `prepareMarkdown`), and the first row of the
- * text where the model reads a part neutralized otherwise than as written (-1: none, or not `check`ed).
+ * The parts the renderer gets of a text's first `shown` characters, and how many characters of the text they show: the
+ * parts of what shows, the prose ones neutralized, each checked (see `firstDivergence`). Where the model reads a part
+ * neutralized otherwise than as written, the text is cut at the start of that row (see `settleRow`): the parts before
+ * it stay as they are (each is lexed on its own, and the budget is spent in order, so a cut after them changes
+ * nothing), and so do the part's rows before the cut, neutralized as they were. Those rows, then the lines a cut text
+ * ends with, are read once more, and must read as they did as written (see `readsAsCut`); if they do not, the text is
+ * cut at the start of the part. So marked gets only text whose blocks, runs and code blocks are the ones the model
+ * counted and cut by, and whose every line it lexes inline was written as prose (within the emphasis, escape and math
+ * budgets).
+ *
+ * marked's block work is tallied on the parts as it gets them, neutralized, sharing MAX_BLOCK_WORK in their order (the
+ * model's cut tallied it on the text as written, and neutralizing lengthens lines that marked's scans read by the
+ * character): where it passes the bound, the text is cut the same way, with reason `work`.
+ *
+ * Its work: the model reads each part as written and neutralized, and neutralizes it once; a cut part is read once
+ * more, up to the cut, and nothing is neutralized again.
  */
-function shownParts(
+function checkedParts(
   text: string,
   shown: number,
   imageLabel: string,
-  check: boolean,
-): { parts: MarkdownPart[]; row: number } {
+): { shown: number; parts: MarkdownPart[]; reason?: "lines" | "work" } {
   // marked reads "\r\n" and "\r" as "\n" (see textRows): the rows before the cut are the text's.
   const source = (shown < text.length ? `${text.slice(0, shown)}\n\n…` : text).replace(/\r\n?/g, "\n")
   const lines = source.split("\n")
   const budget = markdownBudget(source.length)
   const parts: MarkdownPart[] = []
+  // marked's block work on the parts before this one, as it gets them.
+  let spent = 0
   for (const segment of fenceSegments(lines)) {
     if (segment.code) {
       parts.push(codePart(lines, segment.from, segment.to, segment.code))
@@ -2927,54 +3188,40 @@ function shownParts(
     const part = lines.slice(segment.from, segment.to)
     if (part.join("\n").trim() === "") continue
     try {
-      const { rows, diverges } = neutralizePart(part, imageLabel, budget, check)
-      if (diverges >= 0) return { parts, row: segment.from + diverges }
-      parts.push({ kind: "markdown", text: rows.join("\n") })
+      const model = partModel(part)
+      const rows = neutralizeLines(part, imageLabel, budget, model)
+      const { read, diverges } = shown > 0 ? readNeutralized(part, model, rows) : { read: model, diverges: -1 }
+      const joined = joinedStarts(rows)
+      const over = workPast(read.sink, rows, joined.starts, joined.length, MAX_BLOCK_WORK - spent)
+      // The first row the model reads otherwise, or where marked's work passes the bound.
+      let row = diverges
+      let reason: "lines" | "work" = "lines"
+      if (over.row >= 0 && (row < 0 || over.row < row)) [row, reason] = [over.row, "work"]
+      if (row < 0) {
+        spent += over.work
+        parts.push({ kind: "markdown", text: rows.join("\n") })
+        continue
+      }
+      // At the start of that row, a row of the text (the last row before the cut at the latest; the lines a cut text
+      // ends with are the same neutralized).
+      const { starts } = textRows(text)
+      const last = rowAt(starts, shown - 1)
+      if (segment.from > last) {
+        parts.push({ kind: "markdown", text: rows.join("\n") })
+        continue
+      }
+      const keep = settleRow(model, part, Math.min(row, last - segment.from))
+      const cut = [...rows.slice(0, keep), ...ENDING]
+      if (readsAsCut(model, cut, keep)) {
+        parts.push({ kind: "markdown", text: cut.join("\n") })
+        return { shown: starts[segment.from + keep]!, parts, reason }
+      }
+      parts.push({ kind: "markdown", text: ENDING.join("\n") })
+      return { shown: starts[segment.from]!, parts, reason }
     } finally {
       spanCache.clear()
       bracketCache.clear()
     }
   }
-  return { parts, row: -1 }
-}
-
-/**
- * How many times a text is checked (see `checkedParts`) at most: once, and once more after it is cut where the model
- * read it neutralized otherwise (an ordinary text never is).
- */
-const MAX_CHECKS = 2
-
-/**
- * The parts the renderer gets of a text's first `shown` characters, checked (unless `checked` already): where the
- * model reads a part neutralized otherwise than as written, the text is cut at the start of that row (moved earlier
- * by `settle`) and checked again; after MAX_CHECKS checks, nothing of it shows. So marked gets only text whose blocks,
- * runs and code blocks are the ones the model counted and cut by, and whose every line it lexes inline was written as
- * prose (within the emphasis, escape and math budgets).
- */
-function checkedParts(
-  text: string,
-  starts: readonly number[],
-  shown: number,
-  imageLabel: string,
-  checked: boolean,
-  settle: (cut: number) => number = (cut) => cut,
-): { shown: number; parts: MarkdownPart[]; recut: boolean } {
-  let recut = false
-  for (let attempt = 0; ; attempt++) {
-    const { parts, row } = shownParts(text, shown, imageLabel, !checked && shown > 0)
-    if (row < 0) {
-      keepPrepared(text, imageLabel, shown, parts)
-      return { shown, parts, recut }
-    }
-    recut = true
-    if (attempt + 1 >= MAX_CHECKS) {
-      shown = 0
-      continue
-    }
-    // At the start of that row (a row of the text: the cut row at the latest), always before the last cut.
-    const last = rowAt(starts, shown - 1)
-    shown = Math.min(shown - 1, settle(starts[Math.min(row, last)]!))
-    // (A row starts after a line break: never inside a surrogate pair.)
-    shown = Math.max(0, starts[rowAt(starts, Math.max(0, shown))]!)
-  }
+  return { shown, parts }
 }

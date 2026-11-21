@@ -2,7 +2,7 @@
 export default {
   // Link text for a Markdown image without alt text (Markdown images show as links, see components/markdown.ts).
   "c.markdown.image": "Image",
-  // Under a Markdown text too long to show whole (see shownLength in components/markdown.ts).
+  // Under a Markdown text too long to show whole (see renderMarkdown in components/markdown.ts).
   "c.markdown.cut": "Showing the first {{shown}} of {{total}} characters",
 
   "c.code.copy": "Copy code",

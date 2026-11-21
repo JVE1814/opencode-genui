@@ -8,15 +8,7 @@ import { useHost, useSurface, type Host } from "../host.ts"
 import { openLink } from "../outward.ts"
 import { ITEM_LISTS, splitKeys } from "../costs.ts"
 import { markdownCut } from "../issues.ts"
-import {
-  JOINER,
-  linkTarget,
-  prepareMarkdown,
-  setImageLabel,
-  shownLength,
-  stripJoiners,
-  type MarkdownPart,
-} from "./markdown.ts"
+import { JOINER, linkTarget, renderMarkdown, stripJoiners, type MarkdownPart } from "./markdown.ts"
 import { amount, CutNote, firstItems, oneOf, str, useCut, useListCut, type GenuiComponent } from "./shared.tsx"
 
 // Content components: Heading, Text, Markdown, Code, Badge, Alert, Keybind, Icon. Styles: src/gui/styles/content.css.
@@ -47,19 +39,15 @@ export function MarkdownText(props: {
 }) {
   const host = useHost()
   const surface = useSurface()
-  // Texts are measured with the label the app's locale gives images without alt text (see setImageLabel).
+  // The label the app's locale gives images without alt text.
   const imageLabel = () => host.t("c.markdown.image")
-  // What shows of a long text (see shownLength): the rest is said under it and reported.
-  const cut = createMemo(
-    () => {
-      setImageLabel(imageLabel())
-      return shownLength(props.text)
-    },
-    undefined,
-    {
-      equals: (a, b) => a.shown === b.shown && a.reason === b.reason,
-    },
-  )
+  // What shows of the text, checked as the renderer gets it, and its parts: prose neutralized, all parts sharing the
+  // text's budget for the renderer's work (see renderMarkdown and MarkdownBudget). The rest is said under it and
+  // reported.
+  const rendered = createMemo(() => renderMarkdown(props.text, imageLabel()))
+  const cut = createMemo(() => rendered().cut, undefined, {
+    equals: (a, b) => a.shown === b.shown && a.reason === b.reason,
+  })
   const total = () => props.text.length
   useCut(props.owner, () => {
     const { shown, reason } = cut()
@@ -67,8 +55,7 @@ export function MarkdownText(props: {
   })
   const note = () =>
     cut().reason ? host.t("c.markdown.cut", { shown: amount(cut().shown), total: amount(total()) }) : ""
-  // Prose neutralized, all parts sharing the text's budget for the renderer's work (see MarkdownBudget).
-  const parts = createMemo(() => prepareMarkdown(props.text, imageLabel(), cut()))
+  const parts = () => rendered().parts
 
   const intercept = (event: MouseEvent) => {
     if (event.defaultPrevented) return
