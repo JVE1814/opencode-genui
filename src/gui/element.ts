@@ -1,5 +1,6 @@
 import {
   createComponent,
+  createComputed,
   createContext,
   createMemo,
   createSignal,
@@ -11,6 +12,7 @@ import {
   type Context,
   type JSX,
 } from "solid-js"
+import * as core from "@json-render/core"
 import { getByPath, resolveRepeatStatePath, type DirectiveDefinition } from "@json-render/core"
 import type { BaseComponentProps, ComponentRegistry, ComponentRenderProps } from "@json-render/solid"
 import {
@@ -19,6 +21,10 @@ import {
   defer,
   fitsIn,
   freed,
+  keep,
+  keptFreed,
+  keptRoom,
+  keptVersionRead,
   release,
   sliceAllows,
   sliceCost,
@@ -146,15 +152,279 @@ export function elementUnits(element: { readonly type?: unknown; readonly props?
  */
 export const SpecElementsContext = createContext<Accessor<Readonly<Record<string, unknown>> | undefined>>()
 
+// The text bounds of object values, by identity (see `textBound`).
+const texts = new WeakMap<object, number>()
+
+// "[object Object]", what String() makes of an object.
+const OBJECT_TEXT = 15
+
+/**
+ * At most how many characters of text a value, or any value inside it, turns into as json-render's core builds text (a
+ * list joined with commas, an object as "[object Object]", a number as its digits), up to just past SIZE_LIMIT; walked
+ * once per object, as `sizeOf` is.
+ */
+export function textBound(value: unknown): number {
+  if (typeof value === "string") return value.length
+  if (value === null || value === undefined) return 0
+  if (typeof value !== "object") return String(value).length
+  const known = texts.get(value)
+  if (known !== undefined) return known
+  let size = 0
+  const stack: unknown[] = [value]
+  while (stack.length > 0 && size <= SIZE_LIMIT) {
+    const next = stack.pop()
+    if (typeof next === "string") size += next.length
+    else if (next === null || next === undefined) continue
+    else if (typeof next !== "object") size += String(next).length
+    else {
+      const remembered = next === value ? undefined : texts.get(next)
+      if (remembered !== undefined) {
+        size += remembered
+        continue
+      }
+      if (Array.isArray(next)) {
+        size += next.length
+        for (const item of next) stack.push(item)
+      } else {
+        size += OBJECT_TEXT
+        for (const key in next) if (Object.hasOwn(next, key)) stack.push((next as Record<string, unknown>)[key])
+      }
+    }
+  }
+  const result = Math.min(size, SIZE_LIMIT + 1)
+  texts.set(value, result)
+  return result
+}
+
+/**
+ * What one expression that builds a text ($template, $concat, $join, $truncate) reads, linear in what it reads, so an
+ * upper bound: each state path read (a template's absolute reference, and the state path a relative one falls back to;
+ * a `$state` part), each path read in the repeat item (a relative reference, an `$item` part), each with how many times
+ * its text is copied (a $join's list once per character of its separator besides), and the characters copied that are
+ * not written in the element (separators, a `$truncate` length). `sure` holds the state paths it copies whatever else
+ * happens (a template's absolute references, the `$state` parts of a $concat): the text of what they read now is a
+ * lower bound of what it builds.
+ */
+interface BuildPlan {
+  readonly extra: number
+  readonly state: ReadonlyMap<string, number>
+  /** The item paths read: of a child's expressions, the first MAX_ITEM_PATHS distinct ones; `more` counts the rest. */
+  readonly item: ReadonlyMap<string, number>
+  readonly more: number
+  readonly sure: ReadonlyMap<string, number>
+}
+
+/**
+ * A child's expressions that build texts, by the prop they are in. An expression found only inside a directive or a
+ * condition may not be evaluated at all (`certain` false).
+ */
+type ChildPlan = ReadonlyArray<ReadonlyArray<{ readonly plan: BuildPlan; readonly certain: boolean }>>
+
+/** How many distinct item paths of one child are read one by one (the rest count as the whole item; see BuildPlan). */
+export const MAX_ITEM_PATHS = 64
+
+const NO_PLAN: ChildPlan = Object.freeze([])
+const plans = new WeakMap<object, ChildPlan>()
+const BUILDS = ["$template", "$concat", "$join", "$truncate"] as const
+const TEMPLATE_REF = /\$\{([^}]+)\}/g
+const isBuilder = (value: object): boolean => BUILDS.some((key) => Object.hasOwn(value, key))
+
+/** The plan of one building expression (see BuildPlan); `items` is shared by the child's expressions. */
+function expressionPlan(expression: Readonly<Record<string, unknown>>, items: { paths: Set<string> }): BuildPlan {
+  let extra = 0
+  let more = 0
+  const state = new Map<string, number>()
+  const item = new Map<string, number>()
+  const sure = new Map<string, number>()
+  const add = (map: Map<string, number>, path: string, copies: number) => map.set(path, (map.get(path) ?? 0) + copies)
+  const readItem = (path: string, copies: number) => {
+    if (items.paths.has(path) || items.paths.size < MAX_ITEM_PATHS) {
+      items.paths.add(path)
+      add(item, path, copies)
+    } else more += copies
+  }
+  const template = (text: string, copies: number, certain: boolean) => {
+    for (const [, ref] of text.matchAll(TEMPLATE_REF)) {
+      if (ref!.startsWith("/")) {
+        add(state, ref!, copies)
+        if (certain) add(sure, ref!, copies)
+      } else {
+        readItem(ref!, copies)
+        add(state, `/${ref}`, copies)
+      }
+    }
+  }
+  // Values to look through, inside the expression: every value read is copied into its text.
+  const stack: Array<readonly [unknown, number]> = []
+  if (typeof expression.$template === "string") template(expression.$template, 1, true)
+  else if (Array.isArray(expression.$concat)) {
+    for (const part of expression.$concat) {
+      const raw = part as Readonly<Record<string, unknown>> | null
+      if (raw && typeof raw === "object" && typeof raw.$state === "string") {
+        add(state, raw.$state, 1)
+        add(sure, raw.$state, 1)
+      } else if (raw && typeof raw === "object" && typeof raw.$template === "string") template(raw.$template, 1, true)
+      else stack.push([part, 1])
+    }
+  } else stack.push([expression, 1])
+  let visited = 0
+  while (stack.length > 0 && visited++ <= SIZE_LIMIT) {
+    const [value, copies] = stack.pop()!
+    if (value === null || typeof value !== "object") {
+      if (typeof value === "number") extra += copies * String(value).length
+      continue
+    }
+    if (Array.isArray(value)) {
+      extra += copies * value.length
+      for (const entry of value) stack.push([entry, copies])
+      continue
+    }
+    const raw = value as Readonly<Record<string, unknown>>
+    if (typeof raw.$template === "string") template(raw.$template, copies, false)
+    else if (Array.isArray(raw.$concat)) {
+      for (const part of raw.$concat) stack.push([part, copies])
+    } else if (Object.hasOwn(raw, "$join")) {
+      const separator = typeof raw.separator === "string" ? raw.separator.length : 2
+      stack.push([raw.$join, copies * (1 + separator)])
+    } else if (Object.hasOwn(raw, "$truncate")) {
+      const length = raw.length
+      if (typeof length === "number" && length >= 0 && length <= 1024) extra += copies * (length + 3)
+      else stack.push([raw.$truncate, copies])
+      if (raw.suffix !== undefined) stack.push([raw.suffix, copies])
+    } else if (typeof raw.$state === "string") add(state, raw.$state, copies)
+    else if (typeof raw.$bindState === "string") add(state, raw.$bindState, copies)
+    else if (typeof raw.$item === "string") readItem(raw.$item, copies)
+    else if (typeof raw.$bindItem === "string") readItem(raw.$bindItem, copies)
+    else if (Object.hasOwn(raw, "$cond")) {
+      stack.push([raw.$then, copies])
+      stack.push([raw.$else, copies])
+    } else if (Object.keys(raw).some((key) => key.charCodeAt(0) === 36)) {
+      // Another directive ($format, $math, $count, $pluralize): its text is about as long as it is written.
+      extra += copies * 32
+      for (const entry of Object.values(raw)) stack.push([entry, copies])
+    } else extra += copies * OBJECT_TEXT
+  }
+  return { extra, state, item, more, sure }
+}
+
+/** The plan of a child's props (see ChildPlan), worked out once per props object (spec values never change in place). */
+function planOf(props: object): ChildPlan {
+  const known = plans.get(props)
+  if (known) return known
+  const items = { paths: new Set<string>() }
+  const found: Array<Array<{ readonly plan: BuildPlan; readonly certain: boolean }>> = []
+  for (const value of Object.values(props)) {
+    const expressions: Array<{ readonly plan: BuildPlan; readonly certain: boolean }> = []
+    // [value, reached through plain lists and objects only]
+    const stack: Array<readonly [unknown, boolean]> = [[value, true]]
+    let visited = 0
+    while (stack.length > 0 && visited++ <= SIZE_LIMIT) {
+      const [next, certain] = stack.pop()!
+      if (!next || typeof next !== "object") continue
+      if (!Array.isArray(next) && isBuilder(next)) {
+        expressions.push({ plan: expressionPlan(next as Record<string, unknown>, items), certain })
+        continue
+      }
+      const plain = Array.isArray(next) || !Object.keys(next).some((key) => key.charCodeAt(0) === 36)
+      for (const entry of Array.isArray(next) ? next : Object.values(next))
+        if (entry && typeof entry === "object") stack.push([entry, certain && plain])
+    }
+    if (expressions.length > 0) found.push(expressions)
+  }
+  const plan = found.length === 0 ? NO_PLAN : found
+  plans.set(props, plan)
+  return plan
+}
+
+/**
+ * What an element's children read as json-render resolves them (see `childSlots`): the state, and the text bound (see
+ * `textBound`) of what a path reads in the repeat item of the row they render in, or of the whole item (`wholeItem`).
+ * For the rows of a repeat these are averages over the rows' items, so the rows together are charged what they read.
+ * Each is read only when a child's expressions need it, so an element whose children build nothing does not follow the
+ * state.
+ */
+export interface ChildReads {
+  readonly state: () => unknown
+  readonly itemText: (path: string) => number
+  readonly wholeItem: () => number
+}
+
+// What a plan's state paths read (`upper`), and the exact text of its sure ones (`lower`), for the last state it was
+// worked out for (shared by every instance of the child).
+const stateReads = new WeakMap<BuildPlan, { readonly state: unknown; readonly upper: number; readonly lower: number }>()
+
+// The exact length of the text json-render's core makes of a value it copies, where that is known without a walk.
+const exactText = (value: unknown): number =>
+  typeof value === "string" ? value.length : typeof value === "number" ? String(value).length : 0
+
+function stateReadsOf(plan: BuildPlan, reads: ChildReads): { readonly upper: number; readonly lower: number } {
+  if (plan.state.size === 0) return { upper: 0, lower: 0 }
+  const state = reads.state()
+  const known = stateReads.get(plan)
+  if (known && known.state === state) return known
+  let upper = 0
+  for (const [path, copies] of plan.state) {
+    if (upper > SIZE_LIMIT) break
+    upper += copies * textBound(getByPath(state as Record<string, unknown>, path))
+  }
+  let lower = 0
+  for (const [path, copies] of plan.sure) {
+    if (lower > MAX_EXPANSION) break
+    lower += copies * exactText(getByPath(state as Record<string, unknown>, path))
+  }
+  const result = { state, upper, lower }
+  stateReads.set(plan, result)
+  return result
+}
+
+/** The most characters one expression builds (json-render's core: see MAX_EXPANSION in patches/@json-render%2Fcore). */
+export const MAX_EXPANSION = 1_000_000
+
+/**
+ * At most how many characters the expressions in an element's props build and keep once json-render resolves them
+ * ($template, $concat, $join and $truncate copy what they read into a text of their own), from what they read now (see
+ * BuildPlan), up to just past SIZE_LIMIT. Each expression keeps at most MAX_EXPANSION; one that surely builds more is
+ * left empty by json-render's core, with the rest of its prop, and keeps nothing.
+ */
+export function builtOf(element: unknown, reads: ChildReads): number {
+  const props = (element as { readonly props?: unknown } | null)?.props
+  if (!props || typeof props !== "object") return 0
+  const plan = planOf(props)
+  let size = 0
+  for (const expressions of plan) {
+    if (size > SIZE_LIMIT) break
+    let prop = 0
+    for (const { plan: expression, certain } of expressions) {
+      const { upper, lower } = stateReadsOf(expression, reads)
+      if (certain && lower > MAX_EXPANSION) {
+        prop = 0
+        break
+      }
+      let built = expression.extra + upper
+      for (const [path, copies] of expression.item) {
+        if (built > MAX_EXPANSION) break
+        built += copies * reads.itemText(path)
+      }
+      if (expression.more > 0 && built <= MAX_EXPANSION) built += expression.more * reads.wholeItem()
+      prop += Math.min(built, MAX_EXPANSION)
+    }
+    size += prop
+  }
+  return Math.min(size, SIZE_LIMIT + 1)
+}
+
 /**
  * The slots one child renderer of an element takes (see SLOT_UNITS): one, plus one for every TEXT_PER_UNIT characters
- * of the child's element as written (see `sizeOf`). json-render resolves an instance's props into values of its own,
- * and keeps them, before the instance can tell whether it fits: 4,000 entries of a child whose prop held a list of
- * 40,000 numbers and one expression kept 700 MB, and 2,000 rows of it 360 MB. Charged at the parent, such a child is
- * refused before json-render builds it.
+ * of the child's element as written (see `sizeOf`) and of what its expressions build from what they read now (see
+ * `builtOf`, given `reads`). json-render resolves an instance's props into values of its own, and keeps them, before
+ * the instance can tell whether it fits: 4,000 entries of a child whose prop held a list of 40,000 numbers and one
+ * expression kept 700 MB, and 2,000 rows of it 360 MB; 2,000 rows of a Text of 80 characters whose templates read a
+ * text of 90,000 characters 44 times would build 8 billion. Charged at the parent, such a child is refused before
+ * json-render builds it (and what instances keep is bounded besides: see createKeptLedger).
  */
-export function childSlots(element: unknown): number {
-  return 1 + Math.floor(Math.min(sizeOf(element), SIZE_LIMIT + 1) / TEXT_PER_UNIT)
+export function childSlots(element: unknown, reads?: ChildReads): number {
+  const built = reads ? builtOf(element, reads) : 0
+  return 1 + Math.floor(Math.min(sizeOf(element) + built, SIZE_LIMIT + 1) / TEXT_PER_UNIT)
 }
 
 /**
@@ -259,6 +529,123 @@ export function createRenderBudget(
 /** The surface's render budget (none outside a surface: unit tests render without a limit unless they provide one). */
 export const RenderBudgetContext = createContext<RenderBudget>()
 
+// --- What rendered elements keep --------------------------------------------------------------------------------------
+
+/** What one element instance keeps of its resolved props (see KeptLedger), and the render meters it is charged to. */
+export interface KeptHold {
+  readonly size: number
+  meters: readonly Meter[]
+  /** A prop was left empty for want of room. */
+  readonly cut: boolean
+  /** The ledger took the hold back (its surface's pools changed and it no longer fit); its instance evaluates again. */
+  evicted: boolean
+  readonly keeper: { readonly wake: () => void }
+  readonly withdraw: (() => void) | undefined
+}
+
+/** What an evaluation kept (see `keep` in patches/@json-render%2Fcore's withEvaluation). */
+export interface Kept {
+  readonly kept: number
+  readonly cut: boolean
+}
+
+/**
+ * The ledger json-render's renderer charges what each element instance keeps of its resolved props to (KeptValuesContext
+ * in patches/@json-render%2Fsolid). json-render resolves the props of every instance (each row of a repeat, each entry
+ * of a parent's children) and keeps them for as long as the instance lives, rendered or not; the bounds on what
+ * expressions build per task (4 million characters) let 2,000 rows build and keep 4 million more every task until the
+ * window ran out of memory. An instance evaluates its props with the room the ledger gives it (`room`), the evaluation
+ * stops there and leaves the prop that would pass it empty, and the instance holds what it kept (`take`) until it
+ * evaluates again or goes (`release`).
+ */
+export interface KeptLedger {
+  readonly room: (hold: KeptHold | undefined) => number
+  readonly take: (
+    previous: KeptHold | undefined,
+    kept: Kept,
+    keeper: { readonly wake: () => void },
+    elementKey?: string,
+  ) => KeptHold
+  readonly release: (hold: KeptHold) => void
+}
+
+const NO_METERS: readonly Meter[] = Object.freeze([])
+
+/**
+ * A surface's KeptLedger, charged to the kept meters (see keptMeter in src/runtime/budget.ts) of the same meters as its
+ * render budget: the surface's own (KEPT_PER_SURFACE) and its kind's window-wide pool, of which the agent's newest
+ * inline UI keeps a share of its own as it does for rendering (see joinInlinePool). A remount or a second surface
+ * charges the same pools, and gives back what its instances held as they go. When the surface's pools change (it stops
+ * or starts being the newest inline UI), its holds take their room again, oldest first; an instance whose hold no longer
+ * fits is evaluated again with the room left. An instance that left a prop empty is evaluated again once room is
+ * freed anywhere in the window (at most once per task), and `onCut` reports it while it holds such a hold (`pooled`:
+ * the room went to other surfaces of its pool). Call it under an owner (it follows the pools reactively).
+ */
+export function createKeptLedger(
+  budget: Pick<RenderBudget, "meter" | "pool">,
+  onCut?: (pooled: boolean, elementKey: string | undefined) => (() => void) | undefined,
+): KeptLedger {
+  const meters = (): readonly Meter[] => {
+    const pool = budget.pool?.()
+    return pool === undefined ? [budget.meter] : [budget.meter, ...(Array.isArray(pool) ? pool : [pool as Meter])]
+  }
+  // In the order they were taken.
+  const holds = new Set<KeptHold>()
+  let current = untrack(meters)
+  createComputed(() => {
+    const next = meters()
+    if (next.length === current.length && next.every((meter, index) => meter === current[index])) return
+    current = next
+    untrack(() => {
+      const order = [...holds]
+      for (const hold of order) keep(hold.meters, -hold.size)
+      for (const hold of order) {
+        if (keptRoom(next) >= hold.size) {
+          keep(next, hold.size)
+          hold.meters = next
+        } else {
+          hold.meters = NO_METERS
+          hold.evicted = true
+          hold.keeper.wake()
+        }
+      }
+      keptFreed()
+    })
+  })
+  const drop = (hold: KeptHold): boolean => {
+    if (!holds.delete(hold)) return false
+    keep(hold.meters, -hold.size)
+    return true
+  }
+  return {
+    room: (hold) => {
+      // An instance that left a prop empty tries again once room is freed.
+      if (hold?.cut) keptVersionRead()
+      return keptRoom(current, hold)
+    },
+    take: (previous, kept, keeper, elementKey) => {
+      const size = Math.max(0, kept.kept)
+      const pooled = kept.cut && keptRoom([budget.meter], previous) > keptRoom(current, previous)
+      const freedBefore = previous !== undefined && !previous.evicted && previous.meters.length > 0
+      if (previous) drop(previous)
+      keep(current, size)
+      const withdraw = kept.cut ? onCut?.(pooled, elementKey) : undefined
+      // After the new report, so an issue that stays is not withdrawn in between.
+      previous?.withdraw?.()
+      const hold: KeptHold = { size, meters: current, cut: kept.cut, evicted: false, keeper, withdraw }
+      holds.add(hold)
+      if (freedBefore && size < previous.size && !kept.cut) keptFreed()
+      if (kept.cut) keptVersionRead()
+      return hold
+    },
+    release: (hold) => {
+      if (!drop(hold)) return
+      hold.withdraw?.()
+      if (hold.size > 0 && hold.meters.length > 0) keptFreed()
+    },
+  }
+}
+
 export { MAX_DEPTH }
 
 // How deep the element being rendered is (see MAX_DEPTH).
@@ -271,7 +658,7 @@ const DepthContext = createContext(0)
  */
 export interface JsonRenderHooks {
   readonly useStateStore: () => { readonly state: unknown }
-  readonly useRepeatScope: () => { readonly basePath: string } | null
+  readonly useRepeatScope: () => { readonly basePath: string; readonly item?: unknown } | null
   /**
    * Where an element tells json-render's repeat how many of its rows to render (patches/@json-render%2Fsolid): those
    * that fit in the render budget. Without it, a repeat whose rows do not all fit renders none.
@@ -279,8 +666,38 @@ export interface JsonRenderHooks {
   readonly RepeatRowsContext?: Context<Accessor<number | undefined> | undefined>
 }
 
-/** How many rows the element's repeat has, as json-render's repeat reads them (0 for an element without one). */
-function useRows(props: ComponentRenderProps, hooks: JsonRenderHooks | undefined): Accessor<number> {
+// The average text bound of what a path reads in a list's items, over the first MAX_REPEAT_ROWS (the rows a repeat may
+// render), by list and path; at most MAX_AVERAGED_PATHS paths per list, the rest bounded by the whole items' average.
+const averages = new WeakMap<readonly unknown[], Map<string, number>>()
+const MAX_AVERAGED_PATHS = 64
+
+function averageText(list: readonly unknown[], path: string | undefined): number {
+  const rows = Math.min(list.length, MAX_REPEAT_ROWS)
+  if (rows === 0) return 0
+  let known = averages.get(list)
+  if (!known) averages.set(list, (known = new Map()))
+  const key = path ?? "\u0000"
+  let average = known.get(key)
+  if (average !== undefined) return average
+  if (path !== undefined && known.size >= MAX_AVERAGED_PATHS) return averageText(list, undefined)
+  let total = 0
+  for (let index = 0; index < rows && total <= SIZE_LIMIT; index++)
+    total += textBound(path === undefined ? list[index] : getByPath(list[index] as Record<string, unknown>, path))
+  average = Math.ceil(total / rows)
+  known.set(key, average)
+  return average
+}
+
+/**
+ * What the element reads of the state and its repeat scope, as json-render reads them: how many rows its repeat has (0
+ * for an element without one), and what its children read (see ChildReads; none without the state store): for the
+ * rows of its repeat, averages over the items of the rows it may render; otherwise the item of the row it renders in
+ * itself (nothing outside a repeat).
+ */
+function useReads(
+  props: ComponentRenderProps,
+  hooks: JsonRenderHooks | undefined,
+): { readonly rows: Accessor<number>; readonly reads: Accessor<ChildReads | undefined> } {
   let store: { readonly state: unknown } | undefined
   try {
     store = hooks?.useStateStore()
@@ -288,14 +705,31 @@ function useRows(props: ComponentRenderProps, hooks: JsonRenderHooks | undefined
     store = undefined
   }
   const scope = hooks?.useRepeatScope()
-  return () => {
+  const list = (): readonly unknown[] | undefined => {
     const repeat = props.element?.repeat
-    if (!repeat || !store) return 0
+    if (!repeat || !store) return undefined
     const path = resolveRepeatStatePath(repeat.statePath, scope?.basePath)
-    if (path === undefined) return 0
-    const list = getByPath(store.state as Record<string, unknown>, path)
-    return Array.isArray(list) ? list.length : 0
+    if (path === undefined) return undefined
+    const found = getByPath(store.state as Record<string, unknown>, path)
+    return Array.isArray(found) ? found : undefined
   }
+  const rows = () => list()?.length ?? 0
+  const reads = (): ChildReads | undefined => {
+    if (!store) return undefined
+    const from = store
+    const state = () => from.state
+    if (props.element?.repeat) {
+      const items = list() ?? []
+      return { state, itemText: (path) => averageText(items, path), wholeItem: () => averageText(items, undefined) }
+    }
+    return {
+      state,
+      itemText: (path) =>
+        textBound(path === "" ? scope?.item : getByPath(scope?.item as Record<string, unknown>, path)),
+      wholeItem: () => textBound(scope?.item),
+    }
+  }
+  return { rows, reads }
 }
 
 /** Whether an element renders, and, for a repeat whose rows do not all fit, how many of its rows do. */
@@ -313,16 +747,22 @@ const REFUSED: Fit = Object.freeze({ fits: false })
  * rest; more of them render once room is freed.
  */
 function useFit(budget: RenderBudget, props: ComponentRenderProps, hooks?: JsonRenderHooks): Accessor<Fit> {
-  const rows = useRows(props, hooks)
+  const { rows, reads } = useReads(props, hooks)
   const elements = useContext(SpecElementsContext)
-  const slotOf = (key: unknown) => {
-    const child = typeof key === "string" ? elements?.()?.[key] : undefined
-    return child === undefined ? 1 : childSlots(child)
+  // A child's slots, with what its expressions build from what they read now (see childSlots).
+  const slotOf = () => {
+    const now = reads()
+    return (key: unknown) => {
+      const child = typeof key === "string" ? elements?.()?.[key] : undefined
+      return child === undefined ? 1 : childSlots(child, now)
+    }
   }
   const units = createMemo(() => elementUnits(props.element))
-  const slots = createMemo(() => slotsOf(props.element, rows(), slotOf))
   // The slots one row of the element's repeat takes, or 0 without a repeat.
-  const perRow = createMemo(() => (props.element?.repeat ? rowSlots(props.element, slotOf) : 0))
+  const perRow = createMemo(() => (props.element?.repeat ? rowSlots(props.element, slotOf()) : 0))
+  const slots = createMemo(() =>
+    props.element?.repeat ? Math.min(rows(), MAX_REPEAT_ROWS) * perRow() : slotsOf(props.element, rows(), slotOf()),
+  )
   const [woken, setWoken] = createSignal(undefined, { equals: false })
   const waiter: Waiter = { wake: () => setWoken(undefined), queued: false, disposed: false }
   let hold: Hold | undefined
@@ -530,14 +970,22 @@ export function guardDirectives(directives: readonly DirectiveDefinition[]): Dir
     return {
       ...directive,
       resolve: (value, ctx) => {
+        let result: unknown
         try {
-          return directive.resolve(value, ctx)
+          result = directive.resolve(value, ctx)
         } catch (error) {
           const flags = error as { readonly expansionLimit?: unknown; readonly evaluationDeferred?: unknown } | null
           if (flags?.expansionLimit || flags?.evaluationDeferred) throw error
           return undefined
         }
+        // The text it returns is kept by the element (see createKeptLedger), counted whole even when it is a text of the
+        // state passed through; one that does not fit leaves the prop empty.
+        if (typeof result === "string") chargeKept(result.length)
+        return result
       },
     }
   })
 }
+
+// Counts what an evaluation keeps (patches/@json-render%2Fcore); without the patch, nothing.
+const chargeKept = (core as unknown as { readonly chargeKept?: (size: number) => void }).chargeKept ?? (() => {})

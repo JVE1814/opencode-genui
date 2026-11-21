@@ -27,7 +27,7 @@ import { CANVAS_TAB_PREFIX, INSTRUCTION_KEY, LANGUAGES, SKILL_ID } from "../shar
 import { hintFor } from "../shared/hint.ts"
 import { parseOptions, type GenuiOptions } from "../shared/options.ts"
 import { createHostAdapter } from "./adapter.ts"
-import { canvasPanel } from "./canvas.tsx"
+import { canvasOfTab, canvasPanel } from "./canvas.tsx"
 import { DEFAULT_PREFS, type Host, type SurfaceContext } from "./host.ts"
 import { renderBlock } from "./inline.tsx"
 import { clearStoredSurfaces, flushOnAbort, flushSurfaceWrites, type SessionStore } from "./persist.ts"
@@ -89,7 +89,8 @@ export interface GuiEnv {
 /**
  * How many of the tabs auto-open opened may be open in a session at once: as many as a session has canvases (see
  * MAX_CANVASES). Each canvas a reply streams opens its tab, and a reply that opened and closed canvases in turn left
- * hundreds of tabs, the work of each delta growing with them.
+ * hundreds of tabs, the work of each delta growing with them. A live canvas always gets a place: at most MAX_CANVASES
+ * are live, so when all are taken, one holds a canvas the agent closed, and the oldest such tab gives up its place.
  */
 export const MAX_AUTO_OPEN = MAX_CANVASES
 
@@ -103,11 +104,23 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
   const sessions = createSessionRegistry(store, { owner: getOwner() })
   const closed = new Set<string>()
   const closedKey = (session: SessionRef, canvas: string) => `${session.key}\n${canvas}`
-  // Per session key: the canvases whose tab auto-open opened (see MAX_AUTO_OPEN), and the tabs genui is closing itself
-  // (not the user: auto-open may open them again).
+  // Per session key: the canvases whose tab auto-open opened and that are still open, oldest first (see MAX_AUTO_OPEN),
+  // and the tab genui is closing itself (not the user: auto-open may open it again). A session's set starts from the
+  // canvas tabs its strip holds, so an app restart, which keeps the strip, does not reset the count.
   const autoOpened = new Map<string, Set<string>>()
   const closing = new Set<string>()
   const tabKey = (canvas: string) => `${ctx.id}:${CANVAS_TAB_PREFIX}${canvas}`
+  // The host reports the close to the panel (markClosed) while it closes the tab; the mark is dropped either way, so a
+  // close the host did not report cannot hide the user's next one.
+  const closeOwn = (session: SessionRef, canvas: string) => {
+    const key = closedKey(session, canvas)
+    closing.add(key)
+    try {
+      ctx.layout.close(tabKey(canvas), session)
+    } finally {
+      closing.delete(key)
+    }
+  }
   // Per session key: the canvas the narrow-screen view shows.
   const [mobile, setMobile] = createSignal<ReadonlyMap<string, string>>(new Map())
   const showMobile = (session: SessionRef, canvas: string) =>
@@ -262,26 +275,44 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
   })
 
   // ── Auto-open: a canvas that starts in a live reply opens its tab once ────────────────────────────────────────
-  // At most MAX_AUTO_OPEN of the tabs it opened stay open in a session; past that, a new canvas opens from its chip. A
-  // canvas the agent closes again in the reply that started it takes its tab with it.
+  // Each start once: a canvas the agent closed and sent again whole starts again, and keeps the tab auto-open gave it,
+  // or gets one again if genui closed it; never one the user closed. A canvas the agent closes again in the reply that
+  // started it takes its tab with it. At most MAX_AUTO_OPEN of the tabs it opened stay open in a session: past that,
+  // the oldest of a canvas the agent closed (struck through) make room. After an app restart, every canvas tab the
+  // strip kept counts (the strip does not say which tabs auto-open opened), oldest first.
   createEffect(() => {
     const session = ctx.sessions.current()
     if (!session) return
     const index = sessions.get(session).index
     const fresh = index.fresh()
     if (fresh.length === 0) return
+    // (Until the stored strip has loaded, it reads as empty.)
+    if (!ctx.layout.ready()) return
     const mode = host.prefs().autoOpen
     untrack(() => {
       let opened = autoOpened.get(session.key)
-      if (!opened) autoOpened.set(session.key, (opened = new Set()))
+      if (!opened) {
+        const stored = ctx.layout.stored(session).filter((tab) => tab.startsWith(CANVAS_TAB_PREFIX))
+        autoOpened.set(session.key, (opened = new Set(stored.map(canvasOfTab))))
+      }
       for (const canvas of [...opened])
         if (ctx.layout.state(tabKey(canvas), session) === "closed") opened.delete(canvas)
       for (const canvas of fresh) {
-        if (mode !== "off" && !closed.has(closedKey(session, canvas)) && opened.size < MAX_AUTO_OPEN) {
-          ctx.layout.open(tabKey(canvas), session, { tab: mode === "select" ? "select" : "append", background: true })
-          opened.add(canvas)
-        }
         index.consumeFresh(canvas)
+        if (mode === "off" || closed.has(closedKey(session, canvas)) || opened.has(canvas)) continue
+        // (Only once the index has loaded the session's canvases: until then, a live one could read as closed.)
+        if (opened.size >= MAX_AUTO_OPEN && index.ready()) {
+          const live = new Set(index.canvasIds())
+          for (const old of [...opened]) {
+            if (opened.size < MAX_AUTO_OPEN) break
+            if (live.has(old)) continue
+            opened.delete(old)
+            closeOwn(session, old)
+          }
+        }
+        if (opened.size >= MAX_AUTO_OPEN) continue
+        ctx.layout.open(tabKey(canvas), session, { tab: mode === "select" ? "select" : "append", background: true })
+        opened.add(canvas)
       }
     })
   })
@@ -294,10 +325,7 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     untrack(() => {
       const opened = autoOpened.get(session.key)
       for (const canvas of withdrawn) {
-        if (opened?.delete(canvas) && ctx.layout.state(tabKey(canvas), session) !== "closed") {
-          closing.add(closedKey(session, canvas))
-          ctx.layout.close(tabKey(canvas), session)
-        }
+        if (opened?.delete(canvas) && ctx.layout.state(tabKey(canvas), session) !== "closed") closeOwn(session, canvas)
         index.consumeWithdrawn(canvas)
       }
     })

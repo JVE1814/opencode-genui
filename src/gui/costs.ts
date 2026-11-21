@@ -3,7 +3,7 @@
 // Kept free of JSX and of json-render so element.ts, which charges these, loads without a DOM.
 
 import type { ComponentName } from "../catalog/components.ts"
-import { codeBlocks } from "./components/markdown.ts"
+import { markdownShape, MAX_MARKDOWN_BLOCKS } from "./components/markdown.ts"
 
 /** Rows a Table renders at most; a table this long belongs in a file, and the surface must stay cheap to update. */
 export const MAX_TABLE_ROWS = 500
@@ -139,30 +139,42 @@ function chartPoints(props: Record<string, unknown>): number {
 /**
  * What a code block in a Markdown text costs: one it shows on its own (see MAX_CODE_PARTS in components/markdown.ts)
  * CODE_PART_UNITS, since the app's code block is a Markdown renderer of its own, a few elements' worth; one left in the
- * prose a unit, about what the renderer builds for it (in the playground, an element's worth).
+ * prose (fenced, indented, display math) a unit, about what the renderer builds for it (in the playground, an
+ * element's worth).
  */
 export const CODE_PART_UNITS = 4
 
-/** The units of a Markdown text's code blocks (see CODE_PART_UNITS). */
+/** The units of a Markdown text's code blocks (see CODE_PART_UNITS), in what it shows. */
 export function textCodeUnits(text: string): number {
-  const { total, own } = codeBlocks(text)
-  return own * CODE_PART_UNITS + (total - own)
+  const { code, own } = markdownShape(text)
+  return own * CODE_PART_UNITS + (code - own)
 }
 
-// The units of an Accordion's items' code blocks, by its items list (the rows of a repeat share it).
+/**
+ * The units of a Markdown text beyond its length: its code blocks (see textCodeUnits), and its blocks (paragraphs,
+ * headings, rules, quotes, list items, table cells) charged as Table cells are, as far as its length does not pay for
+ * them already (see CHARS_PER_BLOCK in components/markdown.ts; at most MAX_MARKDOWN_BLOCKS such show). A text of tiny
+ * blocks built 47,000 table cells, or 24,000 list items, in one element; charged, the time slice keeps such texts in
+ * tasks of their own.
+ */
+export function markdownUnits(text: string): number {
+  return textCodeUnits(text) + Math.floor(Math.min(MAX_MARKDOWN_BLOCKS, markdownShape(text).blocks) / CELLS_PER_UNIT)
+}
+
+// The units of an Accordion's items' Markdown, by its items list (the rows of a repeat share it).
 const accordionCode = new WeakMap<object, number>()
 
-/** The units of the code blocks in the Markdown texts of an element (Markdown, Popover, Accordion items). */
+/** The units of the Markdown texts of an element (Markdown, Popover, Accordion items) beyond their length. */
 function codeUnits(type: unknown, props: Record<string, unknown>): number {
   if (type === "Markdown" || type === "Popover")
-    return typeof props.content === "string" ? textCodeUnits(props.content) : 0
+    return typeof props.content === "string" ? markdownUnits(props.content) : 0
   if (type !== "Accordion" || !Array.isArray(props.items)) return 0
   const items = props.items
   let units = accordionCode.get(items)
   if (units === undefined) {
     units = 0
     for (const item of items.slice(0, ITEM_LISTS.Accordion.max))
-      if (isRecord(item) && typeof item.content === "string") units += textCodeUnits(item.content)
+      if (isRecord(item) && typeof item.content === "string") units += markdownUnits(item.content)
     accordionCode.set(items, units)
   }
   return units
@@ -170,8 +182,8 @@ function codeUnits(type: unknown, props: Record<string, unknown>): number {
 
 /**
  * The units an element of `type` costs on top of its props' size: its cells, points or drawn list items over
- * CELLS_PER_UNIT, and the code blocks its Markdown shows (see CODE_PART_UNITS). Zero for components whose DOM follows
- * their props' size.
+ * CELLS_PER_UNIT, and the code blocks and blocks its Markdown shows (see markdownUnits). Zero for components whose DOM
+ * follows their props' size.
  */
 export function domUnits(type: unknown, props: unknown): number {
   if (!isRecord(props)) return 0

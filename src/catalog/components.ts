@@ -72,7 +72,7 @@ export const componentDefinitions = {
     }),
     slots: ["default"],
     description:
-      "Bordered container for a section, form or item. tone colors its accent for status cards. Not for page headers.",
+      "Bordered box for a section, form or item. tone colors its accent for status cards. Not for page headers.",
     example: { title: "Deployment", description: "Production · us-east-1" },
   },
   Separator: {
@@ -130,7 +130,7 @@ export const componentDefinitions = {
   Markdown: {
     props: z.object({ content: z.string() }),
     description:
-      "Rich text as Markdown in the app's style: lists, links, tables, code. Cut at a paragraph over 20,000 characters.",
+      "Rich text as Markdown: lists, links, tables, code. Each code block counts as an element. Cut at a paragraph over 20,000 characters, lists or quotes nested over 8 deep, many tiny blocks, or long list or quote runs without blank lines or indents.",
   },
   Code: {
     props: z.object({ code: z.string(), language: z.string().optional(), title: z.string().optional() }),

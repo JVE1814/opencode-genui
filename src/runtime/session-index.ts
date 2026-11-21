@@ -1,4 +1,4 @@
-import { createMemo, createSignal, getOwner, runWithOwner, untrack, type Accessor } from "solid-js"
+import { createMemo, createSelector, createSignal, getOwner, runWithOwner, untrack, type Accessor } from "solid-js"
 import { scanFences } from "../protocol/fence.ts"
 import {
   compareRefs,
@@ -66,7 +66,8 @@ export interface SessionIndex {
   latestInline(id: string): string | undefined
   /**
    * Canvases that started live (in a reply still being written when the index became ready, or in a later one) and have
-   * drawn something, not consumed yet. A patch whose base is not loaded is an update, never a new canvas.
+   * drawn something, not consumed yet: each start once, where a canvas the agent closed and sent again whole starts
+   * again. A patch whose base is not loaded is an update, never a new canvas.
    */
   readonly fresh: Accessor<readonly string[]>
   consumeFresh(id: string): void
@@ -128,6 +129,12 @@ interface Scan {
 }
 
 const PARSE_CACHE_SIZE = 512
+/**
+ * How many characters of block bodies the parse cache holds, besides how many bodies: a canvas block of 100 KB streamed
+ * in 1,000 deltas left a partial body of up to 100 KB, with its parse, for each of the last 512 (173 MB). The bodies of
+ * the reply being written, which a delta parses again, fit many times over.
+ */
+export const PARSE_CACHE_CHARS = 1_000_000
 const RECENT_SETTLED = 8
 const KNOWN_LANGUAGES: ReadonlySet<string> = new Set(LANGUAGES)
 const NO_IDS: readonly string[] = Object.freeze([])
@@ -162,6 +169,7 @@ const sameSnapshot = (a: CanvasSnapshot, b: CanvasSnapshot) =>
 
 function createParser() {
   const cache = new Map<string, ParsedBlock>()
+  let chars = 0
   return (body: string, closed: boolean) => {
     const key = (closed ? "1" : "0") + body
     let parsed = cache.get(key)
@@ -169,7 +177,13 @@ function createParser() {
       cache.delete(key)
     } else {
       parsed = parseBlock(body, { partial: !closed })
-      if (cache.size >= PARSE_CACHE_SIZE) cache.delete(cache.keys().next().value!)
+      chars += key.length
+      // The least recently used go first; a body larger than the bound alone is kept until the next one.
+      while (cache.size > 0 && (cache.size >= PARSE_CACHE_SIZE || chars > PARSE_CACHE_CHARS)) {
+        const oldest = cache.keys().next().value!
+        cache.delete(oldest)
+        chars -= oldest.length
+      }
     }
     cache.set(key, parsed)
     return parsed
@@ -211,7 +225,8 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   const parts = new Map<string, PartScan>()
   const canvasBlocks = new Map<string, CanvasBlock>()
   const folder = createCanvasFolder()
-  // Settled snapshots this index produced, to recognize them when they come back from the store.
+  // Settled snapshots this index produced, to recognize them when they come back from the store: RECENT_SETTLED for each
+  // live canvas.
   const recent = new Map<string, CanvasSnapshot[]>()
 
   let sawMessages = false
@@ -322,6 +337,10 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   })
 
   const known = createMemo(() => scan().texts, undefined, { equals: sameSet })
+  // Whether one text is known, waking only those who asked about a text whose answer changed: the set changes with
+  // each delta of a reply (the block being written grows), and every mounted surface asks about its own block, so a
+  // reply of 1,700 small blocks woke 1,700 computations per delta.
+  const isKnown = createSelector(known, (text: string, texts: ReadonlySet<string> | undefined) => !!texts?.has(text))
   const latest = createMemo(() => scan().latest, undefined, { equals: sameMap })
 
   // A snapshot describes messages that are gone when its message is newer than every loaded message, or inside their
@@ -383,6 +402,9 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
       if (list.length > RECENT_SETTLED) list.shift()
       recent.set(state.id, list)
     }
+    // Only canvases the fold has: a closed canvas's snapshot is deleted, not read back, and each held a whole spec (120
+    // canvases of 200 KB, each closed in the next reply, kept 23 MB for the session's lifetime).
+    for (const id of recent.keys()) if (!result.canvases.has(id)) recent.delete(id)
     return result
   })
 
@@ -417,9 +439,13 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     (previous) => previous ?? (ready() ? (untrack(scan).settled ?? "") : undefined),
   )
 
-  const consumed = new Set<string>()
-  const reported = new Set<string>()
-  const retired = new Set<string>()
+  // Each start of a canvas is reported at most once. A start is the canvas's first block, so a canvas the agent closed
+  // and sent again whole starts again: keyed by canvas, a canvas closed and sent again in its reply was never fresh
+  // again, and lost the tab genui had closed for it. A start is fresh only while its message is being written, so
+  // `done` (the starts consumed, or reported and no longer fresh) keeps only those: no more than the open replies hold.
+  const done = new Map<string, string>()
+  // The start each canvas in `fresh` was reported with, and its message.
+  let reported = new Map<string, { readonly start: string; readonly messageID: string }>()
   const [consumedVersion, setConsumedVersion] = createSignal(0)
   // The message that started each canvas reported fresh, until it is withdrawn (see `withdrawn`) or its reply is over.
   const startedIn = new Map<string, string>()
@@ -431,21 +457,23 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
       if (mark === undefined) return NO_IDS
       const { complete } = scan()
       const ids: string[] = []
+      const now = new Map<string, { readonly start: string; readonly messageID: string }>()
       for (const state of canvases()) {
-        const id = state.id
-        if (consumed.has(id) || retired.has(id)) continue
         // Wait for the first patch: a patch with no base is an update to a canvas that started before the loaded
         // messages, not a new canvas.
         if (state.spec === null || state.missingBase) continue
-        const messageID = state.first.messageID
-        if (messageID > mark && complete.get(messageID) === false) {
-          ids.push(id)
-          startedIn.set(id, messageID)
-        }
+        const { messageID, part, ordinal } = state.first
+        if (messageID <= mark || complete.get(messageID) !== false) continue
+        const start = `${messageID}\u0000${part}\u0000${ordinal}\u0000${state.id}`
+        if (done.has(start)) continue
+        ids.push(state.id)
+        now.set(state.id, { start, messageID })
+        startedIn.set(state.id, messageID)
       }
-      // Report each canvas at most once: one that was reported and is no longer fresh does not come back.
-      for (const id of reported) if (!ids.includes(id)) retired.add(id)
-      for (const id of ids) reported.add(id)
+      // A start that was reported and is no longer fresh does not come back.
+      for (const [id, entry] of reported) if (now.get(id)?.start !== entry.start) done.set(entry.start, entry.messageID)
+      reported = now
+      for (const [start, messageID] of done) if (complete.get(messageID) !== false) done.delete(start)
       return ids.length === 0 ? NO_IDS : ids
     },
     undefined,
@@ -524,12 +552,13 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     exists,
     removed,
     refused,
-    knows: (text) => known().has(text),
+    knows: (text) => isKnown(text),
     latestInline: (id) => latest().get(id),
     fresh,
     consumeFresh(id) {
-      if (consumed.has(id)) return
-      consumed.add(id)
+      const entry = reported.get(id)
+      if (!entry || done.has(entry.start)) return
+      done.set(entry.start, entry.messageID)
       setConsumedVersion((version) => version + 1)
     },
     withdrawn,

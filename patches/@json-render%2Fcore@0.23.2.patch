@@ -1,18 +1,19 @@
 diff --git a/dist/index.js b/dist/index.js
-index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902eabc9eff3 100644
+index 33cb8650ce36e5e58f5822f73e43a02f353639d3..cf37a2a7c66be80650c649531c2681a7d7339122 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -84,6 +84,9 @@ __export(index_exports, {
+@@ -84,6 +84,10 @@ __export(index_exports, {
    resolveDynamicValue: () => resolveDynamicValue,
    resolveElementProps: () => resolveElementProps,
    resolvePropValue: () => resolvePropValue,
 +  withEvaluation: () => withEvaluation,
 +  withExpansionAccount: () => withExpansionAccount,
 +  chargeEvaluation: () => chargeEvaluation,
++  chargeKept: () => chargeKept,
    resolveRepeatItemStatePath: () => resolveRepeatItemStatePath,
    resolveRepeatStatePath: () => resolveRepeatStatePath,
    runValidation: () => runValidation,
-@@ -861,6 +864,7 @@ var VisibilityConditionStrictSchema = import_zod2.z.lazy(
+@@ -861,6 +865,7 @@ var VisibilityConditionStrictSchema = import_zod2.z.lazy(
  function resolveComparisonValue(value, ctx) {
    if (typeof value === "object" && value !== null) {
      if ("$state" in value && typeof value.$state === "string") {
@@ -20,7 +21,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
        return getByPath(ctx.stateModel, value.$state);
      }
    }
-@@ -883,6 +887,7 @@ function resolveConditionValue(cond, ctx) {
+@@ -883,6 +888,7 @@ function resolveConditionValue(cond, ctx) {
    return getByPath(ctx.stateModel, cond.$state);
  }
  function evaluateCondition(cond, ctx) {
@@ -28,7 +29,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
    const value = resolveConditionValue(cond, ctx);
    let result;
    if (cond.eq !== void 0) {
-@@ -915,6 +920,8 @@ function isOrCondition(condition) {
+@@ -915,6 +921,8 @@ function isOrCondition(condition) {
    return typeof condition === "object" && condition !== null && !Array.isArray(condition) && "$or" in condition;
  }
  function evaluateVisibility(condition, ctx) {
@@ -37,7 +38,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
    if (condition === void 0) {
      return true;
    }
-@@ -1063,10 +1070,326 @@ function resolveBindItemPath(itemPath, ctx) {
+@@ -1063,10 +1071,343 @@ function resolveBindItemPath(itemPath, ctx) {
    if (itemPath === "") return ctx.repeatBasePath;
    return ctx.repeatBasePath + "/" + itemPath;
  }
@@ -164,13 +165,14 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
 +}
 +// opencode-genui patch: exported. Runs `evaluate`, one evaluation: what it resolves is counted together (see above).
 +// `deferrable`: made for rendering, so it may throw `evaluationDeferred`. Inside another evaluation, it is part of that.
-+// Every evaluation's time counts in the task's (see EVALUATION_PER_TASK_MS).
-+function withEvaluation(deferrable, evaluate) {
++// Every evaluation's time counts in the task's (see EVALUATION_PER_TASK_MS). `keep` (optional): what the evaluation
++// builds that its result keeps is counted in it, up to its room (see chargeKept).
++function withEvaluation(deferrable, evaluate, keep) {
 +  if (evaluationRun) return evaluate();
 +  const ledger = openExpansionLedger();
 +  if (deferrable && evaluationWaits()) throw deferEvaluation(`they ran for ${EVALUATION_SLICE_MS} ms without a break`);
 +  if (!deferrable && ledger.spent > EVALUATION_PER_TASK_MS) throw expansionError(`expressions were evaluated for ${EVALUATION_PER_TASK_MS} ms in one task`);
-+  const run = { nodes: 0, check: 8, deferrable: !!deferrable, start: evaluationNow() };
++  const run = { nodes: 0, check: 8, deferrable: !!deferrable, start: evaluationNow(), keep };
 +  evaluationRun = run;
 +  try {
 +    const result = evaluate();
@@ -204,6 +206,19 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
 +    expansionAccount = outer;
 +  }
 +}
++// opencode-genui patch: exported. Counts `size` (characters built, or entries of a list or object built) against what
++// the evaluation running now may keep (its `keep`, see withEvaluation), if it has one: past its room, it throws
++// `expansionLimit` before more is built, and marks the evaluation `cut`. A renderer that keeps what an evaluation
++// resolved (json-render's keeps every element's props for as long as the element lives) bounds it so.
++function chargeKept(size) {
++  const keep = evaluationRun?.keep;
++  if (!keep || !(size > 0)) return;
++  if (keep.kept + size > keep.room) {
++    keep.cut = true;
++    throw expansionError("its UI keeps no more of what expressions build");
++  }
++  keep.kept += size;
++}
 +function takeExpansion(built, size) {
 +  const ledger = openExpansionLedger();
 +  if (built + size > MAX_EXPANSION) throw expansionError(`it would build more than ${MAX_EXPANSION} characters`);
@@ -214,6 +229,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
 +    if (evaluationRun?.deferrable && ledger.finished > 0) throw deferEvaluation(`they built ${EXPANSION_PER_TASK} characters in one task`);
 +    throw expansionError(`expressions built ${EXPANSION_PER_TASK} characters in one task`);
 +  }
++  chargeKept(cost);
 +  ledger.used += cost;
 +  if (account) account.expansion = (account.expansion ?? 0) + cost;
 +  return built + size;
@@ -223,6 +239,8 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
 +  const ledger = openExpansionLedger();
 +  let room = Math.min(MAX_EXPANSION - built, EXPANSION_PER_TASK - ledger.used);
 +  if (expansionAccount) room = Math.min(room, EXPANSION_PER_WORK - (expansionAccount.expansion ?? 0));
++  const keep = evaluationRun?.keep;
++  if (keep) room = Math.min(room, keep.room - keep.kept);
 +  return Math.max(room, 0);
 +}
 +// String(value), as far as there is room for it after `built` characters (see expansionRoom): a list is joined with ","
@@ -364,7 +382,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
    if (isStateExpression(value)) {
      return getByPath(ctx.stateModel, value.$state);
    }
-@@ -1109,21 +1432,7 @@ function resolvePropValue(value, ctx) {
+@@ -1109,23 +1450,10 @@ function resolvePropValue(value, ctx) {
      return fn(resolvedArgs);
    }
    if (isTemplateExpression(value)) {
@@ -386,8 +404,11 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
 +    return resolveTemplateBounded(value.$template, ctx);
    }
    if (Array.isArray(value)) {
++    chargeKept(value.length);
      return value.map((item) => resolvePropValue(item, ctx));
-@@ -1134,6 +1443,8 @@ function resolvePropValue(value, ctx) {
+   }
+   if (typeof value === "object") {
+@@ -1134,10 +1462,14 @@ function resolvePropValue(value, ctx) {
        ctx.directives
      );
      if (directive) {
@@ -395,8 +416,15 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
 +      if (directive.name === "$join") return resolveJoinBounded(value, ctx);
        return directive.resolve(value, ctx);
      }
++    const entries = Object.entries(value);
++    chargeKept(entries.length);
      const resolved = {};
-@@ -1370,14 +1681,16 @@ var action = actionBinding;
+-    for (const [key, val] of Object.entries(value)) {
++    for (const [key, val] of entries) {
+       resolved[key] = resolvePropValue(val, ctx);
+     }
+     return resolved;
+@@ -1370,14 +1702,16 @@ var action = actionBinding;
  
  // src/validation.ts
  var import_zod4 = require("zod");
@@ -415,7 +443,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
    const text = value.trim();
    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) return NaN;
    const number = Number(text);
-@@ -1471,7 +1784,7 @@ var builtInValidationFunctions = {
+@@ -1471,7 +1805,7 @@ var builtInValidationFunctions = {
     * Check if value is a valid URL
     */
    url: (value) => {
@@ -424,7 +452,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
      try {
        new URL(value);
        return true;
-@@ -1500,8 +1813,8 @@ var builtInValidationFunctions = {
+@@ -1500,8 +1834,8 @@ var builtInValidationFunctions = {
        return value < other;
      if (typeof value === "string" && typeof other === "string")
        return value < other;
@@ -435,7 +463,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
      if (!isNaN(numVal) && !isNaN(numOther)) return numVal < numOther;
      return false;
    },
-@@ -1518,8 +1831,8 @@ var builtInValidationFunctions = {
+@@ -1518,8 +1852,8 @@ var builtInValidationFunctions = {
        return value > other;
      if (typeof value === "string" && typeof other === "string")
        return value > other;
@@ -446,7 +474,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
      if (!isNaN(numVal) && !isNaN(numOther)) return numVal > numOther;
      return false;
    },
-@@ -1563,7 +1876,18 @@ function runValidationCheck(check2, ctx) {
+@@ -1563,7 +1897,18 @@ function runValidationCheck(check2, ctx) {
      message: check2.message
    };
  }
@@ -465,7 +493,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
    const checks = [];
    const errors = [];
    if (config.enabled) {
-@@ -1576,6 +1900,7 @@ function runValidation(config, ctx) {
+@@ -1576,6 +1921,7 @@ function runValidation(config, ctx) {
    }
    if (config.checks) {
      for (const check2 of config.checks) {
@@ -473,7 +501,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
        const result = runValidationCheck(check2, ctx);
        checks.push(result);
        if (!result.valid) {
-@@ -1659,6 +1984,9 @@ var check = {
+@@ -1659,6 +2005,9 @@ var check = {
  };
  
  // src/spec-validator.ts
@@ -483,7 +511,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
  function validateSpec(spec, options = {}) {
    const { checkOrphans = false } = options;
    const issues = [];
-@@ -1766,13 +2094,21 @@ function validateSpec(spec, options = {}) {
+@@ -1766,13 +2115,21 @@ function validateSpec(spec, options = {}) {
    }
    const repeatValidatedKeys = /* @__PURE__ */ new Set();
    const repeatValidatedContexts = /* @__PURE__ */ new Set();
@@ -506,7 +534,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
      repeatValidatedContexts.add(contextKey);
      let childRepeatBasePath = repeatBasePath;
      let childSampleAvailable = sampleAvailable;
-@@ -1806,14 +2142,13 @@ function validateSpec(spec, options = {}) {
+@@ -1806,14 +2163,13 @@ function validateSpec(spec, options = {}) {
          childSampleAvailable = canCheckSample && Array.isArray(value) && value.length > 0;
        }
      }
@@ -523,7 +551,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
        );
      }
      for (const childKeys of Object.values(element.slots ?? {})) {
-@@ -1822,10 +2157,11 @@ function validateSpec(spec, options = {}) {
+@@ -1822,10 +2178,11 @@ function validateSpec(spec, options = {}) {
            childKey,
            repeatBasePath,
            sampleAvailable,
@@ -536,18 +564,19 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902e
    };
    if (spec.elements[spec.root]) {
      validateRepeatPaths(spec.root, void 0, true, /* @__PURE__ */ new Set());
-@@ -4199,6 +4535,9 @@ function experimental_createEvaluator(options) {
+@@ -4199,6 +4556,10 @@ function experimental_createEvaluator(options) {
    resolveElementProps,
    resolvePropValue,
    resolveRepeatItemStatePath,
 +  withEvaluation,
 +  withExpansionAccount,
 +  chargeEvaluation,
++  chargeKept,
    resolveRepeatStatePath,
    runValidation,
    runValidationCheck,
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f0896fbd6d6 100644
+index 9dee77c008b7edf735950a0a65fa1fa9e5531978..0462d167b89b7efb82d73daa49e002d3ed8231e7 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -116,6 +116,7 @@ var VisibilityConditionStrictSchema = z.lazy(
@@ -575,7 +604,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
    if (condition === void 0) {
      return true;
    }
-@@ -318,10 +322,326 @@ function resolveBindItemPath(itemPath, ctx) {
+@@ -318,10 +322,343 @@ function resolveBindItemPath(itemPath, ctx) {
    if (itemPath === "") return ctx.repeatBasePath;
    return ctx.repeatBasePath + "/" + itemPath;
  }
@@ -702,13 +731,14 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
 +}
 +// opencode-genui patch: exported. Runs `evaluate`, one evaluation: what it resolves is counted together (see above).
 +// `deferrable`: made for rendering, so it may throw `evaluationDeferred`. Inside another evaluation, it is part of that.
-+// Every evaluation's time counts in the task's (see EVALUATION_PER_TASK_MS).
-+function withEvaluation(deferrable, evaluate) {
++// Every evaluation's time counts in the task's (see EVALUATION_PER_TASK_MS). `keep` (optional): what the evaluation
++// builds that its result keeps is counted in it, up to its room (see chargeKept).
++function withEvaluation(deferrable, evaluate, keep) {
 +  if (evaluationRun) return evaluate();
 +  const ledger = openExpansionLedger();
 +  if (deferrable && evaluationWaits()) throw deferEvaluation(`they ran for ${EVALUATION_SLICE_MS} ms without a break`);
 +  if (!deferrable && ledger.spent > EVALUATION_PER_TASK_MS) throw expansionError(`expressions were evaluated for ${EVALUATION_PER_TASK_MS} ms in one task`);
-+  const run = { nodes: 0, check: 8, deferrable: !!deferrable, start: evaluationNow() };
++  const run = { nodes: 0, check: 8, deferrable: !!deferrable, start: evaluationNow(), keep };
 +  evaluationRun = run;
 +  try {
 +    const result = evaluate();
@@ -742,6 +772,19 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
 +    expansionAccount = outer;
 +  }
 +}
++// opencode-genui patch: exported. Counts `size` (characters built, or entries of a list or object built) against what
++// the evaluation running now may keep (its `keep`, see withEvaluation), if it has one: past its room, it throws
++// `expansionLimit` before more is built, and marks the evaluation `cut`. A renderer that keeps what an evaluation
++// resolved (json-render's keeps every element's props for as long as the element lives) bounds it so.
++function chargeKept(size) {
++  const keep = evaluationRun?.keep;
++  if (!keep || !(size > 0)) return;
++  if (keep.kept + size > keep.room) {
++    keep.cut = true;
++    throw expansionError("its UI keeps no more of what expressions build");
++  }
++  keep.kept += size;
++}
 +function takeExpansion(built, size) {
 +  const ledger = openExpansionLedger();
 +  if (built + size > MAX_EXPANSION) throw expansionError(`it would build more than ${MAX_EXPANSION} characters`);
@@ -752,6 +795,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
 +    if (evaluationRun?.deferrable && ledger.finished > 0) throw deferEvaluation(`they built ${EXPANSION_PER_TASK} characters in one task`);
 +    throw expansionError(`expressions built ${EXPANSION_PER_TASK} characters in one task`);
 +  }
++  chargeKept(cost);
 +  ledger.used += cost;
 +  if (account) account.expansion = (account.expansion ?? 0) + cost;
 +  return built + size;
@@ -761,6 +805,8 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
 +  const ledger = openExpansionLedger();
 +  let room = Math.min(MAX_EXPANSION - built, EXPANSION_PER_TASK - ledger.used);
 +  if (expansionAccount) room = Math.min(room, EXPANSION_PER_WORK - (expansionAccount.expansion ?? 0));
++  const keep = evaluationRun?.keep;
++  if (keep) room = Math.min(room, keep.room - keep.kept);
 +  return Math.max(room, 0);
 +}
 +// String(value), as far as there is room for it after `built` characters (see expansionRoom): a list is joined with ","
@@ -902,7 +948,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
    if (isStateExpression(value)) {
      return getByPath(ctx.stateModel, value.$state);
    }
-@@ -364,21 +684,7 @@ function resolvePropValue(value, ctx) {
+@@ -364,23 +701,10 @@ function resolvePropValue(value, ctx) {
      return fn(resolvedArgs);
    }
    if (isTemplateExpression(value)) {
@@ -924,8 +970,11 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
 +    return resolveTemplateBounded(value.$template, ctx);
    }
    if (Array.isArray(value)) {
++    chargeKept(value.length);
      return value.map((item) => resolvePropValue(item, ctx));
-@@ -389,6 +695,8 @@ function resolvePropValue(value, ctx) {
+   }
+   if (typeof value === "object") {
+@@ -389,10 +713,14 @@ function resolvePropValue(value, ctx) {
        ctx.directives
      );
      if (directive) {
@@ -933,8 +982,15 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
 +      if (directive.name === "$join") return resolveJoinBounded(value, ctx);
        return directive.resolve(value, ctx);
      }
++    const entries = Object.entries(value);
++    chargeKept(entries.length);
      const resolved = {};
-@@ -625,14 +933,16 @@ var action = actionBinding;
+-    for (const [key, val] of Object.entries(value)) {
++    for (const [key, val] of entries) {
+       resolved[key] = resolvePropValue(val, ctx);
+     }
+     return resolved;
+@@ -625,14 +953,16 @@ var action = actionBinding;
  
  // src/validation.ts
  import { z as z3 } from "zod";
@@ -953,7 +1009,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
    const text = value.trim();
    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) return NaN;
    const number = Number(text);
-@@ -726,7 +1036,7 @@ var builtInValidationFunctions = {
+@@ -726,7 +1056,7 @@ var builtInValidationFunctions = {
     * Check if value is a valid URL
     */
    url: (value) => {
@@ -962,7 +1018,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
      try {
        new URL(value);
        return true;
-@@ -755,8 +1065,8 @@ var builtInValidationFunctions = {
+@@ -755,8 +1085,8 @@ var builtInValidationFunctions = {
        return value < other;
      if (typeof value === "string" && typeof other === "string")
        return value < other;
@@ -973,7 +1029,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
      if (!isNaN(numVal) && !isNaN(numOther)) return numVal < numOther;
      return false;
    },
-@@ -773,8 +1083,8 @@ var builtInValidationFunctions = {
+@@ -773,8 +1103,8 @@ var builtInValidationFunctions = {
        return value > other;
      if (typeof value === "string" && typeof other === "string")
        return value > other;
@@ -984,7 +1040,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
      if (!isNaN(numVal) && !isNaN(numOther)) return numVal > numOther;
      return false;
    },
-@@ -818,7 +1128,18 @@ function runValidationCheck(check2, ctx) {
+@@ -818,7 +1148,18 @@ function runValidationCheck(check2, ctx) {
      message: check2.message
    };
  }
@@ -1003,7 +1059,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
    const checks = [];
    const errors = [];
    if (config.enabled) {
-@@ -831,6 +1152,7 @@ function runValidation(config, ctx) {
+@@ -831,6 +1172,7 @@ function runValidation(config, ctx) {
    }
    if (config.checks) {
      for (const check2 of config.checks) {
@@ -1011,7 +1067,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
        const result = runValidationCheck(check2, ctx);
        checks.push(result);
        if (!result.valid) {
-@@ -914,6 +1236,9 @@ var check = {
+@@ -914,6 +1256,9 @@ var check = {
  };
  
  // src/spec-validator.ts
@@ -1021,7 +1077,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
  function validateSpec(spec, options = {}) {
    const { checkOrphans = false } = options;
    const issues = [];
-@@ -1021,13 +1346,21 @@ function validateSpec(spec, options = {}) {
+@@ -1021,13 +1366,21 @@ function validateSpec(spec, options = {}) {
    }
    const repeatValidatedKeys = /* @__PURE__ */ new Set();
    const repeatValidatedContexts = /* @__PURE__ */ new Set();
@@ -1044,7 +1100,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
      repeatValidatedContexts.add(contextKey);
      let childRepeatBasePath = repeatBasePath;
      let childSampleAvailable = sampleAvailable;
-@@ -1061,14 +1394,13 @@ function validateSpec(spec, options = {}) {
+@@ -1061,14 +1414,13 @@ function validateSpec(spec, options = {}) {
          childSampleAvailable = canCheckSample && Array.isArray(value) && value.length > 0;
        }
      }
@@ -1061,7 +1117,7 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
        );
      }
      for (const childKeys of Object.values(element.slots ?? {})) {
-@@ -1077,10 +1409,11 @@ function validateSpec(spec, options = {}) {
+@@ -1077,10 +1429,11 @@ function validateSpec(spec, options = {}) {
            childKey,
            repeatBasePath,
            sampleAvailable,
@@ -1074,13 +1130,14 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f08
    };
    if (spec.elements[spec.root]) {
      validateRepeatPaths(spec.root, void 0, true, /* @__PURE__ */ new Set());
-@@ -3453,6 +3786,9 @@ export {
+@@ -3453,6 +3806,10 @@ export {
    resolveElementProps,
    resolvePropValue,
    resolveRepeatItemStatePath,
 +  withEvaluation,
 +  withExpansionAccount,
 +  chargeEvaluation,
++  chargeKept,
    resolveRepeatStatePath,
    runValidation,
    runValidationCheck,

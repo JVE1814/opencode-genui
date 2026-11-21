@@ -1,5 +1,5 @@
 import type { DirectiveDefinition } from "@json-render/core"
-import { createComponent, type Context, type JSX } from "solid-js"
+import { createComponent, useContext, type Context, type JSX } from "solid-js"
 import { standardDirectives } from "@json-render/directives"
 import * as jsonRender from "@json-render/solid"
 import {
@@ -21,11 +21,16 @@ import { groupEditsBy } from "../runtime/state.ts"
 import {
   buildRegistry,
   createElementRenderer,
+  createKeptLedger,
   guardDirectives,
+  RenderBudgetContext,
   type ElementImpl,
   type JsonRenderHooks,
+  type KeptLedger,
 } from "./element.ts"
+import { CutsContext } from "./components/shared.tsx"
 import { UnknownElement } from "./fallback.tsx"
+import { valuesCut } from "./issues.ts"
 
 /**
  * json-render's current work (exported by the patch in patches/): one change and all it sets off, also across tasks.
@@ -70,6 +75,38 @@ export function RenderErrors(props: {
   if (!RenderErrorContext) return props.children
   return createComponent(RenderErrorContext.Provider, {
     value: props.report,
+    get children() {
+      return props.children
+    },
+  })
+}
+
+/**
+ * Where json-render's renderer finds the ledger that bounds what its elements keep of their resolved props (see
+ * KeptValuesContext in patches/@json-render%2Fsolid and createKeptLedger in ./element.ts).
+ */
+const KeptValuesContext = (jsonRender as unknown as { readonly KeptValuesContext?: Context<KeptLedger | undefined> })
+  .KeptValuesContext
+
+/**
+ * Bounds what the elements rendered in `children` keep of their resolved props, in the surface's render budget's
+ * meters (see createKeptLedger); an element that leaves props empty for want of room is reported with the surface's
+ * cuts while it does. Outside a surface's render budget, nothing is bounded.
+ */
+export function KeptValues(props: { readonly children: JSX.Element }): JSX.Element {
+  const budget = useContext(RenderBudgetContext)
+  const report = useContext(CutsContext)
+  if (!KeptValuesContext || !budget) return props.children
+  const ledger = createKeptLedger(
+    budget,
+    report &&
+      ((pooled, elementKey) => {
+        const issue = valuesCut(pooled)
+        return report(elementKey === undefined ? issue : { ...issue, elementKey })
+      }),
+  )
+  return createComponent(KeptValuesContext.Provider, {
+    value: ledger,
     get children() {
       return props.children
     },

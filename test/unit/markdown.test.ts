@@ -453,7 +453,9 @@ describe("neutralizeMarkdown", () => {
     // In math, constructs are broken with a space (KaTeX ignores it there) instead of a joiner (KaTeX warns about one).
     for (const math of ["$a<b$", "$$x<y$$", "\\(a<b\\)", "$$\na<b\n$$", "```math\na<b\n```"])
       expect(neutralizeMarkdown(math, "Image"), math).not.toContain(JOINER)
-    expect(neutralizeMarkdown("$a<b$ but <b>", "Image")).toBe(`$a< b$ but <${JOINER}b>`)
+    // [review8] A line that ends in `<…>` also ends with a joiner: marked's setext rule stops at such a line, and genui's
+    // model of marked's blocks takes no line for one (see neutralizeLines).
+    expect(neutralizeMarkdown("$a<b$ but <b>", "Image")).toBe(`$a< b$ but <${JOINER}b>${JOINER}`)
     expect(shown(render("Use <kbd>Ctrl</kbd> or a <b>bold</b> word"))).toBe("Use <kbd>Ctrl</kbd> or a <b>bold</b> word")
     expect(shown(render("a < b and c > d"))).toBe("a < b and c > d")
     expect(render("Use `Array<string>` here")).toContain(`<code>Array&lt;${JOINER}string&gt;</code>`)

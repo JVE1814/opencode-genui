@@ -3,7 +3,8 @@ import type { CodeBlockProps } from "@opencode/plugin/gui"
 import { compileBlock } from "../protocol/compile.ts"
 import { MAX_CANVASES } from "../protocol/fold.ts"
 import { blockKind, canvasIdOf, isMeaningful, parseBlock, type ParsedBlock } from "../protocol/surface.ts"
-import { getSurface, surfaceKey } from "../runtime/surfaces.ts"
+import { MOUNT_UNITS, mountUnits, sliceMount } from "../runtime/budget.ts"
+import { getSurface, peekSurface, surfaceKey } from "../runtime/surfaces.ts"
 import { reserveToolbar } from "./components/shared.tsx"
 import { handOverInline, inlineSurfaceId, persistSurface, surfaceEntry } from "./persist.ts"
 import type { GuiEnv } from "./setup.tsx"
@@ -32,7 +33,81 @@ export function renderBlock(env: GuiEnv, props: CodeBlockProps): JSX.Element | u
     if (foreignPatch) return undefined
     return <CanvasBlock env={env} props={props} block={block} />
   }
-  return <InlineSurface env={env} props={props} block={block} />
+  return (
+    <Sliced cost={mountUnits(block.text.length)} pending={() => arrived(env, props, block)}>
+      <InlineSurface env={env} props={props} block={block} />
+    </Sliced>
+  )
+}
+
+/** What mounting a canvas chip or a source view costs a task's slice: half a surface (see MOUNT_UNITS). */
+const CHIP_UNITS = MOUNT_UNITS / 2
+
+/**
+ * Mounts a block's surface, chip or source view once the task's slice has room for `cost` (see `sliceMount`), also
+ * when a canvas block switches between them (all of a reopened session's canvas blocks do once its index has loaded).
+ * Mounting one counts in the slice like the elements it renders: a message of 1,700 small blocks mounted all of them
+ * in one task (2 s). Past the slice, a placeholder of the height it is expected to take shows instead, and a later task
+ * mounts it, in order with everything else waiting.
+ */
+function Sliced(props: {
+  readonly cost: number
+  readonly chip?: boolean
+  /** For a surface that waits: what it does on arrival, and the height it reserves. */
+  readonly pending?: () => number
+  readonly children: JSX.Element
+}) {
+  const mounted = sliceMount(props.cost)
+  return (
+    <Show when={mounted()} fallback={<Pending chip={props.chip} pending={props.pending} />}>
+      {props.children}
+    </Show>
+  )
+}
+
+/**
+ * An inline block whose surface mounts in a later task: when the agent re-sent the UI of an id, hands its shared state
+ * over now (the copy it replaces stops being the newest now; see InlineSurface), and returns the height to reserve.
+ * Untracked, once: the surface follows changes when it mounts.
+ */
+function arrived(env: GuiEnv, props: CodeBlockProps, block: ParsedBlock): number {
+  return untrack(() => {
+    const session = props.session
+    const index = session ? env.sessions.get(session).index : undefined
+    const trusted = !!index?.knows(block.text)
+    const id = block.header.id
+    const latest = id === undefined || !trusted ? undefined : index?.latestInline(id)
+    const newest = latest === undefined || latest === block.text
+    const runtime = peekSurface(surfaceKey(session?.key, "inline", inlineSurfaceId(block, trusted, newest)))
+    if (runtime && id !== undefined && trusted && newest)
+      handOverInline({
+        shared: runtime,
+        keyOf: (surface) => surfaceKey(session?.key, "inline", surface),
+        block,
+        store: session ? env.store(session) : undefined,
+      })
+    return runtime?.height ?? estimatedHeight(block)
+  })
+}
+
+/** The height a surface not laid out yet in this window probably takes: a line per patch, within bounds. */
+const estimatedHeight = (block: ParsedBlock) =>
+  Math.min(PENDING_MAX, Math.max(PENDING_MIN, block.patches.length * PENDING_LINE))
+const PENDING_MIN = 36
+const PENDING_LINE = 28
+const PENDING_MAX = 360
+
+/**
+ * In place of a surface (or a chip) that a later task mounts: an empty box of the height it is expected to take, so
+ * the transcript does not jump when it mounts. A surface laid out before in this window (a row that scrolled back
+ * into view) keeps its last height. Not a [data-genui] root: the theme's many custom properties there would be
+ * computed for each box.
+ */
+function Pending(props: { readonly chip?: boolean | undefined; readonly pending?: (() => number) | undefined }) {
+  // Read once, as the box mounts.
+  const height = props.chip ? "calc(var(--gu-control, 28px) + 12px)" : `${props.pending?.() ?? PENDING_MIN}px`
+  const style = `min-height: ${height}; margin-block: 4px`
+  return <div data-genui-pending={props.chip ? "chip" : "surface"} aria-busy="true" style={style} />
 }
 
 function InlineSurface(input: {
@@ -128,18 +203,24 @@ function CanvasBlock(input: { readonly env: GuiEnv; readonly props: CodeBlockPro
           // A patch for a canvas that turned out not to be the agent's after this rendered: its source as plain text.
           // The app's own Copy button stays over the block's corner, so this draws no copy control of its own.
           fallback={
-            <div data-genui="" data-surface="source" ref={reserveToolbar}>
-              <pre data-gu-chrome="source">
-                <code>{props.code}</code>
-              </pre>
-            </div>
+            <Sliced cost={CHIP_UNITS} pending={() => estimatedHeight(block)}>
+              <div data-genui="" data-surface="source" ref={reserveToolbar}>
+                <pre data-gu-chrome="source">
+                  <code>{props.code}</code>
+                </pre>
+              </div>
+            </Sliced>
           }
         >
-          <InlineSurface env={env} props={props} block={block} preview />
+          <Sliced cost={mountUnits(block.text.length)} pending={() => arrived(env, props, block)}>
+            <InlineSurface env={env} props={props} block={block} preview />
+          </Sliced>
         </Show>
       }
     >
-      <Chip env={env} props={props} block={block} />
+      <Sliced cost={CHIP_UNITS} chip>
+        <Chip env={env} props={props} block={block} />
+      </Sliced>
     </Show>
   )
 }

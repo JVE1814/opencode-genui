@@ -186,19 +186,29 @@ Specs are written by a model and treated as data:
     path, and the validator reports one where the spec writes it out.
   - An element keeps at most 32 props (its component's own first) and watches at most 32 state paths; the rest are
     ignored and reported. json-render resolves an element's props and subscribes its watches for every instance of it
-    (each entry of a parent's children, each row of a repeat), before it knows whether the instance renders.
+    (each entry of a parent's children, each row of a repeat), before it knows whether the instance renders (what
+    those props keep is bounded: see below).
   - Elements nest at most 20 levels deep (the stack overflowed past about 50): a deeper one is not shown, and the UI
     says so. An element whose component throws shows nothing, and the UI lists its error.
   - What the app's Markdown renderer does with a text is bounded too: past a budget per text (in proportion to its
     length), emphasis markers (`*`, `_`, `~`) that marked would search a paragraph for show as plain characters, and so
-    does math past about 20,000 characters. Past a paragraph's first 100 backslash escapes, escapes are written as
-    character references, which display the same, and so is the text of the links genui writes for bare addresses. A
-    text shows up to 500,000 characters, and is cut where one paragraph runs past 20,000 characters (marked's inline
-    work grows faster than a paragraph; a list item, at any depth, and a table row count on their own, as marked lexes
-    them); a note says "Showing the first N of M characters", and the agent gets an issue. A text shows its first 32
-    fenced code blocks as code blocks of their own (the app's code block component) and the rest as code within its
-    Markdown; every code block it renders (fenced, in a quote or a list item too, or indented) costs the render
-    budget, 4 units on its own and 1 within the Markdown.
+    does inline math past about 20,000 characters of math (display math past it shows as a code block). Past a
+    paragraph's first 100 backslash escapes, escapes are written as character references, which display the same, and
+    so is the text of the links genui writes for bare addresses. genui reads a text's blocks with one model of marked's
+    block lexer (the app's parser; the tests compare the two on generated documents), so what it counts is what marked
+    renders. It reads the text as written and as it hands it to marked: making links and tags inert lengthens lines,
+    and marked decides some blocks by a line's length (a list item's or a quote's lines that are not indented), so
+    where the model reads the two differently the text is cut, at that line. A text shows up to 500,000 characters, and
+    is cut where one run of inline text (a paragraph, a list item's text, a heading or a table cell, as marked lexes
+    them) passes 20,000 characters, since marked's inline work grows faster than a paragraph; where lists or quotes
+    nest deeper than 8; where its paragraphs, headings, rules, quotes, list items and table cells pass 10,000 beyond
+    one per 25 characters; or where marked's block lexer would do more than 40 million characters' worth of scanning
+    beyond what it reads (about 0.1 s; it reads lines again where no blank line separates them in a list item or a
+    quote, or between rules: a quoted list of 100 KB whose items go on to lines without the `>` shows whole). A note says "Showing the first N of M characters", and the agent gets
+    an issue that says why. A text shows its first 32 fenced code blocks as code blocks of their own (the app's code
+    block component) and the rest as code within its Markdown; every code block marked renders (fenced or indented, in
+    a quote or a list item too) and every display math block costs the render budget, 4 units on its own and 1 within
+    the Markdown, and so do its blocks beyond one per 25 characters, a tenth of a unit each, as Table cells.
   - State actions in a row (setState, pushState, removeState), and the first actions of the watches one change wakes,
     run in one batch, so the UI re-evaluates once instead of once per write; a write calls only the watches of its own
     path, and a watch is not woken by its own writes. `validateForm` checks every field and writes all results at once;
@@ -224,7 +234,13 @@ Specs are written by a model and treated as data:
     aside, and they go on in a task of their own.
   - `$template`, `$concat` and `$join` build at most a million characters each, 4 million per task in all, and 4
     million for the actions of one change (also in its later tasks); past that the prop is left empty and an action
-    using it does not run. A list in state is turned into text only as far as there is room; `$truncate`, `$math`,
+    using it does not run. What expressions build is also kept: every element instance (each row of a repeat, each
+    entry of a parent's children, rendered or not) keeps its resolved props, so what they keep is bounded too, at most
+    2 million characters per UI (a list or object built counts one per entry, a directive's text its length), in the
+    same window-wide shares as rendering: 6 million for the agent's inline UIs (of which the newest keeps 2 million), 4
+    million for canvases, and 2 million each for older copies and for blocks in tool output or files. Past that a prop
+    is left empty, the UI says so, and the agent gets an issue ("left some of its props empty"); it fills in once room
+    is freed. A list in state is turned into text only as far as there is room; `$truncate`, `$math`,
     `$pluralize` and `$format` read it only as far as their result needs, and `$format` makes one formatter per
     directive. A requested confirm's text reads at most a million characters from state, and stops once its shown
     length is reached.
@@ -235,7 +251,9 @@ Specs are written by a model and treated as data:
     Until then an element shows nothing, or keeps what it showed; past a bound the prop is left empty, the action does
     not run, and the field counts as invalid. Numbers and dates are read from at most 512 characters.
   - A UI shows at most about 2,000 elements or 500,000 characters of text in all, and builds at most 4,000 child
-    elements, each counted once more for every 250 characters it is written with, where it is built (a repeat counts
+    elements, each counted once more for every 250 characters it is written with, or that its `$template`, `$concat`,
+    `$join` and `$truncate` build from the state they read now (an expression that surely builds more than a million
+    characters keeps nothing and is not counted), where it is built (a repeat counts
     its rows times its children, so a repeat inside a repeat is the product of both lists, and an element listed 4,000
     times is refused before json-render resolves it 4,000 times); a
     repeat shows at most 2,000 rows, its first ones as far as they fit (only those rows are matched to the list's items,
@@ -250,8 +268,12 @@ Specs are written by a model and treated as data:
     inline UIs (of which the newest one, mounted last, always keeps 2,000), 4,000 for canvases, 2,000 for older copies
     of a UI the agent sent again, and 2,000 for blocks in tool output or files, so twenty copies of a large block render
     once and never take the newest copy's room. What does not fit is reported as an issue and comes back once room is
-    freed. Rendering more than about 1,000 elements or 100 ms in one task continues in the next tasks. One edit of state
-    holds at most a million characters, and `copy` operations add at most a million characters to a spec in all (a copy
+    freed. Rendering more than about 1,000 elements or 100 ms in one task continues in the next tasks. Mounting a UI
+    counts in that too: about ten elements' worth for each UI (its providers, chrome, and issues panel or error card),
+    half that for a canvas chip or source view, plus one per 250 characters of its block. In a task of the app's (a
+    message arriving, a session shown again), UIs mount for at most 50 ms (at least one); the rest show as empty boxes
+    as tall as the UI was (or is expected to be) and mount, in order, in the next tasks. One edit of state holds at most
+    a million characters, and `copy` operations add at most a million characters to a spec in all (a copy
     shares what it copies, so copies of copies doubled the state at each step); a copy past that is left out and
     reported.
   - A Dialog or Drawer never opens from focus, blur, a slider or a browsed choice, and the focus moves it makes as it
@@ -263,8 +285,14 @@ Specs are written by a model and treated as data:
   - A session has at most 32 canvases open (each opens a tab). A block for another canvas is not applied (nor a
     later patch to it, until it is sent again whole while there is room): its chip says it was not opened, and the
     newest canvas reports how many were not, until one is closed. Each block counts the canvases open where it is in
-    the conversation. A canvas the agent closes in the reply that opened it takes its tab with it, and at most 32 of
-    the tabs genui opened by itself stay open in a session; a canvas past that opens from its chip.
+    the conversation. A canvas the agent closes in the reply that opened it takes its tab with it; sent again whole, it
+    opens its tab again (never one you closed). At most 32 of the tabs genui opened by itself stay open in a session:
+    a new canvas takes the place of the oldest tab of a canvas the agent closed (at most 32 canvases are open, so it
+    always finds one). After the app restarts, every canvas tab the session's strip kept counts toward the 32.
+  - While replies stream, a session keeps the parses of at most 512 blocks and 1,000,000 characters (and the newest
+    block), and recent saved versions (8 each) only of canvases still open; genui keeps what it measured of recent
+    Markdown texts for at most 64 texts and 2,000,000 characters (and the newest text), and what it prepared of them
+    for the app's renderer for at most 2,000,000 characters (and the newest).
 
 ## Development
 
@@ -308,15 +336,28 @@ playground/        fake desktop host for development and end-to-end tests
   and in unit tests).
 - A fenced code block in a Markdown list item renders after the item, as a block of its own. One inside a Markdown
   quote, or past a text's 32nd, stays with the app's renderer: its copy button may copy invisible joiners. Markdown
-  links show no favicon, and their address shows in their tooltip rather than the status bar.
+  links show no favicon, and their address shows in their tooltip rather than the status bar; a link whose text or
+  address goes on to another line shows as text.
+- A Markdown text is cut at a list item's or a quote's line that goes on without its indentation when making a tag,
+  image, link or address in it inert changes how marked reads the lines after it (and at display math past the math
+  budget in such lines, which genui shows as a code block); the note and the issue say so, and indenting those lines
+  avoids it. A quoted list whose items each go on to a line without the `>` is cut for marked's work past about 100 KB
+  when those lines are sentences, and sooner when they are shorter (with lines of a few characters marked took 3.6 s
+  for 100 KB).
 - The app's confirm dialog cannot be selected or copied from, and runs its text together: genui shows line breaks in
   the payload as ↵.
 - What the bounds above send to later tasks still runs there: a spec at the bounds can keep the window busy in short
   tasks for a few seconds, while it answers in between (a select-all on a much slower machine, for minutes). Some work
   within one task is not split: an element's first evaluation in a task (up to 200 ms), re-rendering what one batch of
-  a select-all changed, and one element's own rendering (a Table of 10,000 cells, a Markdown text of 100 KB, an open
-  Select of 500 options). Measured: under 0.4 s per task for each, and, at the measured rate, about 0.6 s for a
-  Markdown text of 500,000 characters written to be slow (built with `$template` from state).
+  a select-all changed, and one element's own rendering (a Table of 10,000 cells, a Markdown text of 100 KB or of
+  10,000 table cells or list items, an open Select of 500 options). Measured in the playground with nothing else
+  running: under 0.4 s per task for each (a Markdown text of 11,000 table cells about 0.25 s, of 12,000 list items
+  about 0.35 s), and 0.4 to 0.65 s for a Markdown text of 450,000 characters written to be slow (built with
+  `$template` from state).
+- A message of thousands of small blocks keeps the window busy in short tasks for a few seconds while its UIs mount
+  (1,700 blocks in 100 KB: about 2 s of work, the longest task 0.25 to 0.45 s here; 4,000 header-only blocks in
+  110 KB: one task of 0.55 to 0.7 s, most of it the app's own rendering of the message). Each mounted UI holds about
+  100 KB, so those 4,000 blocks take about 300 MB of page memory.
 - A canvas whose base is in messages not loaded renders once its spec holds a whole tree, but keeps loading older
   messages, and is saved only once the base is found or the whole history was loaded without finding one (a session
   past 1,000 assistant messages may never settle such a canvas). Edits you make to it meanwhile may be dropped if the

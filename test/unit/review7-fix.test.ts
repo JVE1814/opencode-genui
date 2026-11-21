@@ -422,9 +422,11 @@ describe("every code block a Markdown text renders costs the render budget [revi
     }
   })
 
-  test("prose is not counted, nor math fences, and a block of several indented lines counts once", () => {
+  test("prose is not counted, and a block of several indented lines counts once", () => {
     expect(codeBlocks("a paragraph\nanother line")).toEqual({ total: 0, own: 0 })
-    expect(codeBlocks("```math\nx^2\n```")).toEqual({ total: 0, own: 0 })
+    // [review8] A math fence is a code block to marked, and the app's code block once past the math budget (display
+    // math as well): it counts. (Not counting it let 6,500 math fences past the budget render uncharged.)
+    expect(codeBlocks("```math\nx^2\n```")).toEqual({ total: 1, own: 0 })
     expect(codeBlocks("p\n\n    one\n    two\n\n    three\n\nq")).toEqual({ total: 1, own: 0 })
     expect(codeBlocks("p\n\n    one\n\nq\n\n    two")).toEqual({ total: 2, own: 0 })
     expect(codeBlocks("- item\n  - nested item\n    - deeper item")).toEqual({ total: 0, own: 0 })

@@ -110,7 +110,7 @@ ${indent(sentExample)}
 
 The UI always takes the app's design and follows the user's theme and light or dark mode, so there are no color, style or className props: choose components and variants, not looks.
 
-- Keep it compact: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all, nested at most ${MAX_DEPTH} deep. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
+- Keep it compact: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all (text an expression builds counts in each row that builds it), nested at most ${MAX_DEPTH} deep. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
 - Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.`
@@ -118,10 +118,10 @@ The UI always takes the app's design and follows the user's theme and light or d
 /** One line that opens json-render's part: it fits an agent that also writes text, unlike json-render's default. */
 const SYSTEM = `You can answer with interactive UI as well as text. This reference covers the JSONL patch lines inside ${SPEC} and ${CANVAS} blocks.`
 
-// The OpenCode section already says there are no style props and never to put secrets in a spec.
+// The OpenCode section already says there are no style props, never to put secrets in a spec, and when sendPrompt,
+// insertPrompt, openLink and copyText run (so does json-render's watch section, as PROMPT_FIXES has it).
 const RULES = [
   "Bind every input you need back to a state path of your own with $bindState, and send it with sendPrompt from a button.",
-  "sendPrompt, insertPrompt, openLink and copyText run only when the user activates a control, never from watch, on.focus or on.blur.",
 ]
 
 /**

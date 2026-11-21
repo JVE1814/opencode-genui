@@ -38,7 +38,7 @@ import { createRenderBudget, RenderBudgetContext, SpecElementsContext } from "./
 import { ErrorCard, IssuesFooter } from "./fallback.tsx"
 import { HostContext, QuietWriteContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
 import { allowOutward, lendActivation, noteAgentState } from "./outward.ts"
-import { EvaluationLend, getRendering, RenderErrors } from "./registry.tsx"
+import { EvaluationLend, getRendering, KeptValues, RenderErrors } from "./registry.tsx"
 
 export interface SurfaceViewProps {
   readonly host: Host
@@ -404,12 +404,14 @@ function Render(props: {
           <EvaluationLend lend={() => lendActivation(props.info)}>
             <RenderErrors report={failed}>
               <SpecElementsContext.Provider value={() => props.compiled().spec?.elements}>
-                <Renderer
-                  spec={props.compiled().spec}
-                  registry={registry}
-                  loading={props.streaming()}
-                  fallback={fallback}
-                />
+                <KeptValues>
+                  <Renderer
+                    spec={props.compiled().spec}
+                    registry={registry}
+                    loading={props.streaming()}
+                    fallback={fallback}
+                  />
+                </KeptValues>
               </SpecElementsContext.Provider>
             </RenderErrors>
           </EvaluationLend>

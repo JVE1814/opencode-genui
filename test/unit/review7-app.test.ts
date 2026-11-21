@@ -147,8 +147,12 @@ describe("a long Markdown text shows in full unless a paragraph is too long for 
   })
 
   test("a text past MAX_MARKDOWN_TEXT is cut there", () => {
-    const text = "word word word\n\n".repeat(Math.ceil((MAX_MARKDOWN_TEXT + 100) / 16))
+    const paragraph = "A paragraph of ordinary prose that goes on for a sentence or so.\n\n"
+    const text = paragraph.repeat(Math.ceil((MAX_MARKDOWN_TEXT + 100) / paragraph.length))
     expect(shownLength(text)).toEqual({ shown: MAX_MARKDOWN_TEXT, reason: "text" })
+    // [review8] Paragraphs of three words (31,000 of them) are blocks the text's length does not pay for: they are cut
+    // first, where they pass MAX_MARKDOWN_BLOCKS (the text this test used before).
+    expect(shownLength("word word word\n\n".repeat(Math.ceil((MAX_MARKDOWN_TEXT + 100) / 16))).reason).toBe("blocks")
     expect(markdownCut(MAX_MARKDOWN_TEXT, text.length, "text").message).toContain("shows at most 500,000")
   })
 

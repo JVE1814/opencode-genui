@@ -1,9 +1,16 @@
 import type { SurfaceIssue } from "../protocol/validate.ts"
-import { POOL_SURFACES, type PoolKind } from "../runtime/budget.ts"
+import { KEPT_PER_SURFACE, POOL_SURFACES, type PoolKind } from "../runtime/budget.ts"
 import { MAX_CANVASES } from "../protocol/fold.ts"
-import { MAX_HASHED_ITEMS } from "../runtime/state.ts"
+import { MAX_HASHED_ITEMS, MAX_RECONCILE_WORK } from "../runtime/state.ts"
 import { MAX_DEPTH, RENDER_UNITS, TEXT_PER_UNIT } from "../shared/constants.ts"
-import { MAX_MARKDOWN_TEXT, MAX_PARAGRAPH } from "./components/markdown.ts"
+import {
+  CHARS_PER_BLOCK,
+  MAX_MARKDOWN_BLOCKS,
+  MAX_MARKDOWN_TEXT,
+  MAX_NESTING,
+  MAX_PARAGRAPH,
+  type MarkdownCutReason,
+} from "./components/markdown.ts"
 import {
   ITEM_LISTS,
   MAX_CHART_POINTS,
@@ -40,7 +47,22 @@ export function tooLarge(kind: PoolKind, pooled = false): SurfaceIssue {
     code: "too_large",
     message: pooled
       ? `part of the UI is not shown yet: ${shared}, and other UIs hold that room now; it shows once they free it`
-      : `the UI is too large, so part of it is not shown: a UI shows at most about ${count(RENDER_UNITS)} elements, or ${count(RENDER_UNITS * TEXT_PER_UNIT)} characters of text, in all, and ${shared} (a repeat counts its rows times its children, a repeat inside a repeat the product of both lists, and an element's text, or a long text read in every row, once per row or entry that shows it): show fewer items or less text`,
+      : `the UI is too large, so part of it is not shown: a UI shows at most about ${count(RENDER_UNITS)} elements, or ${count(RENDER_UNITS * TEXT_PER_UNIT)} characters of text, in all, and ${shared} (a repeat counts its rows times its children, a repeat inside a repeat the product of both lists, each code block of a Markdown text as an element, and an element's text, or a long text read in every row, once per row or entry that shows it): show fewer items or less text`,
+  }
+}
+
+/**
+ * An element left some of its props empty: the values its expressions build did not fit in what a UI's elements keep
+ * (see KEPT_PER_SURFACE in src/runtime/budget.ts). `pooled`: they would fit in its own UI's share, and other UIs of its
+ * pool hold that room now.
+ */
+export function valuesCut(pooled: boolean): SurfaceIssue {
+  return {
+    severity: "warning",
+    code: "values_cut",
+    message: pooled
+      ? "left some of its props empty for now: the UIs in view share what their elements keep of what expressions build, and other UIs hold that room; they show once it is freed"
+      : `left some of its props empty: every element, and every row of a repeat, rendered or not, keeps the text and lists its $template, $concat, $join and other expressions build, at most ${count(KEPT_PER_SURFACE)} characters for a UI in all: read long texts from state in fewer elements or rows`,
   }
 }
 
@@ -61,12 +83,13 @@ export const SKIPPED_WORK: SurfaceIssue = Object.freeze({
 
 /**
  * The issue a surface reports once the agent's change left some of the user's edits of list items unmatched (see
- * TrackedStore.editsUnmatched in src/runtime/state.ts): an edit stayed at its index or was dropped, unchecked.
+ * TrackedStore.editsUnmatched in src/runtime/state.ts): an edit stayed at its index or was dropped, unchecked. Either
+ * bound cuts the lookups (MAX_HASHED_ITEMS items hashed, MAX_RECONCILE_WORK values visited), so it names both.
  */
 export const EDITS_UNMATCHED: SurfaceIssue = Object.freeze({
   severity: "warning",
   code: "edits_unmatched",
-  message: `after the agent's last change, some of the user's edits of list items were not matched to their items (one change looks through at most ${count(MAX_HASHED_ITEMS)} list items for them): each stayed at its index where its list kept its length, and was dropped otherwise: keep such lists shorter`,
+  message: `after the agent's last change, some of the user's edits of list items were not matched to their items (one change looks through at most ${count(MAX_HASHED_ITEMS)} list items and ${count(MAX_RECONCILE_WORK)} values for them): each stayed at its index where its list kept its length, and was dropped otherwise: keep such lists shorter, or their items smaller`,
 })
 
 // --- What a component leaves out --------------------------------------------------------------------------------------
@@ -101,16 +124,23 @@ export function chartCut(points: number, totalPoints: number, series: number, to
   }
 }
 
-/** A Markdown text showed only its first `shown` of `total` characters (see shownLength in components/markdown.ts). */
-export function markdownCut(shown: number, total: number, reason: "text" | "paragraph"): SurfaceIssue {
+/** Why a Markdown text is cut, as the issue says it (see markdownShape in components/markdown.ts). */
+const CUT_REASONS: Readonly<Record<MarkdownCutReason, string>> = {
+  text: `a Markdown text shows at most ${count(MAX_MARKDOWN_TEXT)}`,
+  paragraph: `a paragraph (or a list item, or a table row) runs past ${count(MAX_PARAGRAPH)} characters there: split it into shorter ones`,
+  blocks: `its paragraphs, list items or table cells are too many and too short there (a text shows at most ${count(MAX_MARKDOWN_BLOCKS)} beyond one per ${CHARS_PER_BLOCK} characters): use fewer, longer ones`,
+  nesting: `lists and quotes nest more than ${MAX_NESTING} deep there: nest them less`,
+  work: "the renderer would read the lines there again and again (lines with no blank line between them, in a list item or a quote, or around rules): put blank lines between paragraphs and items",
+  lines:
+    "the renderer would read the lines there otherwise once genui made their links and tags inert (a line of a list item or a quote without its indentation): indent such lines, or put a blank line before them",
+}
+
+/** A Markdown text showed only its first `shown` of `total` characters (see markdownShape in components/markdown.ts). */
+export function markdownCut(shown: number, total: number, reason: MarkdownCutReason): SurfaceIssue {
   return {
     severity: "warning",
     code: "text_cut",
-    message: `shows only the first ${count(shown)} of its ${count(total)} characters of Markdown: ${
-      reason === "paragraph"
-        ? `a paragraph (or a list item, or a table row) runs past ${count(MAX_PARAGRAPH)} characters there: split it into shorter ones`
-        : `a Markdown text shows at most ${count(MAX_MARKDOWN_TEXT)}`
-    }`,
+    message: `shows only the first ${count(shown)} of its ${count(total)} characters of Markdown: ${CUT_REASONS[reason]}`,
   }
 }
 

@@ -409,7 +409,9 @@ describe("createSessionIndex fresh", () => {
     complete(2)
     expect(index.fresh()).toEqual([])
 
-    // A later live message that closes and recreates it does not report it again.
+    // A later live message that closes it and sends it again whole starts it again: it is reported again, once. (This
+    // said it was not reported again: keyed by canvas, a canvas the agent closed and sent again in its reply never got
+    // back the tab genui had closed for it [review8#R7F2-1]. Auto-open leaves a tab it opened, still open, as it is.)
     push(
       assistant(
         "msg_04",
@@ -417,6 +419,8 @@ describe("createSessionIndex fresh", () => {
         false,
       ),
     )
+    expect(index.fresh()).toEqual(["second"])
+    index.consumeFresh("second")
     expect(index.fresh()).toEqual([])
 
     // History never produces fresh canvases.

@@ -1,8 +1,8 @@
 diff --git a/dist/index.js b/dist/index.js
-index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f4963679cf0 100644
+index 7ddfd3c5374c35e09edb649c90805d303245f780..6ffa44afafc631832d1327c123fbc1557236002f 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -30,6 +30,12 @@ __export(index_exports, {
+@@ -30,6 +30,13 @@ __export(index_exports, {
    VisibilityProvider: () => VisibilityProvider,
    buildSpecFromParts: () => buildSpecFromParts,
    createRenderer: () => createRenderer,
@@ -11,11 +11,12 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
 +  EvaluationLendContext: () => EvaluationLendContext,
 +  RepeatRowsContext: () => RepeatRowsContext,
 +  RenderErrorContext: () => RenderErrorContext,
++  KeptValuesContext: () => KeptValuesContext,
 +  createRowIds: () => createRowIds,
    createStateStore: () => import_core8.createStateStore,
    defineRegistry: () => defineRegistry,
    elementTreeSchema: () => elementTreeSchema,
-@@ -65,6 +71,177 @@ function computeInitialFlat(isControlled, initialState) {
+@@ -65,6 +72,177 @@ function computeInitialFlat(isControlled, initialState) {
    if (Object.keys(initialState).length === 0) return {};
    return (0, import_store_utils.flattenToPointers)(initialState);
  }
@@ -193,7 +194,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
  function StateProvider(props) {
    let internalStore;
    if (!props.store) {
-@@ -103,24 +280,70 @@ function StateProvider(props) {
+@@ -103,24 +281,70 @@ function StateProvider(props) {
        store().update(updates);
      }
    });
@@ -272,7 +273,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
      const unsubscribe = s.subscribe(() => {
        setState(s.getSnapshot());
      });
-@@ -164,6 +387,10 @@ function StateProvider(props) {
+@@ -164,6 +388,10 @@ function StateProvider(props) {
    };
    const get = (path) => store().get(path);
    const getSnapshot = () => store().getSnapshot();
@@ -283,7 +284,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
    const ctx = {
      get state() {
        return state();
-@@ -172,7 +399,8 @@ function StateProvider(props) {
+@@ -172,7 +400,8 @@ function StateProvider(props) {
      set,
      update,
      getSnapshot,
@@ -293,7 +294,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
    };
    return (0, import_web.createComponent)(StateContext.Provider, {
      value: ctx,
-@@ -307,6 +535,8 @@ function ValidationProvider(props) {
+@@ -307,6 +536,8 @@ function ValidationProvider(props) {
        };
      });
    };
@@ -302,7 +303,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
    const validate = (path, config) => {
      const currentState = getSnapshot();
      const segments = path.split("/").filter(Boolean);
-@@ -329,6 +559,10 @@ function ValidationProvider(props) {
+@@ -329,6 +560,10 @@ function ValidationProvider(props) {
        validated: true,
        result
      };
@@ -313,7 +314,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
      fieldStatesRef = {
        ...fieldStatesRef,
        [path]: newFieldState
-@@ -358,11 +592,18 @@ function ValidationProvider(props) {
+@@ -358,11 +593,18 @@ function ValidationProvider(props) {
    };
    const validateAll = () => {
      let allValid = true;
@@ -336,7 +337,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
      }
      return allValid;
    };
-@@ -715,9 +956,15 @@ function RepeatScopeProvider(props) {
+@@ -715,9 +957,15 @@ function RepeatScopeProvider(props) {
    return (0, import_web12.createComponent)(RepeatScopeContext.Provider, {
      get value() {
        return {
@@ -355,28 +356,26 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
        };
      },
      get children() {
-@@ -842,7 +1089,165 @@ function useDevtoolsActive() {
+@@ -842,7 +1090,172 @@ function useDevtoolsActive() {
    (0, import_solid_js6.onCleanup)(unsub);
    return active;
  }
-+// opencode-genui patch: props resolved one by one when resolving them together throws; a prop that throws is undefined.
-+function resolvePropsGuarded(rawProps, ctx, type) {
-+  try {
-+    return (0, import_core6.resolveElementProps)(rawProps, ctx);
-+  } catch (error) {
-+    if (error?.evaluationDeferred) throw error;
-+    const resolved = {};
-+    for (const [key, value] of Object.entries(rawProps ?? {})) {
-+      try {
-+        resolved[key] = (0, import_core6.resolvePropValue)(value, ctx);
-+      } catch (error) {
-+        if (error?.evaluationDeferred) throw error;
-+        if (!error?.expansionLimit) console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
-+        resolved[key] = void 0;
-+      }
++// opencode-genui patch: props resolved one by one; a prop that throws is undefined, and keeps nothing (`keep`: what
++// the evaluation keeps, see KeptValuesContext).
++function resolvePropsGuarded(rawProps, ctx, type, keep) {
++  const resolved = {};
++  for (const [key, value] of Object.entries(rawProps ?? {})) {
++    const before = keep?.kept;
++    try {
++      resolved[key] = (0, import_core6.resolvePropValue)(value, ctx);
++    } catch (error) {
++      if (error?.evaluationDeferred) throw error;
++      if (!error?.expansionLimit) console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
++      if (keep) keep.kept = before;
++      resolved[key] = void 0;
 +    }
-+    return resolved;
 +  }
++  return resolved;
 +}
 +// opencode-genui patch: an action list runs in order, and consecutive state actions (setState, pushState, removeState),
 +// which settle at once, run in one batch: the UI re-evaluates once for all of their writes instead of once per write
@@ -518,10 +517,19 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
  function ElementRenderer(props) {
 +  const evaluationLend = (0, import_solid_js6.useContext)(EvaluationLendContext);
 +  const renderErrors = (0, import_solid_js6.useContext)(RenderErrorContext);
++  const keptValues = (0, import_solid_js6.useContext)(KeptValuesContext);
++  // What the element's props keep (see KeptValuesContext), and the signal that evaluates them again when its room changes.
++  let kept;
++  const [keptRoom, setKeptRoom] = (0, import_solid_js6.createSignal)(void 0, { equals: false });
++  const keeper = { wake: () => setKeptRoom(void 0) };
++  if (keptValues) (0, import_solid_js6.onCleanup)(() => {
++    if (kept) keptValues.release(kept);
++    kept = void 0;
++  });
    const repeatScope = useRepeatScope();
    const {
      ctx
-@@ -875,30 +1280,59 @@ function ElementRenderer(props) {
+@@ -875,30 +1288,59 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -601,7 +609,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
    };
    const on = (eventName) => {
      const onBindings = props.element.on;
-@@ -924,46 +1358,57 @@ function ElementRenderer(props) {
+@@ -924,46 +1366,63 @@ function ElementRenderer(props) {
      if (!watchConfig) return;
      const paths = Object.keys(watchConfig);
      if (paths.length === 0) return;
@@ -676,18 +684,24 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
 +  const resolvedElement = (0, import_solid_js6.createMemo)((previous) => {
      const rawProps = props.element.props;
 -    const resolvedProps = (0, import_core6.resolveElementProps)(rawProps, fullCtx());
++    let keep;
++    if (keptValues) {
++      keptRoom();
++      keep = { room: keptValues.room(kept), kept: 0, cut: false };
++    }
 +    let resolvedProps;
 +    try {
-+      resolvedProps = (0, import_core6.withEvaluation)(true, () => resolvePropsGuarded(rawProps, fullCtx(), props.element.type));
++      resolvedProps = (0, import_core6.withEvaluation)(true, () => resolvePropsGuarded(rawProps, fullCtx(), props.element.type, keep), keep);
 +    } catch (error) {
 +      if (!error?.evaluationDeferred) throw error;
 +      waitForEvaluation(evaluationLend);
-+      return previous ?? PENDING_ELEMENT;
++      return kept?.evicted ? PENDING_ELEMENT : previous ?? PENDING_ELEMENT;
 +    }
++    if (keptValues) kept = keptValues.take(kept, keep, keeper, props.elementKey);
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -971,12 +1416,13 @@ function ElementRenderer(props) {
+@@ -971,12 +1430,13 @@ function ElementRenderer(props) {
    });
    return (0, import_web18.createComponent)(import_solid_js6.Show, {
      get when() {
@@ -702,7 +716,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
            return null;
          },
          get children() {
-@@ -1076,10 +1522,14 @@ function ElementRendererContent(props) {
+@@ -1076,10 +1536,14 @@ function ElementRendererContent(props) {
            });
          }
        });
@@ -717,7 +731,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
          get emit() {
            return props.emit;
          },
-@@ -1111,8 +1561,131 @@ function ElementRendererContent(props) {
+@@ -1111,8 +1575,136 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -835,6 +849,11 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
 +// opencode-genui patch: exported. What the host provides to hear of an element that could not render (called from the
 +// fallback of the element's error boundary, so the host may register cleanups there).
 +var RenderErrorContext = (0, import_solid_js6.createContext)(void 0);
++// opencode-genui patch: exported. What the host provides to bound what its elements keep of their resolved props: an
++// object with `room(hold)` (how much an instance holding `hold` may keep), `take(hold, keep, keeper, elementKey)` (charges
++// what an evaluation kept in place of `hold`; returns the new hold) and `release(hold)`; `keeper.wake()` evaluates the
++// instance again. A hold the ledger took back has `evicted` set.
++var KeptValuesContext = (0, import_solid_js6.createContext)(void 0);
 +// How many rows a repeat renders, given what its host says fit (see RepeatRowsContext).
 +function rowLimitOf(limit) {
 +  return typeof limit === "number" && limit < MAX_REPEAT_ROWS ? Math.max(0, Math.floor(limit)) : MAX_REPEAT_ROWS;
@@ -849,7 +868,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
    const repeat = () => props.element.repeat;
    const parentScope = useRepeatScope();
    const statePath = () => {
-@@ -1122,18 +1695,25 @@ function RepeatChildren(props) {
+@@ -1122,18 +1714,25 @@ function RepeatChildren(props) {
      }
      return resolved;
    };
@@ -883,7 +902,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
          get index() {
            return index();
          },
-@@ -1161,6 +1741,7 @@ function RepeatChildren(props) {
+@@ -1161,6 +1760,7 @@ function RepeatChildren(props) {
                    get element() {
                      return el();
                    },
@@ -891,7 +910,7 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
                    get spec() {
                      return props.spec;
                    },
-@@ -1915,6 +2496,12 @@ function useChatUI(options) {
+@@ -1915,6 +2515,13 @@ function useChatUI(options) {
    buildSpecFromParts,
    createRenderer,
    createStateStore,
@@ -900,12 +919,13 @@ index 7ddfd3c5374c35e09edb649c90805d303245f780..80ebd43b73600f254c1ee88916480f49
 +  EvaluationLendContext,
 +  RepeatRowsContext,
 +  RenderErrorContext,
++  KeptValuesContext,
 +  createRowIds,
    defineRegistry,
    elementTreeSchema,
    flatToTree,
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a27af843a 100644
+index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..7eb67752b589f202e4cf6c34cec18c03d7517409 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -5,8 +5,8 @@ import {
@@ -1268,28 +1288,26 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
  var _tmpl$2 = /* @__PURE__ */ _$template2(`<span style=display:contents>`);
  var EMPTY_FUNCTIONS = {};
  var FunctionsContext = createContext6(EMPTY_FUNCTIONS);
-@@ -706,7 +947,165 @@ function useDevtoolsActive() {
+@@ -706,7 +947,172 @@ function useDevtoolsActive() {
    onCleanup2(unsub);
    return active;
  }
-+// opencode-genui patch: props resolved one by one when resolving them together throws; a prop that throws is undefined.
-+function resolvePropsGuarded(rawProps, ctx, type) {
-+  try {
-+    return resolveElementProps(rawProps, ctx);
-+  } catch (error) {
-+    if (error?.evaluationDeferred) throw error;
-+    const resolved = {};
-+    for (const [key, value] of Object.entries(rawProps ?? {})) {
-+      try {
-+        resolved[key] = resolvePropValue(value, ctx);
-+      } catch (error) {
-+        if (error?.evaluationDeferred) throw error;
-+        if (!error?.expansionLimit) console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
-+        resolved[key] = void 0;
-+      }
++// opencode-genui patch: props resolved one by one; a prop that throws is undefined, and keeps nothing (`keep`: what
++// the evaluation keeps, see KeptValuesContext).
++function resolvePropsGuarded(rawProps, ctx, type, keep) {
++  const resolved = {};
++  for (const [key, value] of Object.entries(rawProps ?? {})) {
++    const before = keep?.kept;
++    try {
++      resolved[key] = resolvePropValue(value, ctx);
++    } catch (error) {
++      if (error?.evaluationDeferred) throw error;
++      if (!error?.expansionLimit) console.warn(`[json-render] Could not resolve prop "${key}" of <${type}>:`, error);
++      if (keep) keep.kept = before;
++      resolved[key] = void 0;
 +    }
-+    return resolved;
 +  }
++  return resolved;
 +}
 +// opencode-genui patch: an action list runs in order, and consecutive state actions (setState, pushState, removeState),
 +// which settle at once, run in one batch: the UI re-evaluates once for all of their writes instead of once per write
@@ -1431,10 +1449,19 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
  function ElementRenderer(props) {
 +  const evaluationLend = useContext6(EvaluationLendContext);
 +  const renderErrors = useContext6(RenderErrorContext);
++  const keptValues = useContext6(KeptValuesContext);
++  // What the element's props keep (see KeptValuesContext), and the signal that evaluates them again when its room changes.
++  let kept;
++  const [keptRoom, setKeptRoom] = createSignal4(void 0, { equals: false });
++  const keeper = { wake: () => setKeptRoom(void 0) };
++  if (keptValues) onCleanup2(() => {
++    if (kept) keptValues.release(kept);
++    kept = void 0;
++  });
    const repeatScope = useRepeatScope();
    const {
      ctx
-@@ -739,30 +1138,59 @@ function ElementRenderer(props) {
+@@ -739,30 +1145,59 @@ function ElementRenderer(props) {
        directives
      };
    });
@@ -1514,7 +1541,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
    };
    const on = (eventName) => {
      const onBindings = props.element.on;
-@@ -788,46 +1216,57 @@ function ElementRenderer(props) {
+@@ -788,46 +1223,63 @@ function ElementRenderer(props) {
      if (!watchConfig) return;
      const paths = Object.keys(watchConfig);
      if (paths.length === 0) return;
@@ -1589,18 +1616,24 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
 +  const resolvedElement = createMemo3((previous) => {
      const rawProps = props.element.props;
 -    const resolvedProps = resolveElementProps(rawProps, fullCtx());
++    let keep;
++    if (keptValues) {
++      keptRoom();
++      keep = { room: keptValues.room(kept), kept: 0, cut: false };
++    }
 +    let resolvedProps;
 +    try {
-+      resolvedProps = withEvaluation(true, () => resolvePropsGuarded(rawProps, fullCtx(), props.element.type));
++      resolvedProps = withEvaluation(true, () => resolvePropsGuarded(rawProps, fullCtx(), props.element.type, keep), keep);
 +    } catch (error) {
 +      if (!error?.evaluationDeferred) throw error;
 +      waitForEvaluation(evaluationLend);
-+      return previous ?? PENDING_ELEMENT;
++      return kept?.evicted ? PENDING_ELEMENT : previous ?? PENDING_ELEMENT;
 +    }
++    if (keptValues) kept = keptValues.take(kept, keep, keeper, props.elementKey);
      return resolvedProps !== props.element.props ? {
        ...props.element,
        props: resolvedProps
-@@ -835,12 +1274,13 @@ function ElementRenderer(props) {
+@@ -835,12 +1287,13 @@ function ElementRenderer(props) {
    });
    return _$createComponent6(Show, {
      get when() {
@@ -1615,7 +1648,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
            return null;
          },
          get children() {
-@@ -940,10 +1380,14 @@ function ElementRendererContent(props) {
+@@ -940,10 +1393,14 @@ function ElementRendererContent(props) {
            });
          }
        });
@@ -1630,7 +1663,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
          get emit() {
            return props.emit;
          },
-@@ -975,8 +1419,131 @@ function ElementRendererContent(props) {
+@@ -975,8 +1432,136 @@ function ElementRendererContent(props) {
      }
    });
  }
@@ -1748,6 +1781,11 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
 +// opencode-genui patch: exported. What the host provides to hear of an element that could not render (called from the
 +// fallback of the element's error boundary, so the host may register cleanups there).
 +var RenderErrorContext = createContext6(void 0);
++// opencode-genui patch: exported. What the host provides to bound what its elements keep of their resolved props: an
++// object with `room(hold)` (how much an instance holding `hold` may keep), `take(hold, keep, keeper, elementKey)` (charges
++// what an evaluation kept in place of `hold`; returns the new hold) and `release(hold)`; `keeper.wake()` evaluates the
++// instance again. A hold the ledger took back has `evicted` set.
++var KeptValuesContext = createContext6(void 0);
 +// How many rows a repeat renders, given what its host says fit (see RepeatRowsContext).
 +function rowLimitOf(limit) {
 +  return typeof limit === "number" && limit < MAX_REPEAT_ROWS ? Math.max(0, Math.floor(limit)) : MAX_REPEAT_ROWS;
@@ -1762,7 +1800,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
    const repeat = () => props.element.repeat;
    const parentScope = useRepeatScope();
    const statePath = () => {
-@@ -986,18 +1553,25 @@ function RepeatChildren(props) {
+@@ -986,18 +1571,25 @@ function RepeatChildren(props) {
      }
      return resolved;
    };
@@ -1796,7 +1834,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
          get index() {
            return index();
          },
-@@ -1025,6 +1599,7 @@ function RepeatChildren(props) {
+@@ -1025,6 +1617,7 @@ function RepeatChildren(props) {
                    get element() {
                      return el();
                    },
@@ -1804,7 +1842,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
                    get spec() {
                      return props.spec;
                    },
-@@ -1795,6 +2370,12 @@ export {
+@@ -1795,6 +2388,13 @@ export {
    useActions,
    useBoundProp,
    useChatUI,
@@ -1813,6 +1851,7 @@ index 91a3f6e6de922d44d246c91e2f0dbd4ff3f006a6..eaaef46a5c88e561b9b7cec24997160a
 +  EvaluationLendContext,
 +  RepeatRowsContext,
 +  RenderErrorContext,
++  KeptValuesContext,
 +  createRowIds,
    useFieldValidation,
    useIsVisible,

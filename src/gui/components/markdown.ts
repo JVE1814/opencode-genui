@@ -35,7 +35,13 @@
 // character and never reads as a delimiter, and math is written as text. The rest of marked's work grows faster than
 // the paragraph (each inline token rescans the rest of its paragraph for the app's math delimiters): past a paragraph's
 // first MAX_ESCAPES backslashes, escapes are written as character references, and a text is cut where a paragraph
-// runs past MAX_PARAGRAPH characters (see `shownLength`).
+// runs past MAX_PARAGRAPH characters. marked's block lexer has costs of its own (setext headings, blockquotes, task
+// items and tables it scans again and again, containers it lexes again at each level), and the app builds a code block
+// with a toolbar for each code block and a node for each paragraph, item or cell: one model of marked's blocks (see
+// "Block structure" below) counts what the render budget charges and finds where a text is cut (see `markdownShape`),
+// and neutralizing writes each line as that model reads it. Neutralizing lengthens lines, and marked decides some
+// blocks by a line's length or by the characters at a column, so the model reads what neutralizing wrote too, and the
+// text is cut where it reads that otherwise (see `checkedParts`): marked only ever gets text the model counted.
 
 import { safeUrl } from "../../protocol/url.ts"
 
@@ -69,7 +75,7 @@ export const MATH_SPAN_COST = 40
 export const MAX_MARKDOWN_TEXT = 500_000
 
 /**
- * How long one paragraph (what marked lexes as one inline run: see `shownLength`) may be; the text is cut where one
+ * How long one paragraph (what marked lexes as one inline run: see `markdownShape`) may be; the text is cut where one
  * runs past it. marked's inline work grows faster than a paragraph: in Chromium, 500,000 characters of bare URLs in
  * one paragraph took 12 s and of `a<b ` 1.9 s, while in paragraphs of 20,000 characters they cost about 1.2 and
  * 0.4 µs a character.
@@ -139,42 +145,43 @@ function dedent(line: string, indent: string): string {
  */
 export const MAX_CODE_PARTS = 32
 
+/** A run of a text's lines: prose, or a fenced code block shown on its own (`code`), closing fence included. */
+interface Segment {
+  readonly from: number
+  readonly to: number
+  readonly code?: { readonly indent: string; readonly language?: string; readonly closed: boolean }
+}
+
 /**
- * Splits Markdown into prose and fenced code blocks: a fence with only whitespace before it, at the top level or
- * indented in a list item (its lines lose the fence's indentation), up to `maxCode` of them (see MAX_CODE_PARTS).
- * Math fences, fences past `maxCode` and fences that open after a quote or list marker stay in the prose, up to and
- * including their closing fence. An unclosed block runs to the end.
+ * Where Markdown splits into prose and fenced code blocks: a fence with only whitespace before it, at the top level or
+ * indented in a list item, up to `maxCode` of them (see MAX_CODE_PARTS). Math fences, fences past `maxCode` and fences
+ * that open after a quote or list marker stay in the prose, up to and including their closing fence. An unclosed block
+ * runs to the end.
  */
-export function splitMarkdown(text: string, maxCode = MAX_CODE_PARTS): MarkdownPart[] {
-  const parts: MarkdownPart[] = []
+function fenceSegments(lines: readonly string[], maxCode = MAX_CODE_PARTS): Segment[] {
+  const segments: Segment[] = []
   let codeParts = 0
-  let prose: string[] = []
-  let open: (Fence & { indent: string; language?: string; lines: string[] }) | undefined
+  let proseFrom = 0
+  let open: (Fence & { from: number; indent: string; language?: string }) | undefined
   /** A fence kept in the prose (math, quoted, after a list marker), up to and including its closing fence. */
   let kept: Fence | undefined
-
-  const flush = () => {
-    const joined = prose.join("\n")
-    if (joined.trim() !== "") parts.push({ kind: "markdown", text: joined })
-    prose = []
-  }
-  const close = () => {
-    if (!open) return
-    const { language, lines } = open
-    parts.push({ kind: "code", code: lines.join("\n"), ...(language ? { language } : {}) })
-    open = undefined
-  }
-
-  for (const raw of text.split("\n")) {
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!
     if (open) {
-      if (closes(open, FENCE_CLOSE.exec(line))) close()
-      else open.lines.push(dedent(line, open.indent))
+      if (closes(open, FENCE_CLOSE.exec(line))) {
+        const { indent, language } = open
+        segments.push({
+          from: open.from,
+          to: index + 1,
+          code: { indent, ...(language ? { language } : {}), closed: true },
+        })
+        open = undefined
+        proseFrom = index + 1
+      }
       continue
     }
     if (kept) {
       if (closes(kept, NESTED_CLOSE.exec(line))) kept = undefined
-      prose.push(line)
       continue
     }
     const nested = NESTED_FENCE.exec(line)
@@ -182,120 +189,1642 @@ export function splitMarkdown(text: string, maxCode = MAX_CODE_PARTS): MarkdownP
     const fence = nested ? opening(nested[1], nested[2]!) : opening(start?.[2], start?.[3] ?? "")
     if (fence && start && codeParts < maxCode && !MATH_FENCES.has(languageOf(start[3]!).toLowerCase())) {
       codeParts++
-      flush()
+      if (index > proseFrom) segments.push({ from: proseFrom, to: index })
       const language = languageOf(start[3]!)
-      open = { ...fence, indent: start[1]!, ...(language ? { language } : {}), lines: [] }
+      open = { ...fence, from: index, indent: start[1]!, ...(language ? { language } : {}) }
       continue
     }
     if (fence) kept = fence
-    prose.push(line)
   }
-  close()
-  flush()
-  return parts
+  if (open) {
+    const { indent, language } = open
+    segments.push({
+      from: open.from,
+      to: lines.length,
+      code: { indent, ...(language ? { language } : {}), closed: false },
+    })
+  } else if (lines.length > proseFrom) segments.push({ from: proseFrom, to: lines.length })
+  return segments
 }
 
 /**
- * A Markdown text's code blocks: all it renders, and those it shows on their own (see MAX_CODE_PARTS). The rest render
- * within its Markdown: fences past the first MAX_CODE_PARTS, fences in a quote or after a list marker, and indented
- * code blocks, each a code block of the app's renderer.
+ * Splits Markdown into prose and fenced code blocks (see `fenceSegments`); a code block's lines lose its fence's
+ * indentation.
+ */
+export function splitMarkdown(text: string, maxCode = MAX_CODE_PARTS): MarkdownPart[] {
+  const lines = text.split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
+  const parts: MarkdownPart[] = []
+  for (const segment of fenceSegments(lines, maxCode)) {
+    if (segment.code) parts.push(codePart(lines, segment.from, segment.to, segment.code))
+    else {
+      const joined = lines.slice(segment.from, segment.to).join("\n")
+      if (joined.trim() !== "") parts.push({ kind: "markdown", text: joined })
+    }
+  }
+  return parts
+}
+
+/** A fenced code block's part: its lines between the fences, without the fence's indentation. */
+function codePart(
+  lines: readonly string[],
+  from: number,
+  to: number,
+  code: NonNullable<Segment["code"]>,
+): MarkdownPart {
+  const { indent, language, closed } = code
+  const body = lines.slice(from + 1, closed ? to - 1 : to).map((line) => dedent(line, indent))
+  return { kind: "code", code: body.join("\n"), ...(language ? { language } : {}) }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Block structure: what marked makes of a text
+// ---------------------------------------------------------------------------------------------------------------------
+//
+// One model of marked's block lexer (marked 18.0.11, gfm, with the app's display-math extension) that counting,
+// cutting and neutralizing all use. It follows marked's own algorithm line by line, quirks included: a blockquote's
+// segments and its lazy lines, list items by their content column (with tabs as marked expands them) and lazy
+// continuation, items lexed with `text` tokens (a setext attempt per line) until a nested list resets that, setext
+// headings that run over thematic breaks, indented code only where it cannot continue a paragraph or text, fences and
+// display math in any container, tables, definitions (where genui writes them again), and HTML as genui leaves it
+// (every tag broken; see the `<…>` lines in neutralizeLines). test/unit/review8-markdown.test.ts checks it against the
+// app's marked on generated documents.
+//
+// It is linear in the text: where marked scans ahead (the setext rule, display math, a table's rows, a blockquote
+// that a code block ends early, a definition's label), the model looks the answer up in arrays computed once per
+// level, and tallies what marked scans instead (see MAX_BLOCK_WORK); containers nest at most MAX_NESTING deep.
+
+/** How deep lists and blockquotes nest at most (marked lexes each level's text again); deeper, the text is cut. */
+export const MAX_NESTING = 8
+
+/**
+ * How many blocks (paragraphs, headings, rules, blockquotes, list items and table cells) one Markdown text shows at
+ * most beyond one per CHARS_PER_BLOCK characters, as many as a Table shows cells (MAX_TABLE_CELLS in src/gui/costs.ts):
+ * each costs about what a cell does, and a text of tiny ones built 47,000 table cells, or 24,000 list items, in one
+ * task. The rest is cut.
+ */
+export const MAX_MARKDOWN_BLOCKS = 10_000
+
+/**
+ * The characters of text that pay for one block: a block costs a tenth of an element in the render budget, as a Table
+ * cell does, and so do this many characters (TEXT_PER_UNIT / CELLS_PER_UNIT). An ordinary text's blocks are longer, so
+ * only texts of tiny blocks pay for them (see markdownUnits in src/gui/costs.ts).
+ */
+export const CHARS_PER_BLOCK = 25
+
+/**
+ * What marked's block lexer may scan beyond what it consumes, in characters scanned or their worth (about 2.5 to 3 ns
+ * each in Chromium, so at most about 0.1 to 0.12 s of marked's work; test/e2e/review8-markdown.spec.ts measures it). Its
+ * setext rule scans from every paragraph start (from every line of a list item) to the next line that stops it, so
+ * paragraphs between thematic breaks, or a list item's short lines, cost the square of their run: 100 KB of `a\n***\n`
+ * took 3.4 s. So do a blockquote's lazy lines and one that a code block ends early, a table header with the wrong
+ * number of columns, task items, unclosed display math and definition labels. Past it, the text is cut.
+ */
+export const MAX_BLOCK_WORK = 40_000_000
+
+// What marked's blockquote does again for each segment (its quoted lines up to a lazy line) with the rest of the
+// quote, in units of MAX_BLOCK_WORK (measured in Chromium): it copies the array of the rest's lines, and after a list
+// it joins the rest to the list's raw, lexes the list again and splits the rest into lines again (a copy and a scan of
+// each character, and an array entry per line). A quoted list with a lazy line per item costs marked 60 ms at 100 KB
+// with sentences for lines (36 million), and 3.6 s with lines of a few characters.
+const QUOTE_COPY_LINE = 0.5
+const QUOTE_RELIST_CHAR = 0.5
+const QUOTE_RELIST_LINE = 13
+/** A table header marked tries for each line of a paragraph, when the delimiter row has another number of columns. */
+const TABLE_RETRY = 4.5
+
+interface Line {
+  /** The line as this level of marked sees it. */
+  readonly t: string
+  /** The row of the text it comes from. */
+  readonly r: number
+}
+
+/** An inline run: what marked hands its inline lexer (a paragraph, a list item's text, a heading, a table cell). */
+interface Run {
+  len: number
+  /** The row it starts at. */
+  readonly row: number
+  /** Its first line, for the task-list pass. */
+  head: string
+  off: number
+  /**
+   * Where it passes MAX_PARAGRAPH: the row, how many characters of that row's line (as marked sees it) fit, and
+   * whether that line is the row as written (else tabs may have widened, and a prefix gone).
+   */
+  over: { row: number; allowance: number; exact: boolean } | undefined
+}
+
+const PROSE = 0
+const CODE = 1
+const MATH = 2
+const DEF = 3
+
+/** What a run of the model finds, by row of the text. */
+class Sink {
+  readonly runs: Run[] = []
+  /** The rows of the lines added to a run after its first, in order. */
+  readonly appended: number[] = []
+  /** marked's inline runs so far, the table cells it pads a row with (empty, so not in `runs`) included. */
+  runCount = 0
+  readonly codeRows: number[] = []
+  readonly mathRows: number[] = []
+  /** Blocks, by row: how many at that row (a table row's cells), and of what type. */
+  readonly blockRows: number[] = []
+  readonly blockCounts: number[] = []
+  readonly blockTypes: string[] = []
+  /**
+   * marked's work (see MAX_BLOCK_WORK) by row: at the row (`work`), and of scans, the weight per character that starts
+   * reading at a row (`opens`) and stops before it (`closes`), and the same per line (`lineOpens`, `lineCloses`).
+   */
+  readonly work: Float64Array
+  readonly opens: Float64Array
+  readonly closes: Float64Array
+  readonly lineOpens: Float64Array
+  readonly lineCloses: Float64Array
+  readonly nestRows: number[] = []
+  /** Rows of setext headings and display math, as [first, last] pairs: a cut inside one moves to its first row. */
+  readonly spans: number[] = []
+  /** The labels of the definitions lexed so far: marked keeps the first and drops (but consumes) the rest. */
+  readonly links = new Set<string>()
+  /**
+   * The runs whose text starts with a task marker, in order, as pairs (place among marked's runs, index in `runs`):
+   * marked's task pass takes the last one.
+   */
+  readonly tasks: number[] = []
+  /** The definitions genui writes again: each one's text as marked reads it, by row. */
+  readonly definitions = new Map<number, string>()
+  /** What the model did, to stop it on text built to make it slow (see `modelLimit`). */
+  model = 0
+
+  readonly rows: readonly string[]
+  /** What each row is, for neutralizeLines, and the rows that start a code or math block. */
+  readonly kinds: Uint8Array | undefined
+  readonly starts: Uint8Array | undefined
+
+  constructor(rows: readonly string[], kinds?: Uint8Array, starts?: Uint8Array) {
+    this.rows = rows
+    this.kinds = kinds
+    this.starts = starts
+    this.work = new Float64Array(rows.length + 1)
+    this.opens = new Float64Array(rows.length + 1)
+    this.closes = new Float64Array(rows.length + 1)
+    this.lineOpens = new Float64Array(rows.length + 1)
+    this.lineCloses = new Float64Array(rows.length + 1)
+  }
+
+  /** A new part of the text: marked lexes each part (see `splitMarkdown`) on its own. */
+  beginSegment() {
+    this.links.clear()
+    this.tasks.length = 0
+  }
+  /** Work of marked's at a row. */
+  worked(row: number, amount: number) {
+    this.work[row] = this.work[row]! + amount
+  }
+  /**
+   * A scan of marked's from row `from` up to (not including) row `to`, of `weight` per character and `perLine` per
+   * line.
+   */
+  scan(from: number, to: number, weight: number, perLine = 0) {
+    if (to <= from) return
+    const end = Math.min(to, this.rows.length)
+    this.opens[from] = this.opens[from]! + weight
+    this.closes[end] = this.closes[end]! + weight
+    this.lineOpens[from] = this.lineOpens[from]! + perLine
+    this.lineCloses[end] = this.lineCloses[end]! + perLine
+  }
+  block(row: number, type: string, count = 1) {
+    this.blockRows.push(row)
+    this.blockCounts.push(count)
+    this.blockTypes.push(type)
+  }
+  kind(row: number, kind: number, start = false) {
+    // A row lexed as a definition once is written again as one (marked may lex it again, as part of other text).
+    if (!this.kinds || row < 0 || row >= this.kinds.length) return
+    if (this.kinds[row] !== DEF) this.kinds[row] = kind
+    if (start) this.starts![row] = 1
+  }
+  /** Whether genui can write the definition on a row again: its text, as marked reads it, ends the row. */
+  writable(row: number, text: string): boolean {
+    return this.rows[row]?.endsWith(text) ?? false
+  }
+  definition(row: number, text: string) {
+    if (!this.definitions.has(row)) this.definitions.set(row, text)
+    this.kind(row, DEF)
+  }
+  mark() {
+    return { code: this.codeRows.length, math: this.mathRows.length, blocks: this.blockRows.length }
+  }
+  /** Drops what a token marked replaces found (its runs stay: marked lexes them inline all the same). */
+  rollback(mark: { code: number; math: number; blocks: number }) {
+    this.codeRows.length = mark.code
+    this.mathRows.length = mark.math
+    this.blockRows.length = mark.blocks
+    this.blockCounts.length = mark.blocks
+    this.blockTypes.length = mark.blocks
+  }
+  run(text: string, row: number): Run {
+    const run: Run = { len: text.length, row, head: text, off: 0, over: undefined }
+    if (text.charCodeAt(0) === 91 && TASK.test(text)) this.tasks.push(this.runCount, this.runs.length)
+    this.runs.push(run)
+    this.runCount++
+    if (run.len > MAX_PARAGRAPH) run.over = { row, allowance: MAX_PARAGRAPH, exact: this.rows[row] === text }
+    return run
+  }
+  append(run: Run, text: string, row: number) {
+    this.appended.push(row)
+    if (!run.over && run.len + 1 + text.length > MAX_PARAGRAPH)
+      run.over = { row, allowance: Math.max(0, MAX_PARAGRAPH - run.len - 1), exact: this.rows[row] === text }
+    run.len += 1 + text.length
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Per-line patterns (each on one line, without its newline). `$` is the end of the line: marked's `\n` or end.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const BLANK = /^[ \t]*$/
+const WS = /^\s*$/
+const CODE_LINE = /^(?: {4}| {0,3}\t)[\s\S]/
+const CODE_START = /^(?: {4}| {0,3}\t)/
+const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})([\s\S]*)$/
+const FENCE_INT = /^ {0,3}(?:`{3,}(?=[^`]*$)|~~~)/
+const FENCE_ANY = /^ {0,3}(?:`{3,}|~{3,})/
+const HEADING = /^ {0,3}(#{1,6})(?=\s|$)(.*)$/
+const HEADING_INT = /^ {0,3}#{1,6}(?:\s|$)/
+const HR = /^ {0,3}(?:(?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$/
+const BQ = /^ {0,3}>/
+// marked strips quote markers and code indentation with multiline patterns, whose `^` also matches after U+2028/9.
+const BQ_STRIP = /(^|[\u2028\u2029]) {0,3}>[ \t]?/g
+const BQ_CONTENT = /^ {0,3}> ?/
+const LIST_START = /^( {0,3}(?:[*+-]|\d{1,9}[.)]))(?:[ \t][\s\S]*)?$/
+const BQ_LIST = /^ {0,3}(?:[*+-]|\d{1,9}[.)])(?:[ \t]|$)/
+const PARA_LIST = /^ {0,3}(?:[*+-]|1[.)])[ \t]+[^ \t]/
+const ROWS_LIST = /^ {0,3}(?:[*+-]|1[.)])[ \t]/
+const BULL_SP = /^ {0,3}(?:[*+-]|\d{1,9}[.)]) /
+const UNDERLINE = /^ {0,3}(?:=+|-+) *$/
+const SETEXT = /^ {0,3}((?:=+|-+) *)$/
+const TABLE_STOP = /^ {0,3}\|?(?:[:\- ]*\|)+[:\- ]*$/
+const HEADER = /^ *([^ ].*)$/
+const DELIM = /^ {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)$/
+const SEP = /[\u2028\u2029]/
+const TASK = /^\[[ xX]\] +\S/
+const TASK_MARK = /^\[[ xX]\] +/
+const KATEX = /^\${1,2}$/
+const CODE_INDENT = /(^|[\u2028\u2029])(?: {1,4}| {0,3}\t)/g
+
+// Fast checks before the patterns: most begin with up to three spaces and one of a few characters.
+function leadSpaces(text: string): number {
+  let index = 0
+  while (text.charCodeAt(index) === 32) index++
+  return index
+}
+/** The character after up to three leading spaces (-1 past them). */
+function head(text: string): number {
+  const spaces = leadSpaces(text)
+  return spaces <= 3 ? text.charCodeAt(spaces) : -1
+}
+const isBullet = (c: number) => c === 42 || c === 43 || c === 45 || (c >= 48 && c <= 57)
+const isHr = (text: string, c = head(text)) => (c === 45 || c === 95 || c === 42) && HR.test(text)
+const isHeadingStart = (text: string, c = head(text)) => c === 35 && HEADING_INT.test(text)
+const isQuote = (text: string, c = head(text)) => c === 62
+const isFenceStart = (text: string, c = head(text)) => (c === 96 || c === 126) && FENCE_INT.test(text)
+const isFenceAny = (text: string, c = head(text)) => (c === 96 || c === 126) && FENCE_ANY.test(text)
+const isCodeStart = (text: string) => {
+  const spaces = leadSpaces(text)
+  return spaces >= 4 || (spaces <= 3 && text.charCodeAt(spaces) === 9)
+}
+const isCodeLine = (text: string) => isCodeStart(text) && CODE_LINE.test(text)
+const isBlank = (text: string) => {
+  for (let index = 0; index < text.length; index++) {
+    const c = text.charCodeAt(index)
+    if (c !== 32 && c !== 9) return false
+  }
+  return true
+}
+const isWhitespace = (text: string) => {
+  const c = text.charCodeAt(leadSpaces(text))
+  if (c > 32 && c < 127) return false
+  return WS.test(text)
+}
+const isTableStop = (text: string, c = head(text)) => (c === 124 || c === 58 || c === 45) && TABLE_STOP.test(text)
+const isDelimiter = (text: string, c = head(text)) => (c === 124 || c === 58 || c === 45) && DELIM.test(text)
+const isUnderline = (text: string, c = head(text)) => (c === 61 || c === 45) && UNDERLINE.test(text)
+
+function expandTabs(line: string, indent: number): string {
+  let col = indent
+  let out = ""
+  for (const char of line) {
+    if (char === "\t") {
+      const added = 4 - (col % 4)
+      out += " ".repeat(added)
+      col += added
+    } else {
+      out += char
+      col++
+    }
+  }
+  return out
+}
+
+/** marked's `search(/[^ ]/)`: where the first character other than a space is, or -1. */
+const firstNonSpace = (text: string) => {
+  const spaces = leadSpaces(text)
+  return spaces < text.length ? spaces : -1
+}
+
+/** marked's splitCells, as far as the cells' number and texts go. */
+function splitCells(row: string, count?: number): string[] {
+  let out = ""
+  for (let index = 0; index < row.length; index++) {
+    const char = row[index]!
+    if (char === "|") {
+      let escaped = false
+      for (let at = index - 1; at >= 0 && row[at] === "\\"; at--) escaped = !escaped
+      out += escaped ? "|" : " |"
+    } else out += char
+  }
+  const cells = out.split(/ \|/)
+  if (!cells[0]!.trim()) cells.shift()
+  if (cells.length > 0 && !cells.at(-1)?.trim()) cells.pop()
+  if (count) {
+    if (cells.length > count) cells.splice(count)
+    else while (cells.length < count) cells.push("")
+  }
+  return cells.map((cell) => cell.trim().replace(/\\\|/g, "|"))
+}
+
+function trailingBackslashesOdd(text: string): boolean {
+  let count = 0
+  for (let index = text.length - 1; index >= 0 && text[index] === "\\"; index--) count++
+  return (count & 1) === 1
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A level: the lines one call of marked's blockTokens lexes.
+// ---------------------------------------------------------------------------------------------------------------------
+
+class Level {
+  private ovIndex = -1
+  private ovLine: Line | undefined
+  private lh: Int32Array | undefined
+  private lhOk: Uint8Array | undefined
+  private qPara: Int32Array | undefined
+  private qNoPara: Int32Array | undefined
+  private kat1: Int32Array | undefined
+  private kat2: Int32Array | undefined
+  private rows: Int32Array | undefined
+  private sums: Float64Array | undefined
+  private readonly at: (index: number) => Line
+  readonly n: number
+  readonly last: number
+
+  constructor(at: (index: number) => Line, n: number) {
+    this.at = at
+    this.n = n
+    this.last = n - 1
+  }
+
+  static of(lines: readonly Line[]): Level {
+    return new Level((index) => lines[index]!, lines.length)
+  }
+
+  get(index: number): Line {
+    return index === this.ovIndex ? this.ovLine! : this.at(index)
+  }
+  text(index: number): string {
+    return this.get(index).t
+  }
+  override(index: number, line: Line) {
+    this.ovIndex = index
+    this.ovLine = line
+  }
+  /** Whether the source from line `p` (after an unconsumed line break when `nl`) is not empty. */
+  has(p: number, nl: boolean): boolean {
+    if (nl) return p <= this.last
+    return p < this.last || (p === this.last && this.text(p) !== "")
+  }
+  followed(index: number) {
+    return index < this.last
+  }
+  /** The row after line `index`'s (where a scan through that line ends). */
+  rowAfter(index: number): number {
+    return index < 0 ? 0 : this.get(Math.min(index, this.last)).r + 1
+  }
+
+  /** The setext rule from line p: the underline's index, or -1 (and where the scan stopped, in `scan`). */
+  setext(p: number, scan: { to: number }): number {
+    const text = this.text(p)
+    scan.to = p
+    if (p >= this.last || SEP.test(text)) return -1
+    if (!this.lh) this.computeSetext()
+    const c = head(text)
+    if (
+      (isBullet(c) && BULL_SP.test(text)) ||
+      isCodeStart(text) ||
+      isFenceAny(text, c) ||
+      isQuote(text, c) ||
+      isHeadingStart(text, c) ||
+      (this.followed(p) && isTableStop(text, c))
+    )
+      return -1
+    if (p >= this.last) return -1
+    const event = this.lh![p + 1]!
+    scan.to = event
+    if (event > this.last) return -1
+    return this.lhOk![event] ? event : -1
+  }
+
+  private computeSetext() {
+    const lh = new Int32Array(this.n + 1)
+    const ok = new Uint8Array(this.n + 1)
+    lh[this.n] = this.n
+    for (let j = this.n - 1; j >= 0; j--) {
+      const text = this.at(j).t
+      const followed = j < this.last
+      const c = head(text)
+      if (isUnderline(text, c)) {
+        lh[j] = j
+        ok[j] = 1
+      } else if (
+        !followed ||
+        isWhitespace(text) ||
+        (isBullet(c) && BULL_SP.test(text)) ||
+        isCodeStart(text) ||
+        isFenceAny(text, c) ||
+        isQuote(text, c) ||
+        isHeadingStart(text, c) ||
+        isTableStop(text, c) ||
+        SEP.test(text)
+      )
+        lh[j] = j
+      else lh[j] = lh[j + 1]!
+    }
+    this.lh = lh
+    this.lhOk = ok
+  }
+
+  /** Where the blockquote regex's match from quote line p ends (exclusive). */
+  quoteEnd(p: number): number {
+    if (!this.qPara) this.computeQuote()
+    const content = this.text(p).replace(BQ_CONTENT, "")
+    return content !== "" ? this.qPara![p + 1]! : this.qNoPara![p + 1]!
+  }
+
+  private lazyOk(index: number): boolean {
+    const text = this.at(index).t
+    if (text === "") return false
+    const c = head(text)
+    if (
+      isHr(text, c) ||
+      isHeadingStart(text, c) ||
+      isQuote(text, c) ||
+      isFenceStart(text, c) ||
+      (isBullet(c) && BQ_LIST.test(text))
+    )
+      return false
+    return !(index < this.last && isBlank(text))
+  }
+
+  private computeQuote() {
+    const para = new Int32Array(this.n + 2)
+    const noPara = new Int32Array(this.n + 2)
+    const quoteEndAt = new Int32Array(this.n + 2)
+    para[this.n] = noPara[this.n] = this.n
+    para[this.n + 1] = noPara[this.n + 1] = this.n
+    for (let j = this.n - 1; j >= 0; j--) {
+      const text = this.at(j).t
+      if (isQuote(text)) {
+        const content = text.replace(BQ_CONTENT, "")
+        quoteEndAt[j] = content !== "" ? para[j + 1]! : noPara[j + 1]!
+        para[j] = noPara[j] = quoteEndAt[j]!
+      } else {
+        noPara[j] = j
+        para[j] = this.lazyOk(j) ? para[j + 1]! : j
+      }
+    }
+    this.qPara = para
+    this.qNoPara = noPara
+  }
+
+  /** The closing line of a blockKatex block opened at p, or -1. */
+  katex(p: number): number {
+    const text = this.text(p)
+    if (!KATEX.test(text) || !this.followed(p)) return -1
+    if (!this.kat1) this.computeKatex()
+    const next = text.length === 1 ? this.kat1! : this.kat2!
+    let close = next[Math.min(p + 2, this.n)]!
+    if (close === p + 2 && this.text(p + 1) === "") close = next[Math.min(p + 3, this.n)]!
+    return close < this.n ? close : -1
+  }
+
+  private computeKatex() {
+    const one = new Int32Array(this.n + 1)
+    const two = new Int32Array(this.n + 1)
+    one[this.n] = two[this.n] = this.n
+    for (let j = this.n - 1; j >= 0; j--) {
+      const text = this.at(j).t
+      const valid = j > 0 && !trailingBackslashesOdd(this.at(j - 1).t)
+      one[j] = valid && text === "$" ? j : one[j + 1]!
+      two[j] = valid && text === "$$" ? j : two[j + 1]!
+    }
+    this.kat1 = one
+    this.kat2 = two
+  }
+
+  /** Where a table's rows from line p end (exclusive). */
+  rowsEnd(p: number): number {
+    if (!this.rows) {
+      const rows = new Int32Array(this.n + 1)
+      rows[this.n] = this.n
+      for (let j = this.n - 1; j >= 0; j--) {
+        const text = this.at(j).t
+        const c = head(text)
+        const stop =
+          (j < this.last && leadSpaces(text) === text.length) ||
+          (j === this.last && text === "") ||
+          isHr(text, c) ||
+          isHeadingStart(text, c) ||
+          isQuote(text, c) ||
+          isCodeLine(text) ||
+          isFenceStart(text, c) ||
+          (isBullet(c) && ROWS_LIST.test(text)) ||
+          SEP.test(text)
+        rows[j] = stop ? j : rows[j + 1]!
+      }
+      this.rows = rows
+    }
+    return p >= this.n ? this.n : this.rows[p]!
+  }
+
+  /** Whether marked's paragraph (gfm, at the top) continues with line q. */
+  paragraphContinues(q: number): boolean {
+    const text = this.text(q)
+    if (text === "") return false
+    const c = head(text)
+    if (
+      isHr(text, c) ||
+      isHeadingStart(text, c) ||
+      isQuote(text, c) ||
+      isFenceStart(text, c) ||
+      ((c === 42 || c === 43 || c === 45 || c === 49) && PARA_LIST.test(text))
+    )
+      return false
+    if (q < this.last && isBlank(text)) return false
+    return !this.tableAt(q)
+  }
+
+  tableAt(q: number): boolean {
+    return q < this.last && isDelimiter(this.text(q + 1)) && HEADER.test(this.text(q))
+  }
+
+  /** The characters of lines [from, to), each with its line break. */
+  chars(from: number, to: number): number {
+    const end = Math.min(to, this.n)
+    if (end <= from) return 0
+    if (!this.sums) {
+      const sums = new Float64Array(this.n + 1)
+      for (let index = 0; index < this.n; index++) sums[index + 1] = sums[index]! + this.at(index).t.length + 1
+      this.sums = sums
+    }
+    let total = this.sums[end]! - this.sums[from]!
+    if (this.ovIndex >= from && this.ovIndex < end) total += this.ovLine!.t.length - this.at(this.ovIndex).t.length
+    return total
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------------------------------------------------
+
+interface Tok {
+  type: string
+  run?: Run
+  row?: number
+  newlines?: number
+  /** A blockquote's raw, as marked builds it (in pieces), and the row of each of its lines (as far as they are known). */
+  raw?: Rope
+  rawRows?: number[]
+  /** A list's raw lines, and the line breaks the lexer added to its raw (a 1-character space after it). */
+  rawLines?: Line[]
+  rawNl?: number
+  mark?: { code: number; math: number; blocks: number }
+}
+
+interface ListResult {
+  tok: Tok
+  /** The list's raw length, which the lexer skips. */
+  rawLength: number
+}
+
+/** Thrown when the model has done more than `modelLimit` allows. */
+class Abort extends Error {}
+
+const itemRegexes = new Map<string, RegExp>()
+interface ItemPatterns {
+  readonly fences: RegExp
+  readonly heading: RegExp
+  readonly quote: RegExp
+  readonly bullet: RegExp
+  readonly hr: RegExp
+}
+/** marked's regexes for the lines after a list item's first, by the item's indentation (clamped to 0-3, as marked). */
+const itemPatterns: ItemPatterns[] = [0, 1, 2, 3].map((k) => ({
+  fences: new RegExp(`^ {0,${k}}(?:\`\`\`|~~~)`),
+  heading: new RegExp(`^ {0,${k}}#`),
+  quote: new RegExp(`^ {0,${k}}>`),
+  bullet: new RegExp(`^ {0,${k}}(?:[*+-]|\\d{1,9}[.)])(?:[ \\t]|$)`),
+  hr: new RegExp(`^ {0,${k}}(?:(?:- *){3,}|(?:_ *){3,}|(?:\\* *){3,})$`),
+}))
+
+class BlockLexer {
+  top = true
+  /** The row of the top-level token being lexed (where the text is cut if the model stops). */
+  topRow = 0
+  readonly sink: Sink
+  readonly modelLimit: number
+
+  constructor(sink: Sink, modelLimit = Infinity) {
+    this.sink = sink
+    this.modelLimit = modelLimit
+  }
+
+  private count(amount: number) {
+    this.sink.model += amount
+    if (this.sink.model > this.modelLimit) throw new Abort()
+  }
+
+  lex(lines: readonly Line[]): Tok[] {
+    this.top = true
+    return this.blockTokens(Level.of(lines), [], false, 0)
+  }
+
+  blockTokens(level: Level, tokens: Tok[], clippedStart: boolean, depth: number): Tok[] {
+    const sink = this.sink
+    let clipped = clippedStart
+    let p = 0
+    let nl = false
+    this.count(level.n)
+    while (level.has(p, nl)) {
+      // A line break the last token left: the space rule takes it with the blank lines after it.
+      if (nl) {
+        let q = p
+        let rawLength = 1
+        let newlines = 1
+        while (q <= level.last && isBlank(level.text(q)) && !(q === level.last && level.text(q) === "")) {
+          rawLength += level.text(q).length + (q < level.last ? 1 : 0)
+          if (q < level.last) newlines++
+          q++
+        }
+        this.space(tokens, rawLength, newlines)
+        p = q
+        nl = false
+        continue
+      }
+      const line = level.get(p)
+      const text = line.t
+      const c = head(text)
+      if (depth === 0) this.topRow = line.r
+
+      // blockKatex
+      const katex = text.charCodeAt(0) === 36 ? level.katex(p) : -1
+      if (katex >= 0) {
+        sink.block(line.r, "math")
+        sink.mathRows.push(line.r)
+        for (let index = p; index <= katex; index++) sink.kind(level.get(index).r, MATH, index === p)
+        sink.spans.push(line.r, level.get(katex).r)
+        tokens.push({ type: "math" })
+        p = katex + 1
+        nl = false
+        continue
+      }
+      if (text.charCodeAt(0) === 36 && KATEX.test(text) && level.followed(p))
+        sink.scan(line.r, level.rowAfter(level.last), 1)
+
+      // space
+      if (isBlank(text)) {
+        let q = p
+        let rawLength = 0
+        let newlines = 0
+        while (q <= level.last && isBlank(level.text(q)) && !(q === level.last && level.text(q) === "" && q > p)) {
+          rawLength += level.text(q).length + (q < level.last ? 1 : 0)
+          if (q < level.last) newlines++
+          q++
+        }
+        this.space(tokens, rawLength, newlines)
+        p = q
+        nl = false
+        continue
+      }
+
+      // code
+      if (isCodeLine(text)) {
+        let q = p + 1
+        let lastCode = p
+        while (q <= level.last) {
+          const next = level.text(q)
+          // A line of spaces and tabs is a blank line between or after code lines (the regex tries that first).
+          if (!isBlank(next)) {
+            if (!isCodeLine(next)) break
+            lastCode = q
+          }
+          q++
+        }
+        // The regex takes the blank lines after the last code line; trimTrailingBlankLines gives them back (and the
+        // line break after the code) unless at most one line's worth follows it.
+        let m = lastCode + 1
+        while (m <= level.last && isBlank(level.text(m))) m++
+        const after = m - lastCode - 1 + (m <= level.last ? 1 : 0)
+        const keep = after <= 1
+        const last = tokens.at(-1)
+        if (last?.type === "paragraph" || last?.type === "text") {
+          for (let index = p; index <= lastCode; index++) {
+            const l = level.get(index)
+            sink.append(last.run!, l.t.replace(CODE_INDENT, "$1"), l.r)
+          }
+          if (keep && after === 1) {
+            const tail = m <= level.last ? "" : level.text(m - 1).replace(CODE_INDENT, "$1")
+            sink.append(last.run!, tail, level.get(lastCode).r)
+          }
+        } else {
+          sink.codeRows.push(line.r)
+          for (let index = p; index <= lastCode; index++) sink.kind(level.get(index).r, CODE, index === p)
+          tokens.push({ type: "code" })
+        }
+        if (keep) {
+          if (m <= level.last) {
+            p = lastCode + 1
+            nl = false
+          } else {
+            p = level.n
+            nl = false
+          }
+        } else {
+          p = lastCode + 1
+          nl = true
+        }
+        continue
+      }
+
+      // fences
+      const fence = c === 96 || c === 126 ? FENCE_OPEN.exec(text) : null
+      if (fence) {
+        const marker = fence[1]!
+        let close = -1
+        for (let q = p + 1; q <= level.last; q++) {
+          const candidate = level.text(q)
+          const lead = /^ {0,3}/.exec(candidate)![0].length
+          if (candidate.startsWith(marker, lead) && /^[~`]* *$/.test(candidate.slice(lead + marker.length))) {
+            close = q
+            break
+          }
+        }
+        const end = close >= 0 ? close : level.last
+        const info = fence[2]!.trim()
+        const math = /^(?:math|latex)$/i.test(info.split(/\s+/)[0] ?? "")
+        sink.codeRows.push(line.r)
+        for (let index = p; index <= end; index++) sink.kind(level.get(index).r, math ? MATH : CODE, index === p)
+        tokens.push({ type: "code" })
+        p = end + 1
+        nl = p <= level.last
+        if (close < 0) {
+          p = level.n
+          nl = false
+        }
+        continue
+      }
+
+      // heading
+      const heading = c === 35 ? HEADING.exec(text) : null
+      if (heading) {
+        let content = heading[2]!.trim()
+        if (/#$/.test(content)) {
+          const trimmed = content.replace(/#+$/, "")
+          if (!trimmed || / $/.test(trimmed)) content = trimmed.trim()
+        }
+        sink.block(line.r, "heading")
+        tokens.push({ type: "heading", run: sink.run(content, line.r) })
+        p++
+        nl = p <= level.last
+        continue
+      }
+
+      // hr
+      if (isHr(text, c)) {
+        sink.block(line.r, "hr")
+        tokens.push({ type: "hr" })
+        p++
+        nl = p <= level.last
+        continue
+      }
+
+      // blockquote
+      if (c === 62) {
+        const result = this.blockquote(level, p, depth)
+        tokens.push(result.tok)
+        ;[p, nl] = this.advance(level, p, result.rawLength)
+        continue
+      }
+
+      // list
+      if (isBullet(c) && LIST_START.test(text)) {
+        const result = this.list(level, p, depth)
+        if (result) {
+          tokens.push(result.tok)
+          ;[p, nl] = this.advance(level, p, result.rawLength)
+          continue
+        }
+      }
+
+      // def (only where genui writes a definition again: the line is one, and it starts a block)
+      const last = tokens.at(-1)
+      if (c === 91) {
+        const definition = DEFINITION.exec(text)
+        if (
+          definition &&
+          /\S/.test(definition[2]!) &&
+          last?.type !== "paragraph" &&
+          last?.type !== "text" &&
+          sink.writable(line.r, text)
+        ) {
+          sink.definition(line.r, text)
+          const tag = definition[2]!.toLowerCase().replace(/\s+/g, " ")
+          if (!sink.links.has(tag)) {
+            sink.links.add(tag)
+            tokens.push({ type: "def" })
+          }
+          p++
+          nl = p <= level.last
+          continue
+        }
+        sink.worked(line.r, this.labelScan(level, p))
+      }
+
+      // table
+      if (level.tableAt(p)) {
+        const header = HEADER.exec(text)![1]!
+        const delimiter = DELIM.exec(level.text(p + 1))![1]!
+        const end = level.rowsEnd(p + 2)
+        const headers = splitCells(header)
+        const aligns = delimiter.replace(/^\||\| *$/g, "").split("|")
+        if (/[:|]/.test(delimiter) && headers.length === aligns.length) {
+          for (const cell of headers) sink.run(cell, line.r)
+          sink.block(line.r, "cell", headers.length)
+          // Rows: marked drops a last row of only spaces and tabs at the end of the source.
+          let rowEnd = end
+          if (rowEnd > p + 2 && rowEnd - 1 === level.last && /^[ \t]*$/.test(level.text(rowEnd - 1))) rowEnd--
+          let any = false
+          for (let index = p + 2; index < rowEnd; index++) if (level.text(index).trim()) any = true
+          if (any) {
+            for (let index = p + 2; index < rowEnd; index++) {
+              // marked pads a row to the header's width with empty cells: counted, not built (a header of 1,000
+              // columns over 30,000 short rows would be 30 million of them).
+              const rowLine = level.get(index)
+              const cells = splitCells(rowLine.t)
+              const real = Math.min(cells.length, headers.length)
+              for (let cell = 0; cell < real; cell++) sink.run(cells[cell]!, rowLine.r)
+              sink.runCount += headers.length - real
+              sink.block(rowLine.r, "cell", headers.length)
+            }
+          }
+          tokens.push({ type: "table" })
+          const lastRow = Math.max(p + 1, end - 1)
+          p = lastRow + 1
+          nl = p <= level.last
+          continue
+        }
+        sink.scan(line.r, level.rowAfter(end - 1), TABLE_RETRY)
+      }
+
+      // lheading
+      const scan = { to: p }
+      const underline = level.setext(p, scan)
+      sink.scan(line.r, level.rowAfter(Math.min(scan.to, level.last)), 1)
+      if (underline >= 0) {
+        let joined = level.text(p)
+        for (let index = p + 1; index < underline; index++) joined += "\n" + level.text(index)
+        const trimmed = joined.trim()
+        sink.block(line.r, "heading")
+        const run = sink.run(trimmed, line.r)
+        if (trimmed.length > MAX_PARAGRAPH) run.over = this.overflowIn(level, p, underline, joined, trimmed)
+        sink.spans.push(line.r, level.get(underline).r)
+        tokens.push({ type: "heading", run })
+        p = underline + 1
+        nl = p <= level.last
+        continue
+      }
+
+      // paragraph (at the top)
+      if (this.top) {
+        let q = p + 1
+        while (q <= level.last && level.paragraphContinues(q)) q++
+        const last = tokens.at(-1)
+        let run: Run
+        if (clipped && last?.type === "paragraph") {
+          run = last.run!
+          sink.append(run, text, line.r)
+        } else {
+          run = sink.run(text, line.r)
+          sink.block(line.r, "paragraph")
+          tokens.push({ type: "paragraph", run })
+        }
+        for (let index = p + 1; index < q; index++) sink.append(run, level.text(index), level.get(index).r)
+        clipped = false
+        p = q
+        nl = p <= level.last
+        continue
+      }
+
+      // text
+      {
+        const last = tokens.at(-1)
+        if (last?.type === "text") sink.append(last.run!, text, line.r)
+        else tokens.push({ type: "text", run: sink.run(text, line.r), row: line.r })
+        p++
+        nl = p <= level.last
+      }
+    }
+    this.top = true
+    return tokens
+  }
+
+  private space(tokens: Tok[], rawLength: number, newlines: number) {
+    const last = tokens.at(-1)
+    if (rawLength === 1 && last !== undefined) {
+      if (last.raw !== undefined) last.raw.append("\n")
+      if (last.rawLines !== undefined) last.rawNl = (last.rawNl ?? 0) + 1
+      if (last.type === "space") last.newlines!++
+    } else tokens.push({ type: "space", newlines })
+  }
+
+  private overflowIn(level: Level, p: number, end: number, joined: string, trimmed: string) {
+    const lead = joined.length - joined.trimStart().length
+    let length = -lead
+    for (let index = p; index < end; index++) {
+      const line = level.get(index)
+      const added = (index > p ? 1 : 0) + line.t.length
+      if (length + added > MAX_PARAGRAPH)
+        return { row: line.r, allowance: Math.max(0, MAX_PARAGRAPH - length), exact: false }
+      length += added
+    }
+    return { row: level.get(p).r, allowance: Math.min(MAX_PARAGRAPH, trimmed.length), exact: false }
+  }
+
+  private labelScan(level: Level, p: number): number {
+    let scanned = 0
+    let first = true
+    for (let index = p; index <= level.last; index++) {
+      const text = level.text(index)
+      let at = first ? text.indexOf("[") + 1 : 0
+      first = false
+      for (; at < text.length; at++) {
+        const char = text[at]
+        if (char === "\\") at++
+        else if (char === "[" || char === "]") return scanned + at
+      }
+      scanned += text.length + 1
+    }
+    return scanned
+  }
+
+  /** Where the lexer is once it skips `length` characters from the start of line p. */
+  private advance(level: Level, p: number, length: number): [number, boolean] {
+    let left = length
+    let index = p
+    while (index <= level.last) {
+      const text = level.text(index)
+      if (left < text.length) {
+        level.override(index, { t: text.slice(left), r: level.get(index).r })
+        return [index, false]
+      }
+      if (left === text.length) return index < level.last ? [index + 1, true] : [level.n, false]
+      left -= text.length + 1
+      index++
+      if (left === 0) return [index, false]
+    }
+    return [level.n, false]
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // blockquote
+  // -------------------------------------------------------------------------------------------------------------------
+
+  blockquote(level: Level, p: number, depth: number): ListResult {
+    const sink = this.sink
+    const end = level.quoteEnd(p)
+    const first = level.get(p)
+    // marked's regex reads the whole run (and its tokenizer splits it into lines), every time it is tried.
+    const quoteEnd = level.rowAfter(end - 1)
+    sink.scan(first.r, quoteEnd, 2)
+    const mark = sink.mark()
+    sink.block(first.r, "blockquote")
+    const tok: Tok = { type: "blockquote", mark }
+    if (depth + 1 > MAX_NESTING) {
+      sink.nestRows.push(first.r)
+      tok.raw = new Rope()
+      tok.rawRows = []
+      return { tok, rawLength: level.chars(p, end) - 1 }
+    }
+    // The regex's lines (a code block can end the token early; the rest is lexed again after it): a few lines marked
+    // made up (`pre`), then the source's from `baseStart`.
+    const base = new Level((at) => level.get(p + at), end - p)
+    let pre: Line[] = []
+    let baseStart = 0
+    const count = () => pre.length + base.n - baseStart
+    const get = (at: number) => (at < pre.length ? pre[at]! : base.get(baseStart + at - pre.length))
+    const tokens: Tok[] = []
+    const raw = new Rope()
+    const rawRows: number[] = []
+    let k = 0
+    while (k < count()) {
+      let inQuote = false
+      const current: Line[] = []
+      let index = k
+      for (; index < count(); index++) {
+        const line = get(index)
+        if (BQ.test(line.t)) {
+          current.push(line)
+          inQuote = true
+        } else if (!inQuote) current.push(line)
+        else break
+      }
+      // marked copies the rest of the run's lines (an array of them) for each segment.
+      sink.scan(current[0]?.r ?? first.r, quoteEnd, 0, QUOTE_COPY_LINE)
+      k = index
+      const currentRaw = current.map((line) => line.t).join("\n")
+      this.count(current.length + currentRaw.length / 16)
+      const currentText = current.map((line, at) => {
+        let text = line.t
+        const setext = at > 0 ? SETEXT.exec(text) : null
+        if (setext) text = `    ${setext[1]}`
+        return { t: text.replace(BQ_STRIP, "$1"), r: line.r }
+      })
+      if (raw.length > 0) raw.append("\n")
+      raw.append(currentRaw)
+      for (const line of current) rawRows.push(line.r)
+      const top = this.top
+      this.top = true
+      this.blockTokens(Level.of(currentText), tokens, true, depth + 1)
+      this.top = top
+      if (k >= count()) break
+      const last = tokens.at(-1)
+      if (last?.type === "code") break
+      if (last?.type === "blockquote") {
+        const rest: Line[] = []
+        for (let at = k; at < count(); at++) rest.push(get(at))
+        const continuation = rest.map((line) => ({ t: line.t.replace(BQ_STRIP, "$1"), r: line.r }))
+        const oldLines = this.rawLinesOf(last)
+        sink.rollback(last.mark!)
+        this.count(rest.length + oldLines.length)
+        const nested = this.blockquote(Level.of(oldLines.concat(continuation)), 0, depth + 1)
+        tokens[tokens.length - 1] = nested.tok
+        raw.append("\n")
+        raw.append(rest.map((line) => line.t).join("\n"))
+        for (const line of rest) rawRows.push(line.r)
+        sink.scan(rest[0]?.r ?? first.r, quoteEnd, 2)
+        break
+      }
+      if (last?.type === "list") {
+        const oldLines = this.rawLinesOf(last)
+        const from = k
+        const view = new Level(
+          (at) => (at < oldLines.length ? oldLines[at]! : get(from + at - oldLines.length)),
+          oldLines.length + count() - from,
+        )
+        sink.rollback(last.mark!)
+        const relisted = this.list(view, 0, depth + 1)!
+        tokens[tokens.length - 1] = relisted.tok
+        // marked's raw: the segment's raw less the old list's (stripped) raw, and the new list's.
+        // Rows follow the raw's lines: the cut takes its lines' rows, the new list's lines after its first add theirs.
+        rawRows.length = Math.max(1, rawRows.length - raw.truncate(rawLength(last)))
+        raw.append(rawText(relisted.tok))
+        for (const line of this.rawLinesOf(relisted.tok).slice(1)) rawRows.push(line.r)
+        // marked joins the rest of the lines to the list's raw and splits what is left again.
+        sink.scan(view.get(oldLines.length).r, quoteEnd, QUOTE_RELIST_CHAR, QUOTE_RELIST_LINE)
+        // What follows the list's raw in its source, split into lines (one empty line when nothing does).
+        const [next, nlAfter] = this.advance(view, 0, relisted.rawLength)
+        const nextPre: Line[] = nlAfter ? [{ t: "", r: view.get(next - 1).r }] : []
+        // View lines before `firstBase` are not the source's; the line at `next` may be a part of one.
+        const firstBase = oldLines.length + Math.max(0, pre.length - from)
+        const baseAt = (v: number) => baseStart + from + v - oldLines.length - pre.length
+        let at = next
+        for (; at < Math.min(firstBase, view.n); at++) nextPre.push(view.get(at))
+        if (at === next && at < view.n) nextPre.push(view.get(at++))
+        const nextBase = at < view.n ? baseAt(Math.max(at, firstBase)) : base.n
+        if (nextPre.length === 0 && nextBase >= base.n) nextPre.push({ t: "", r: view.get(view.n - 1).r })
+        // (`view` reads `pre` and `baseStart`: both change only now.)
+        baseStart = nextBase
+        pre = nextPre
+        this.count(pre.length + relisted.tok.rawLines!.length)
+        k = 0
+        continue
+      }
+    }
+    tok.raw = raw
+    tok.rawRows = rawRows
+    return { tok, rawLength: raw.length }
+  }
+
+  /** A list's or blockquote's raw as lines (marked joins it with what follows and lexes that again). */
+  private rawLinesOf(tok: Tok): Line[] {
+    if (tok.rawLines) {
+      const out = tok.rawLines.slice()
+      const row = out.at(-1)?.r ?? 0
+      for (let added = 0; added < (tok.rawNl ?? 0); added++) out.push({ t: "", r: row })
+      return out
+    }
+    const rows = tok.rawRows!
+    this.count(tok.raw!.length / 16)
+    return tok
+      .raw!.text()
+      .split("\n")
+      .map((t, index) => ({ t, r: rows[Math.min(index, rows.length - 1)] ?? 0 }))
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // list
+  // -------------------------------------------------------------------------------------------------------------------
+
+  list(level: Level, p: number, depth: number): ListResult | undefined {
+    const sink = this.sink
+    const start = LIST_START.exec(level.text(p))
+    if (!start) return undefined
+    let bull = start[1]!.trim()
+    const ordered = bull.length > 1
+    const bullPattern = ordered ? `\\d{1,9}\\${bull.slice(-1)}` : `\\${bull}`
+    let itemRegex = itemRegexes.get(bullPattern)
+    if (!itemRegex) {
+      itemRegex = new RegExp(`^( {0,3}${bullPattern})((?:[\\t ][\\s\\S]*)?)$`)
+      itemRegexes.set(bullPattern, itemRegex)
+    }
+    interface Item {
+      lines: Line[]
+      row: number
+    }
+    const items: Item[] = []
+    const rawLines: Line[] = []
+    let q = p
+    const mark = sink.mark()
+    let loose = false
+    let endsWithBlankLine = false
+    while (level.has(q, false)) {
+      const bulletLine = level.get(q)
+      const cap = itemRegex.exec(bulletLine.t)
+      if (!cap) break
+      if (HR.test(bulletLine.t)) break
+      const itemRaw: Line[] = [bulletLine]
+      let line = expandTabs(cap[2]!, cap[1]!.length)
+      q++
+      let nextLine = q <= level.last ? level.text(q) : ""
+      let blankLine = !line.trim()
+      let indent: number
+      let contents = ""
+      if (blankLine) indent = cap[1]!.length + 1
+      else {
+        indent = firstNonSpace(line)
+        if (indent > 4) indent = 1
+        contents = line.slice(indent)
+        indent += cap[1]!.length
+      }
+      const itemLines: Line[] = [{ t: contents, r: bulletLine.r }]
+      let endEarly = false
+      if (blankLine && /^[ \t]*$/.test(nextLine)) {
+        if (level.has(q, false)) {
+          itemRaw.push(level.get(q))
+          q++
+        }
+        endEarly = true
+      }
+      if (!endEarly) {
+        const patterns = itemPatterns[Math.max(0, Math.min(3, indent - 1))]!
+        const fencesBegin = patterns.fences
+        const headingBegin = patterns.heading
+        const blockquoteBegin = patterns.quote
+        const nextBullet = patterns.bullet
+        const hrBegin = patterns.hr
+        const k = Math.max(0, Math.min(3, indent - 1))
+        // Whether a line can begin one of the patterns that end the item (each starts with at most k spaces).
+        const mayEnd = (text: string) => {
+          const spaces = leadSpaces(text)
+          if (spaces > k) return false
+          const c = text.charCodeAt(spaces)
+          return c === 96 || c === 126 || c === 35 || c === 62 || c === 95 || isBullet(c)
+        }
+        while (level.has(q, false)) {
+          const rawLine = level.get(q)
+          nextLine = rawLine.t
+          const withoutTabs = nextLine.includes("\t") ? nextLine.replace(/\t/g, "    ") : nextLine
+          if (mayEnd(nextLine)) {
+            if (fencesBegin.test(nextLine)) break
+            if (headingBegin.test(nextLine)) break
+            if (blockquoteBegin.test(nextLine)) break
+            if (nextBullet.test(nextLine)) break
+            if (hrBegin.test(nextLine)) break
+          }
+          const blank = !nextLine.trim()
+          if (blank || leadSpaces(withoutTabs) >= indent) {
+            itemLines.push({ t: withoutTabs.slice(indent), r: rawLine.r })
+          } else {
+            if (blankLine) break
+            // (marked's `search(/[^ ]/)`: -1 when the line is only spaces.)
+            const previous = line.includes("\t") ? line.replace(/\t/g, "    ") : line
+            const previousIndent = leadSpaces(previous)
+            if (previousIndent < previous.length && previousIndent >= 4) break
+            if (mayEnd(line) && (fencesBegin.test(line) || headingBegin.test(line) || hrBegin.test(line))) break
+            itemLines.push(rawLine)
+          }
+          blankLine = blank
+          itemRaw.push(rawLine)
+          q++
+          line = withoutTabs.slice(indent)
+        }
+      }
+      if (!loose) {
+        // marked's item raw: the bullet line (with its line break, if any) and each line after it with "\n".
+        let itemRawText = bulletLine.t + (itemRaw.length > 1 || level.followed(q - itemRaw.length) ? "\n" : "")
+        for (let at = 1; at < itemRaw.length; at++) itemRawText += itemRaw[at]!.t + "\n"
+        if (endsWithBlankLine) loose = true
+        else if (/\n[ \t]*\n[ \t]*$/.test(itemRawText)) endsWithBlankLine = true
+      }
+      items.push({ lines: itemLines, row: bulletLine.r })
+      for (const l of itemRaw) rawLines.push(l)
+    }
+    if (items.length === 0) return undefined
+    this.count(rawLines.length)
+    // trimEnd: the last item's text and the list's raw.
+    const lastItem = items.at(-1)!
+    trimEndLines(lastItem.lines)
+    const trimmedRaw = rawLines
+    trimEndLines(trimmedRaw)
+    const tok: Tok = { type: "list", rawLines: trimmedRaw, rawNl: 0, mark }
+    // Items' contents.
+    const firstRuns: number[] = []
+    const itemTokens: Tok[][] = []
+    for (const item of items) {
+      sink.block(item.row, "item")
+      this.top = false
+      if (depth + 1 > MAX_NESTING) {
+        sink.nestRows.push(item.row)
+        this.top = true
+        firstRuns.push(-1)
+        continue
+      }
+      const tokens = this.blockTokens(Level.of(item.lines), [], false, depth + 1)
+      itemTokens.push(tokens)
+      if (!loose) loose = tokens.some((token) => token.type === "space" && token.newlines! >= 2)
+      const firstToken = tokens[0]
+      firstRuns.push(firstToken && (firstToken.type === "text" || firstToken.type === "paragraph") ? 1 : -1)
+    }
+    // Task items: marked looks for the last queued run that starts with a task marker, from the end of the queue, and
+    // takes the marker off it (which may not be the item's own run).
+    items.forEach((item, index) => {
+      if (!TASK.test(item.lines[0]?.t ?? "") || firstRuns[index]! < 0) return
+      const at = sink.tasks.pop()
+      const place = sink.tasks.pop()
+      // Each scan is the item's (cut before it, there is no scan).
+      sink.worked(item.row, 8 * (sink.runCount - (place ?? 0)))
+      if (at === undefined || place === undefined) return
+      const run = sink.runs[at]!
+      const marker = TASK_MARK.exec(run.head.slice(run.off))![0]
+      run.off += marker.length
+      run.len -= marker.length
+      if (TASK.test(run.head.slice(run.off))) sink.tasks.push(place, at)
+    })
+    // A loose list's items show their text as paragraphs.
+    if (loose)
+      for (const tokens of itemTokens)
+        for (const token of tokens) if (token.type === "text") sink.block(token.row!, "paragraph")
+    return { tok, rawLength: rawLength(tok) }
+  }
+}
+
+/** A string built by appending and cutting from the end, as marked builds a blockquote's raw. */
+class Rope {
+  private readonly pieces: string[] = []
+  length = 0
+  append(text: string) {
+    if (text === "") return
+    this.pieces.push(text)
+    this.length += text.length
+  }
+  /** Cuts `count` characters from the end; returns how many line breaks went with them. */
+  truncate(count: number): number {
+    let left = Math.min(count, this.length)
+    this.length -= left
+    let breaks = 0
+    const countBreaks = (text: string) => {
+      for (let index = text.indexOf("\n"); index >= 0; index = text.indexOf("\n", index + 1)) breaks++
+    }
+    while (left > 0) {
+      const last = this.pieces.pop()!
+      if (last.length > left) {
+        countBreaks(last.slice(last.length - left))
+        this.pieces.push(last.slice(0, last.length - left))
+        left = 0
+      } else {
+        countBreaks(last)
+        left -= last.length
+      }
+    }
+    return breaks
+  }
+  text(): string {
+    const joined = this.pieces.join("")
+    this.pieces.length = 0
+    this.pieces.push(joined)
+    return joined
+  }
+}
+
+/** A list's or blockquote's raw, as marked keeps it. */
+function rawText(tok: Tok): string {
+  if (tok.rawLines) return tok.rawLines.map((line) => line.t).join("\n") + "\n".repeat(tok.rawNl ?? 0)
+  return tok.raw!.text()
+}
+
+function rawLength(tok: Tok): number {
+  if (!tok.rawLines) return tok.raw!.length
+  let length = Math.max(0, tok.rawLines.length - 1) + (tok.rawNl ?? 0)
+  for (const line of tok.rawLines) length += line.t.length
+  return length
+}
+
+/** String.prototype.trimEnd over lines joined with "\n". */
+function trimEndLines(lines: Line[]) {
+  while (lines.length > 0 && /^\s*$/.test(lines.at(-1)!.t)) {
+    if (lines.length === 1) {
+      lines[0] = { t: "", r: lines[0]!.r }
+      return
+    }
+    lines.pop()
+  }
+  const last = lines.at(-1)
+  if (last) lines[lines.length - 1] = { t: last.t.trimEnd(), r: last.r }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What a text shows and builds
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Why a Markdown text is cut (see `markdownShape`). */
+export type MarkdownCutReason = "text" | "paragraph" | "blocks" | "nesting" | "work" | "lines"
+
+/** Where a Markdown text is cut, and why. */
+export interface MarkdownCut {
+  /** How many of the text's characters show (its length when nothing is cut). */
+  readonly shown: number
+  readonly reason?: MarkdownCutReason
+}
+
+/**
+ * What a Markdown text shows and what the app builds for that: where it is cut, the code blocks (fenced, indented,
+ * display math; `own` of them shown on their own, see MAX_CODE_PARTS) in what shows, and the blocks there beyond what
+ * its length pays for (see MAX_MARKDOWN_BLOCKS and CHARS_PER_BLOCK). The render budget charges these
+ * (src/gui/costs.ts).
+ */
+export interface MarkdownShape {
+  readonly cut: MarkdownCut
+  readonly code: number
+  readonly own: number
+  readonly blocks: number
+}
+
+/** A text's lines as marked splits them (it reads "\r\n" and "\r" as "\n"), and where each starts in the text. */
+function textRows(text: string): { readonly rows: string[]; readonly starts: number[] } {
+  const rows: string[] = []
+  const starts: number[] = []
+  const breaks = /\r\n|\r|\n/g
+  let at = 0
+  for (;;) {
+    const found = breaks.exec(text)
+    rows.push(text.slice(at, found ? found.index : text.length))
+    starts.push(at)
+    if (!found) break
+    at = found.index + found[0].length
+  }
+  return { rows, starts }
+}
+
+/**
+ * What the model may do for a text of these many characters and lines before it stops (a few dozen times its lines:
+ * an ordinary text needs a few). Only text built for it gets there, by making marked rebuild a blockquote's raw for
+ * every one of its lines; the text is then cut where the model stopped.
+ */
+const modelLimit = (chars: number, lines: number) => 32 * (lines + chars / 16) + 100_000
+
+/**
+ * How many characters of a row to show so that at most `allowance` of them reach marked: as many when marked reads the
+ * row as written (`exact`); else four fewer, with a tab counted four (marked may widen a tab in a list item, and add
+ * up to four spaces before a quote's underline-like line).
+ */
+function within(text: string, allowance: number, exact: boolean): number {
+  if (exact) return Math.min(text.length, allowance)
+  let width = 4
+  let index = 0
+  for (; index < text.length; index++) {
+    width += text.charCodeAt(index) === 9 ? 4 : 1
+    if (width > allowance) break
+  }
+  return index
+}
+
+/** A row that may be a table's delimiter row in some container (its markers and indentation before it). */
+const DELIMITER_ROW =
+  /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+[ \t>]*)*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/
+
+/** The row a position of the text is in. */
+function rowAt(starts: readonly number[], position: number): number {
+  let low = 0
+  let high = starts.length - 1
+  while (low < high) {
+    const middle = (low + high + 1) >> 1
+    if (starts[middle]! <= position) low = middle
+    else high = middle - 1
+  }
+  return low
+}
+
+/** The model's findings for a text of rows, lexed in the parts `splitMarkdown` splits it into. */
+function lexRows(rows: readonly string[], sink: Sink, lexer: BlockLexer, own: number[]): void {
+  for (const segment of fenceSegments(rows)) {
+    if (segment.code) {
+      own.push(segment.from)
+      continue
+    }
+    sink.beginSegment()
+    const lines: Line[] = []
+    for (let row = segment.from; row < segment.to; row++) lines.push({ t: rows[row]!, r: row })
+    lexer.lex(lines)
+  }
+}
+
+function measure(text: string): MarkdownShape {
+  const source = text.length > MAX_MARKDOWN_TEXT ? text.slice(0, MAX_MARKDOWN_TEXT) : text
+  const { rows, starts } = textRows(source)
+  const sink = new Sink(rows)
+  const lexer = new BlockLexer(sink, modelLimit(source.length, rows.length))
+  const own: number[] = []
+  let stopped = -1
+  try {
+    lexRows(rows, sink, lexer, own)
+  } catch (error) {
+    if (!(error instanceof Abort)) throw error
+    stopped = lexer.topRow
+  }
+
+  let cut = Infinity
+  let reason: MarkdownCutReason | undefined
+  const consider = (position: number, why: MarkdownCutReason) => {
+    if (position < cut) [cut, reason] = [position, why]
+  }
+  if (text.length > MAX_MARKDOWN_TEXT) consider(MAX_MARKDOWN_TEXT, "text")
+  if (stopped >= 0) consider(starts[stopped]!, "work")
+  for (const row of sink.nestRows) consider(starts[row]!, "nesting")
+  for (const run of sink.runs)
+    if (run.over)
+      consider(starts[run.over.row]! + within(rows[run.over.row]!, run.over.allowance, run.over.exact), "paragraph")
+  // Blocks (beyond what the text before them pays for) and work, counted in the order of the text.
+  const perRow = new Float64Array(rows.length)
+  sink.blockRows.forEach((row, index) => (perRow[row]! += sink.blockCounts[index]!))
+  for (let row = 0, total = 0; row < rows.length; row++) {
+    total += perRow[row]!
+    if (total - Math.floor((starts[row + 1] ?? source.length) / CHARS_PER_BLOCK) > MAX_MARKDOWN_BLOCKS) {
+      consider(starts[row]!, "blocks")
+      break
+    }
+  }
+  // marked's work on the text up to the start of each row: the work at earlier rows, and of each scan that starts
+  // before it, the part before it (cut there, a scan stops at the cut).
+  for (let row = 0, total = 0, reading = 0, readingLines = 0; row < rows.length; row++) {
+    reading += sink.opens[row]! - sink.closes[row]!
+    readingLines += sink.lineOpens[row]! - sink.lineCloses[row]!
+    total += sink.work[row]! + reading * ((starts[row + 1] ?? source.length) - starts[row]!) + readingLines
+    if (total > MAX_BLOCK_WORK) {
+      consider(starts[row]!, "work")
+      break
+    }
+  }
+  // A cut inside a setext heading or display math moves to its first line, and one inside a line followed by a
+  // table's delimiter row (a header, or a line marked's paragraph stops at for one) to that line's start: cut there,
+  // those lines would be lexed again as other blocks, joined to the run before them, at a cost the count above did not
+  // see.
+  const settle = (position: number) => {
+    let at = position
+    for (let moved = true; moved && at < Infinity; ) {
+      moved = false
+      for (let index = 0; index < sink.spans.length; index += 2) {
+        const first = starts[sink.spans[index]!]!
+        const end = starts[sink.spans[index + 1]! + 1] ?? source.length
+        if (at > first && at < end) [at, moved] = [first, true]
+      }
+      const row = rowAt(starts, at)
+      if (at > starts[row]! && row + 1 < rows.length && DELIMITER_ROW.test(rows[row + 1]!))
+        [at, moved] = [starts[row]!, true]
+    }
+    return at
+  }
+  cut = settle(cut)
+  let shown = text.length
+  if (cut < text.length) {
+    // Never between the halves of a surrogate pair.
+    const high = text.charCodeAt(cut - 1)
+    shown = high >= 0xd800 && high <= 0xdbff ? cut - 1 : cut
+  } else reason = undefined
+  // What the renderer gets is the text neutralized: cut again where the model reads that otherwise.
+  const checked = checkedParts(text, starts, shown, currentImageLabel, false, settle)
+  if (checked.recut) [shown, reason] = [checked.shown, "lines"]
+  const visible = (row: number) => starts[row]! < shown
+  const count = (rowsOf: readonly number[]) => rowsOf.reduce((total, row) => total + (visible(row) ? 1 : 0), 0)
+  const ownShown = count(own)
+  let blocks = 0
+  sink.blockRows.forEach((row, index) => (blocks += visible(row) ? sink.blockCounts[index]! : 0))
+  return {
+    cut: reason ? { shown, reason } : { shown },
+    code: count(sink.codeRows) + count(sink.mathRows) + ownShown,
+    own: ownShown,
+    // The blocks the text's length does not pay for (see CHARS_PER_BLOCK).
+    blocks: Math.min(MAX_MARKDOWN_BLOCKS, Math.max(0, blocks - Math.floor(shown / CHARS_PER_BLOCK))),
+  }
+}
+
+/**
+ * How many characters of text the shapes of recent texts are kept for at most (and SHAPE_CACHE_SIZE texts), besides
+ * the newest text whatever its length: as many as one UI's elements keep of what expressions build (KEPT_PER_SURFACE
+ * in src/runtime/budget.ts). The texts are the keys: kept by count alone, 64 texts of a million characters that a
+ * `$template` built stayed in memory (63 MB) after their elements were gone.
+ */
+export const SHAPE_CACHE_CHARS = 2_000_000
+const SHAPE_CACHE_SIZE = 64
+
+// The shapes of recent texts, least recently used first: the rows of a repeat share one text, which is measured once.
+const shapes = new Map<string, MarkdownShape>()
+let shapeChars = 0
+
+/** How many characters of text the shapes cache holds (for tests). */
+export const shapeCacheChars = (): number => shapeChars
+
+/**
+ * What a Markdown text shows and builds (see MarkdownShape): up to MAX_MARKDOWN_TEXT characters, cut where marked
+ * would hand its inline lexer a run past MAX_PARAGRAPH, where blocks pass MAX_MARKDOWN_BLOCKS beyond one per
+ * CHARS_PER_BLOCK characters, where containers nest past MAX_NESTING, where marked's block lexer has scanned more
+ * than MAX_BLOCK_WORK, or where the model reads the text neutralized otherwise than as written (see `checkedParts`);
+ * on a code point's boundary.
+ */
+export function markdownShape(text: string): MarkdownShape {
+  let shape = shapes.get(text)
+  if (shape !== undefined) {
+    shapes.delete(text)
+    shapes.set(text, shape)
+    return shape
+  }
+  shape = measure(text)
+  shapes.set(text, shape)
+  shapeChars += text.length
+  for (const [oldest] of shapes) {
+    if (oldest === text || (shapes.size <= SHAPE_CACHE_SIZE && shapeChars <= SHAPE_CACHE_CHARS)) break
+    shapes.delete(oldest)
+    shapeChars -= oldest.length
+  }
+  return shape
+}
+
+/** How much of a Markdown text shows (see `markdownShape`). */
+export const shownLength = (text: string): MarkdownCut => markdownShape(text).cut
+
+/**
+ * A Markdown text's code blocks: all it renders (fenced, indented, display math), and those it shows on their own
+ * (see MAX_CODE_PARTS). Each is a code block of the app's renderer (display math past the math budget too).
  */
 export interface CodeBlocks {
   readonly total: number
   readonly own: number
 }
-const NO_CODE: CodeBlocks = Object.freeze({ total: 0, own: 0 })
 
-// The code blocks of recent texts (see codeBlocks): the rows of a repeat share one text, which is counted once.
-const codeCounts = new Map<string, CodeBlocks>()
-
-/** A Markdown text's code blocks (see CodeBlocks), for its charge in the render budget. */
+/** A Markdown text's code blocks in what shows (see CodeBlocks), for its charge in the render budget. */
 export function codeBlocks(text: string): CodeBlocks {
-  if (!text.includes("```") && !text.includes("~~~") && !/^(?: {4}| {0,3}\t)/m.test(text)) return NO_CODE
-  let known = codeCounts.get(text)
-  if (known === undefined) {
-    let own = 0
-    let total = 0
-    for (const part of splitMarkdown(text)) {
-      if (part.kind === "code") own++
-      else total += codeStarts(part.text.split("\n"))
-    }
-    known = own + total === 0 ? NO_CODE : { total: own + total, own }
-    if (codeCounts.size >= 64) codeCounts.delete(codeCounts.keys().next().value!)
-    codeCounts.set(text, known)
-  }
-  return known
+  const { code, own } = markdownShape(text)
+  return { total: code, own }
 }
-
-/** How many code blocks the lines of a prose text open (see lineKinds): fenced ones, and runs of indented code. */
-function codeStarts(lines: readonly string[]): number {
-  const starts = { count: 0 }
-  lineKinds(lines, starts)
-  return starts.count
-}
-
-type LineKind = "prose" | "code" | "math"
-
-/** A display-math block's opening line (`$` or `$$` alone, as the app's KaTeX extension reads it). */
-const MATH_BLOCK = /^\${1,2}$/
 
 /**
- * What each line of a prose text is. Nothing is rewritten in code and math (step 2 above): fenced blocks (math, quoted
- * or in a list item, or any other fence when the text was not split), indented code after a blank line, and display
- * math blocks.
+ * What the model finds in a text lexed whole (as one part), for the tests (test/unit/review8-markdown.test.ts): code
+ * blocks, display math, blocks by type, each inline run's length, and the rows genui writes again as definitions.
  */
-function lineKinds(lines: readonly string[], code?: { count: number }): LineKind[] {
-  // Whether the same `$` or `$$` line comes later, computed once from the end (a search per line was quadratic).
-  const closed: boolean[] = []
-  const seen = new Set<string>()
-  for (let index = lines.length - 1; index >= 0; index--) {
-    const line = lines[index]!
-    closed[index] = seen.has(line)
-    if (MATH_BLOCK.test(line)) seen.add(line)
+export function blockStructure(text: string) {
+  const { rows } = textRows(text)
+  const sink = new Sink(rows, new Uint8Array(rows.length), new Uint8Array(rows.length))
+  new BlockLexer(sink).lex(rows.map((t, r) => ({ t, r })))
+  const blocks: Record<string, number> = {}
+  sink.blockTypes.forEach((type, index) => (blocks[type] = (blocks[type] ?? 0) + sink.blockCounts[index]!))
+  return {
+    code: sink.codeRows.length,
+    math: sink.mathRows.length,
+    blocks,
+    // (A padded table cell is an empty run.)
+    runs: [...sink.runs.map((run) => run.len), ...Array.from({ length: sink.runCount - sink.runs.length }, () => 0)],
+    definitions: [...sink.definitions.keys()],
+    rows,
   }
-  const kinds: LineKind[] = []
-  let fence: (Fence & { kind: LineKind }) | undefined
-  let mathBlock: string | undefined
-  let blank = true
-  let indented = false
-  for (const [index, line] of lines.entries()) {
-    if (fence) {
-      kinds.push(fence.kind)
-      if (closes(fence, NESTED_CLOSE.exec(line))) fence = undefined
-      blank = indented = false
-      continue
-    }
-    if (mathBlock !== undefined) {
-      kinds.push("math")
-      if (line === mathBlock) mathBlock = undefined
-      blank = indented = false
-      continue
-    }
-    const nested = NESTED_FENCE.exec(line)
-    const start = nested ? null : FENCE.exec(line)
-    const open = nested ? opening(nested[1], nested[2]!) : opening(start?.[2], start?.[3] ?? "")
-    if (open) {
-      const math = !!start && MATH_FENCES.has(languageOf(start[3]!).toLowerCase())
-      fence = { ...open, kind: math ? "math" : "code" }
-      if (code && !math) code.count++
-      kinds.push(fence.kind)
-      blank = indented = false
-      continue
-    }
-    if (blank && MATH_BLOCK.test(line) && closed[index]) {
-      mathBlock = line
-      kinds.push("math")
-      blank = indented = false
-      continue
-    }
-    const empty = line.trim() === ""
-    const isCode: boolean = !empty && /^(?: {4}| {0,3}\t)/.test(line) && (blank || indented)
-    if (code && isCode && !indented) code.count++
-    kinds.push(isCode ? "code" : "prose")
-    indented = isCode || (indented && empty)
-    blank = empty
-  }
-  return kinds
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -382,8 +1911,11 @@ const encodeTarget = (url: string) =>
 
 const MAX_TITLE = 1000
 
-/** A link title as genui writes it: single-quoted, defused, on one line, with no `"` that could end the attribute. */
-function titlePart(url: string, title: string): string {
+/**
+ * A link title as genui writes it: quoted (single quotes in a link; double quotes in a definition, whose title marked
+ * reads without escapes), defused, on one line, with no `"` that could end the attribute.
+ */
+function titlePart(url: string, title: string, quote: "'" | '"' = "'"): string {
   const own = title.replace(/\s+/g, " ").trim()
   const text = own && url ? `${own} (${url})` : own || url
   if (!text) return ""
@@ -391,7 +1923,7 @@ function titlePart(url: string, title: string): string {
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replaceAll('"', "&#34;")
     .replace(/[\\'|]/g, "\\$&")
-  return ` '${safe}'`
+  return ` ${quote}${safe}${quote}`
 }
 
 const ASCII_PUNCTUATION = /^[!-/:-@[-`{-~]$/
@@ -536,6 +2068,11 @@ function closingBracket(src: string, open: number, work: LinkWork): number {
   return found
 }
 
+function skipBlanks(src: string, index: number): number {
+  while (src[index] === " " || src[index] === "\t") index++
+  return index
+}
+
 function skipSpace(src: string, index: number): number {
   while (src[index] === " " || src[index] === "\t") index++
   if (src[index] === "\n" && !blankAfter(src, index)) {
@@ -565,9 +2102,13 @@ function parseLink(src: string, open: number, work: LinkWork): ParsedLink | unde
   }
 }
 
-/** The rest of an inline link after its `](`: the address and title, and the closing `)`. `scan.at` is how far it read. */
+/**
+ * The rest of an inline link after its `](`: the address and title, and the closing `)`, on the same line (a link that
+ * goes on to another line stays text: written on one line, it would join lines that marked may read as other blocks).
+ * `scan.at` is how far it read.
+ */
 function parseDestination(src: string, open: number, close: number, scan: { at: number }): ParsedLink | undefined {
-  let index = skipSpace(src, close + 2)
+  let index = skipBlanks(src, close + 2)
   let address: string
   if (src[index] === "<") {
     let end = index + 1
@@ -599,7 +2140,7 @@ function parseDestination(src: string, open: number, close: number, scan: { at: 
     address = src.slice(start, index)
   }
   let title = ""
-  const spaced = skipSpace(src, index)
+  const spaced = skipBlanks(src, index)
   const quote = src[spaced]
   if (spaced > index && (quote === '"' || quote === "'" || quote === "(")) {
     const end = quote === "(" ? ")" : quote
@@ -607,7 +2148,7 @@ function parseDestination(src: string, open: number, close: number, scan: { at: 
     let valid = true
     for (; at < src.length && src[at] !== end; at++) {
       if (src[at] === "\\" && isEscapable(src[at + 1])) at++
-      else if ((quote === "(" && src[at] === "(") || (src[at] === "\n" && blankAfter(src, at))) {
+      else if ((quote === "(" && src[at] === "(") || src[at] === "\n") {
         valid = false
         break
       }
@@ -615,7 +2156,7 @@ function parseDestination(src: string, open: number, close: number, scan: { at: 
     scan.at = at
     if (!valid || src[at] !== end) return undefined
     title = src.slice(spaced + 1, at)
-    index = skipSpace(src, at + 1)
+    index = skipBlanks(src, at + 1)
   } else index = spaced
   scan.at = index
   if (src[index] !== ")") return undefined
@@ -808,7 +2349,8 @@ function referenceImage(src: string, open: number, work: LinkWork, definitions: 
   const label = src.slice(open + 1, close)
   if (src[close + 1] === "[") {
     const end = closingBracket(src, close + 1, work)
-    const reference = end === -1 ? undefined : src.slice(close + 2, end)
+    // (The reference goes; across a line break, that would join lines.)
+    const reference = end === -1 || src.slice(close + 1, end).includes("\n") ? undefined : src.slice(close + 2, end)
     const found = reference === undefined ? undefined : definitions.get(definitionKey(reference || label))
     if (found) return { label, ...found, end: end + 1 }
   }
@@ -1028,40 +2570,26 @@ function charBefore(text: string, index: number): string {
 const DEFINITION =
   /^( {0,3})\[((?:\\[\s\S]|[^\\[\]])+)\]:[ \t]*(?:<((?:\\.|[^\\<>\n])*)>|(\S+))(?:[ \t]+("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?[ \t]*$/
 
-interface DefinitionLine {
-  readonly indent: string
-  readonly label: string
-  readonly url: string
-  readonly title: string
+/** A definition (a row's text as marked reads it, see Sink.definitions) as genui writes it again. */
+function definitionText(match: RegExpExecArray): string {
+  const target = safeUrl(unescape(match[3] ?? match[4]!), "link") ?? ""
+  const title = match[5] ? unescape(match[5].slice(1, -1)) : ""
+  return `${match[1]}[${defuse(match[2]!)}]: ${LINK_PREFIX}${encodeTarget(target)}${titlePart(target, title, '"')}`
 }
 
 /**
- * The reference definitions of a prose group, by line (undefined for other lines): a definition cannot interrupt a
- * paragraph, so it starts the group, follows a blank line or follows another definition.
+ * A prose run: the definitions marked reads in it written again (`rowDefinitions`, by row from `first`), the rest
+ * through `inline`, a paragraph at a time (inline syntax never crosses a blank line, and the emphasis budget is per
+ * paragraph's scans).
  */
-function definitionLines(lines: readonly string[]): (DefinitionLine | undefined)[] {
-  let previousBlank = true
-  let previousDefinition = false
-  return lines.map((line) => {
-    const found: RegExpExecArray | null = previousBlank || previousDefinition ? DEFINITION.exec(line) : null
-    const match: RegExpExecArray | null = found && /\S/.test(found[2]!) ? found : null
-    previousDefinition = !!match
-    previousBlank = line.trim() === ""
-    if (!match) return undefined
-    return {
-      indent: match[1]!,
-      label: match[2]!,
-      url: unescape(match[3] ?? match[4]!),
-      title: match[5] ? unescape(match[5].slice(1, -1)) : "",
-    }
-  })
-}
-
-/**
- * A prose run: reference definitions written again, the rest through `inline`, a paragraph at a time (inline syntax
- * never crosses a blank line, and the emphasis budget is per paragraph's scans).
- */
-function prose(lines: readonly string[], imageLabel: string, definitions: Definitions, budget: MarkdownBudget): string {
+function prose(
+  lines: readonly string[],
+  first: number,
+  rowDefinitions: ReadonlyMap<number, string>,
+  imageLabel: string,
+  definitions: Definitions,
+  budget: MarkdownBudget,
+): string {
   const out: string[] = []
   let run: string[] = []
   const paragraph = (text: string) => inline(text, imageLabel, definitions, emphasisCutoff(text, budget), budget)
@@ -1075,15 +2603,12 @@ function prose(lines: readonly string[], imageLabel: string, definitions: Defini
     }
     run = []
   }
-  const found = definitionLines(lines)
   lines.forEach((line, index) => {
-    const definition = found[index]
-    if (definition) {
+    const text = rowDefinitions.get(first + index)
+    const match = text === undefined ? null : DEFINITION.exec(text)
+    if (match && text !== undefined) {
       flush()
-      const target = safeUrl(definition.url, "link") ?? ""
-      out.push(
-        `${definition.indent}[${defuse(definition.label)}]: ${LINK_PREFIX}${encodeTarget(target)}${titlePart(target, definition.title)}`,
-      )
+      out.push(line.slice(0, line.length - text.length) + definitionText(match))
     } else run.push(line)
   })
   flush()
@@ -1101,46 +2626,189 @@ export function neutralizeMarkdown(
   imageLabel: string,
   budget: MarkdownBudget = markdownBudget(text.length),
 ): string {
+  const lines = text.split("\n")
   try {
-    return neutralizeLines(text.split("\n"), imageLabel, budget)
+    return neutralizeLines(lines, imageLabel, budget, partModel(lines)).join("\n")
   } finally {
     spanCache.clear()
     bracketCache.clear()
   }
 }
 
-function neutralizeLines(lines: readonly string[], imageLabel: string, budget: MarkdownBudget): string {
-  const kinds = lineKinds(lines)
-  const groups: { readonly kind: (typeof kinds)[number]; readonly lines: readonly string[] }[] = []
-  for (let start = 0; start < lines.length; ) {
-    let end = start
-    while (end < lines.length && kinds[end] === kinds[start]) end++
-    groups.push({ kind: kinds[start]!, lines: lines.slice(start, end) })
-    start = end
+/** What the model finds in one part's lines (see Sink): what each row is, and the structure it reads. */
+interface PartModel {
+  readonly kinds: Uint8Array
+  readonly starts: Uint8Array
+  readonly definitions: ReadonlyMap<number, string>
+  readonly sink: Sink
+  /** The row of the top-level block where the model stopped, on text built to make it slow (-1: it did not). */
+  readonly stopped: number
+}
+
+/** What marked makes of each row (see Sink): its kind, whether it starts a code or math block, its definitions. */
+function partModel(lines: readonly string[]): PartModel {
+  const kinds = new Uint8Array(lines.length)
+  const starts = new Uint8Array(lines.length)
+  const sink = new Sink(lines, kinds, starts)
+  let chars = 0
+  for (const line of lines) chars += line.length + 1
+  const lexer = new BlockLexer(sink, modelLimit(chars, lines.length))
+  try {
+    lexer.lex(lines.map((t, r) => ({ t, r })))
+    return { kinds, starts, definitions: sink.definitions, sink, stopped: -1 }
+  } catch (error) {
+    // Text built to make the model slow: all prose (written again, and defused, as such).
+    if (!(error instanceof Abort)) throw error
+    kinds.fill(PROSE)
+    starts.fill(0)
+    return { kinds, starts, definitions: new Map<number, string>(), sink, stopped: lexer.topRow }
   }
-  // A reference may come before its definition: all of the text's definitions are read first.
-  const definitions = new Map<string, { url: string; title: string }>()
-  for (const group of groups) {
-    if (group.kind !== "prose") continue
-    for (const definition of definitionLines(group.lines)) {
-      const key = definition && definitionKey(definition.label)
-      if (key && !definitions.has(key)) definitions.set(key, { url: definition.url, title: definition.title })
-    }
-  }
-  return groups
-    .map((group) =>
-      group.kind === "prose"
-        ? prose(group.lines, imageLabel, definitions, budget)
-        : group.kind === "math"
-          ? mathGroup(group.lines, budget)
-          : defuse(group.lines.join("\n")),
-    )
-    .join("\n")
+}
+
+const BLOCK_TYPES: Readonly<Record<string, number>> = {
+  heading: 2,
+  hr: 3,
+  cell: 5,
+  paragraph: 6,
+  blockquote: 7,
+  item: 8,
 }
 
 /**
- * A display-math block or a math fence, as math while the budget pays for it; past that, a fence as plain code and a
- * `$$` block as text.
+ * The structure the model read in a part, as (row, event) pairs sorted by row (events of a row in the order they were
+ * found): each inline run's first row and the rows added to it, code and math blocks, blocks (type and count; a math
+ * block is its rows), nesting past MAX_NESTING, and each row's kind.
+ */
+function structureEvents(model: PartModel, rowCount: number): { rows: Int32Array; events: Float64Array } {
+  const { sink, kinds, starts } = model
+  const rowList: number[] = []
+  const eventList: number[] = []
+  const add = (row: number, event: number) => {
+    rowList.push(Math.max(0, Math.min(rowCount, row)))
+    eventList.push(event)
+  }
+  for (const run of sink.runs) add(run.row, 1)
+  for (const row of sink.appended) add(row, 2)
+  for (const row of sink.codeRows) add(row, 3)
+  for (const row of sink.mathRows) add(row, 4)
+  for (const row of sink.nestRows) add(row, 5)
+  sink.blockRows.forEach((row, index) => {
+    const type = sink.blockTypes[index]!
+    if (type !== "math") add(row, 16 + (BLOCK_TYPES[type] ?? 15) + 16 * sink.blockCounts[index]!)
+  })
+  for (let row = 0; row < rowCount; row++) if (kinds[row] || starts[row]) add(row, 8 + 2 * kinds[row]! + starts[row]!)
+  // Sorted by row, stably.
+  const firsts = new Int32Array(rowCount + 2)
+  for (const row of rowList) firsts[row + 1]!++
+  for (let row = 0; row <= rowCount; row++) firsts[row + 1]! += firsts[row]!
+  const rows = new Int32Array(rowList.length)
+  const events = new Float64Array(rowList.length)
+  rowList.forEach((row, index) => {
+    const at = firsts[row]!++
+    rows[at] = row
+    events[at] = eventList[index]!
+  })
+  return { rows, events }
+}
+
+/**
+ * Whether an event of a part as written (`was`) is the same one neutralized (`is`): display math genui writes as a code
+ * block past the math budget (see `mathGroup`) is one, as the model reads it (and costs the same); nothing else is.
+ */
+const sameEvent = (was: number, is: number) =>
+  was === is || (was === 4 && is === 3) || ((was === 8 + 2 * MATH || was === 9 + 2 * MATH) && is === was - 2)
+
+/**
+ * The first row where the model reads a part as written (`a`) and neutralized (`b`) differently (-1: it reads them
+ * alike).
+ */
+function divergence(a: PartModel, b: PartModel, rowCount: number): number {
+  const x = structureEvents(a, rowCount)
+  const y = structureEvents(b, rowCount)
+  const length = Math.min(x.rows.length, y.rows.length)
+  for (let index = 0; index < length; index++)
+    if (x.rows[index] !== y.rows[index] || !sameEvent(x.events[index]!, y.events[index]!))
+      return Math.min(x.rows[index]!, y.rows[index]!)
+  if (x.rows.length !== y.rows.length) return (x.rows.length > length ? x.rows : y.rows)[length]!
+  return -1
+}
+
+/**
+ * One part's lines neutralized (as rows), and the first row where the model reads them otherwise than it reads the
+ * part as written (-1: none). Neutralizing lengthens lines (a joiner, a link written again, a character reference), and
+ * marked decides some structure by a line's length or by the characters at a column (a list item's lazy lines): read
+ * otherwise, a line neutralized as code could reach marked's inline lexer past every budget, or a code block marked
+ * renders go uncounted.
+ */
+function neutralizePart(
+  lines: readonly string[],
+  imageLabel: string,
+  budget: MarkdownBudget,
+  check: boolean,
+): { rows: string[]; diverges: number } {
+  const model = partModel(lines)
+  const rows = neutralizeLines(lines, imageLabel, budget, model)
+  if (!check) return { rows, diverges: -1 }
+  if (model.stopped >= 0) return { rows, diverges: model.stopped }
+  // (Neutralizing keeps every line: no line break is added or taken away.)
+  if (rows.length !== lines.length) return { rows, diverges: 0 }
+  let changed = false
+  for (let row = 0; row < rows.length && !changed; row++) changed = rows[row] !== lines[row]
+  if (!changed) return { rows, diverges: -1 }
+  const after = partModel(rows)
+  return { rows, diverges: after.stopped >= 0 ? after.stopped : divergence(model, after, rows.length) }
+}
+
+/** A line ending in `<…>`: marked's setext rule stops at one (see neutralizeLines). */
+const TAG_LINE = /<[^>]*>$/
+
+/** A part's lines neutralized as the model reads them (`model`), as rows (as many as the lines). */
+function neutralizeLines(
+  lines: readonly string[],
+  imageLabel: string,
+  budget: MarkdownBudget,
+  model: PartModel,
+): string[] {
+  const { kinds, starts, definitions: rowDefinitions } = model
+  // A reference may come before its definition: all of the text's definitions are read first.
+  const definitions = new Map<string, { url: string; title: string }>()
+  for (const text of rowDefinitions.values()) {
+    const match = DEFINITION.exec(text)
+    const key = match && definitionKey(match[2]!)
+    if (match && key && !definitions.has(key))
+      definitions.set(key, {
+        url: unescape(match[3] ?? match[4]!),
+        title: match[5] ? unescape(match[5].slice(1, -1)) : "",
+      })
+  }
+  const out: string[] = []
+  for (let start = 0; start < lines.length; ) {
+    let end = start + 1
+    while (end < lines.length && kinds[end] === kinds[start] && !starts[end]) end++
+    const group = lines.slice(start, end)
+    const kind = kinds[start]
+    out.push(
+      kind === PROSE || kind === DEF
+        ? prose(group, start, rowDefinitions, imageLabel, definitions, budget)
+        : kind === MATH
+          ? mathGroup(group, budget)
+          : defuse(group.join("\n")),
+    )
+    start = end
+  }
+  // marked's setext rule stops at a line `<…>` (a tag genui broke still is one), unless genui wrote it as a link: so
+  // that the model, which takes no line for one, matches what marked reads, such a line ends with a joiner.
+  const rows = out.join("\n").split("\n")
+  for (let row = 0; row < rows.length; row++)
+    if (kinds[row] !== CODE && kinds[row] !== MATH && kinds[row] !== DEF && TAG_LINE.test(rows[row]!))
+      rows[row] += JOINER
+  return rows
+}
+
+/**
+ * A display-math block or a math fence, as math while the budget pays for it; past that, as a code block of its own
+ * (a math fence named "text", a `$$` block written as a fence longer than any backtick run in it), so that it stays one
+ * block and no line of it reads as Markdown. Each counts as a code block in the render budget either way.
  */
 function mathGroup(lines: readonly string[], budget: MarkdownBudget): string {
   const text = lines.join("\n")
@@ -1149,106 +2817,164 @@ function mathGroup(lines: readonly string[], budget: MarkdownBudget): string {
     budget.math -= cost
     return defuseMath(text)
   }
-  const fence = FENCE.exec(lines[0] ?? "")
-  if (fence) return defuse([`${fence[1]}${fence[2]}text`, ...lines.slice(1)].join("\n"))
-  return defuse(mathAsText(text))
-}
-
-/**
- * A list item or an ATX heading at the top level: a line that interrupts a paragraph and starts an inline run of its
- * own (with more indentation, marked continues the paragraph).
- */
-/** An ATX heading: a line marked lexes as an inline run of its own. */
-const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/
-/** A list item's first line, in a quote or not: the quote markers, the indentation after them, and the marker. */
-const LIST_ITEM = /^((?:[ \t]*>)*)([ \t]*)([-*+]|\d{1,9}[.)])(?:[ \t]|$)/
-/** A line with only quote markers and whitespace: a blank line within a quote. */
-const QUOTE_BLANK = /^[ \t>]*$/
-/** A table's delimiter row (`| --- | :-: |`): the lines after it, up to a blank line, are rows. */
-const TABLE_DELIMITER = /^[ \t>]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/
-
-const indentOf = (space: string) => {
-  let width = 0
-  for (const char of space) width += char === "\t" ? 4 - (width % 4) : 1
-  return width
-}
-
-/** Where a Markdown text is cut, and why: MAX_MARKDOWN_TEXT, or a paragraph past MAX_PARAGRAPH. */
-export interface MarkdownCut {
-  /** How many of the text's characters show (its length when nothing is cut). */
-  readonly shown: number
-  readonly reason?: "text" | "paragraph"
-}
-
-/**
- * How much of a Markdown text shows: up to MAX_MARKDOWN_TEXT characters, cut where a paragraph runs past
- * MAX_PARAGRAPH, on a code point's boundary. A paragraph is what marked lexes as one inline run at most: prose lines up
- * to a blank line (in a quote too), where an ATX heading, a top-level list item, a list item nested at any depth in a
- * list, and each row of a table start a run of their own, and every other line continues the run (a list marker
- * indented 4 spaces or more past where the item before it starts its text, or outside a list, continues the paragraph
- * before it, as marked reads it). Code blocks and
- * display math are not runs. One pass over the lines. (Counting a nested list or a table as one run cut ordinary
- * release notes of 21 to 30 KB, which marked lexes in a few milliseconds.)
- */
-export function shownLength(text: string): MarkdownCut {
-  const lines = text.split("\n")
-  const kinds = lineKinds(lines)
-  let cut: MarkdownCut | undefined
-  let offset = 0
-  let run = 0
-  // Whether the current run is in a list (it started at a list item), where the content of the list's last item starts,
-  // and whether the lines are a table's rows.
-  let inList = false
-  let content = 0
-  let inTable = false
-  let afterBlank = true
-  for (let index = 0; index < lines.length && !cut; index++) {
-    const line = lines[index]!
-    if (kinds[index] !== "prose" || QUOTE_BLANK.test(line)) {
-      run = 0
-      inTable = false
-      afterBlank = kinds[index] === "prose"
-    } else {
-      const item = LIST_ITEM.exec(line)
-      if (HEADING.test(line)) {
-        run = 0
-        inList = inTable = false
-      } else if (item && (indentOf(item[2]!) <= 3 || (inList && indentOf(item[2]!) < content + 4))) {
-        run = 0
-        inList = true
-        content = indentOf(item[2]!) + item[3]!.length + 1
-      } else if (inTable) run = 0
-      else if (TABLE_DELIMITER.test(line) && line.includes("|")) {
-        // The header row before it is a row of its own too; the delimiter row itself holds no text.
-        run = 0
-        inTable = true
-      } else if (afterBlank && indentOf(/^[ \t]*/.exec(line)![0]) <= 3) inList = false
-      if (run + line.length > MAX_PARAGRAPH) cut = { shown: offset + MAX_PARAGRAPH - run, reason: "paragraph" }
-      run += line.length + 1
-      afterBlank = false
-    }
-    offset += line.length + 1
+  const first = lines[0] ?? ""
+  const fence = /(`{3,}|~{3,})[ \t]*(?:math|latex)(?!\S)/i.exec(first)
+  if (fence) {
+    const named = `${first.slice(0, fence.index)}${fence[1]}text${first.slice(fence.index + fence[0].length)}`
+    return defuse([named, ...lines.slice(1)].join("\n"))
   }
-  if (!cut && text.length > MAX_MARKDOWN_TEXT) cut = { shown: MAX_MARKDOWN_TEXT, reason: "text" }
-  if (!cut) return { shown: text.length }
-  // Never between the halves of a surrogate pair.
-  const high = text.charCodeAt(cut.shown - 1)
-  return high >= 0xd800 && high <= 0xdbff ? { ...cut, shown: cut.shown - 1 } : cut
+  let longest = 2
+  for (const line of lines) for (const run of line.matchAll(/`+/g)) longest = Math.max(longest, run[0].length)
+  const marker = "`".repeat(longest + 1)
+  const delimiter = first.endsWith("$$") ? "$$" : "$"
+  const written = lines.map((line, index) =>
+    (index === 0 || index === lines.length - 1) && line.endsWith(delimiter)
+      ? `${line.slice(0, line.length - delimiter.length)}${marker}${index === 0 ? "text" : ""}`
+      : line,
+  )
+  return defuse(written.join("\n"))
 }
 
 /**
- * A model-written Markdown text as MarkdownText hands it to the renderer: what `shownLength` lets show, as parts (see
+ * A model-written Markdown text as MarkdownText hands it to the renderer: what `markdownShape` lets show, as parts (see
  * `splitMarkdown`), the prose ones neutralized, sharing one budget (see MarkdownBudget), so splitting a text into parts
- * gains nothing. A cut text ends with "…".
+ * gains nothing. A cut text ends with "…". What it hands the renderer is what the model checked (see `checkedParts`):
+ * where the model would read the neutralized text otherwise than the text as written, the text is cut earlier (only
+ * with an image label other than the one `markdownShape` measured with, since it checked the same parts).
  */
 export function prepareMarkdown(
   text: string,
-  imageLabel: string,
+  imageLabel: string = currentImageLabel,
   cut: MarkdownCut = shownLength(text),
 ): MarkdownPart[] {
-  const shown = cut.shown < text.length ? `${text.slice(0, cut.shown)}\n\n…` : text
-  const budget = markdownBudget(shown.length)
-  return splitMarkdown(shown).map((part) =>
-    part.kind === "markdown" ? { kind: "markdown", text: neutralizeMarkdown(part.text, imageLabel, budget) } : part,
-  )
+  const known = prepared.get(text)
+  if (known && known.label === imageLabel && known.shown === cut.shown) return known.parts
+  // `markdownShape` checked these very parts when it measured the text: they need no second check.
+  const checked = imageLabel === currentImageLabel && shapes.get(text)?.cut.shown === cut.shown
+  return checkedParts(text, textRows(text).starts, cut.shown, imageLabel, checked).parts
+}
+
+/**
+ * The image label `markdownShape` measures with (see `setImageLabel`): an image without alt text is written as a link
+ * with it as its text, and a line's length can change what marked reads.
+ */
+let currentImageLabel = "Image"
+
+/** Sets the label of images without alt text that texts are measured with (MarkdownText's, from the app's locale). */
+export function setImageLabel(label: string): void {
+  if (label === currentImageLabel) return
+  currentImageLabel = label
+  shapes.clear()
+  shapeChars = 0
+  prepared.clear()
+  preparedChars = 0
+}
+
+/**
+ * The prepared parts of recent texts (see `checkedParts`), for at most SHAPE_CACHE_SIZE texts and SHAPE_CACHE_CHARS
+ * characters of texts and parts (and the newest): `markdownShape` prepares a text to check it, and MarkdownText renders
+ * those parts.
+ */
+const prepared = new Map<
+  string,
+  { readonly label: string; readonly shown: number; readonly parts: MarkdownPart[]; readonly chars: number }
+>()
+let preparedChars = 0
+
+/** The prepared parts of how many texts are kept, and of how many characters (for tests). */
+export const preparedCache = (): { readonly texts: number; readonly chars: number } => ({
+  texts: prepared.size,
+  chars: preparedChars,
+})
+
+function keepPrepared(text: string, label: string, shown: number, parts: MarkdownPart[]) {
+  const old = prepared.get(text)
+  if (old) {
+    prepared.delete(text)
+    preparedChars -= old.chars
+  }
+  let chars = text.length
+  for (const part of parts) chars += part.kind === "code" ? part.code.length : part.text.length
+  prepared.set(text, { label, shown, parts, chars })
+  preparedChars += chars
+  for (const [oldest, entry] of prepared) {
+    if (oldest === text || (prepared.size <= SHAPE_CACHE_SIZE && preparedChars <= SHAPE_CACHE_CHARS)) break
+    prepared.delete(oldest)
+    preparedChars -= entry.chars
+  }
+}
+
+/**
+ * The first `shown` characters of a text as the renderer gets them (see `prepareMarkdown`), and the first row of the
+ * text where the model reads a part neutralized otherwise than as written (-1: none, or not `check`ed).
+ */
+function shownParts(
+  text: string,
+  shown: number,
+  imageLabel: string,
+  check: boolean,
+): { parts: MarkdownPart[]; row: number } {
+  // marked reads "\r\n" and "\r" as "\n" (see textRows): the rows before the cut are the text's.
+  const source = (shown < text.length ? `${text.slice(0, shown)}\n\n…` : text).replace(/\r\n?/g, "\n")
+  const lines = source.split("\n")
+  const budget = markdownBudget(source.length)
+  const parts: MarkdownPart[] = []
+  for (const segment of fenceSegments(lines)) {
+    if (segment.code) {
+      parts.push(codePart(lines, segment.from, segment.to, segment.code))
+      continue
+    }
+    const part = lines.slice(segment.from, segment.to)
+    if (part.join("\n").trim() === "") continue
+    try {
+      const { rows, diverges } = neutralizePart(part, imageLabel, budget, check)
+      if (diverges >= 0) return { parts, row: segment.from + diverges }
+      parts.push({ kind: "markdown", text: rows.join("\n") })
+    } finally {
+      spanCache.clear()
+      bracketCache.clear()
+    }
+  }
+  return { parts, row: -1 }
+}
+
+/**
+ * How many times a text is checked (see `checkedParts`) at most: once, and once more after it is cut where the model
+ * read it neutralized otherwise (an ordinary text never is).
+ */
+const MAX_CHECKS = 2
+
+/**
+ * The parts the renderer gets of a text's first `shown` characters, checked (unless `checked` already): where the
+ * model reads a part neutralized otherwise than as written, the text is cut at the start of that row (moved earlier
+ * by `settle`) and checked again; after MAX_CHECKS checks, nothing of it shows. So marked gets only text whose blocks,
+ * runs and code blocks are the ones the model counted and cut by, and whose every line it lexes inline was written as
+ * prose (within the emphasis, escape and math budgets).
+ */
+function checkedParts(
+  text: string,
+  starts: readonly number[],
+  shown: number,
+  imageLabel: string,
+  checked: boolean,
+  settle: (cut: number) => number = (cut) => cut,
+): { shown: number; parts: MarkdownPart[]; recut: boolean } {
+  let recut = false
+  for (let attempt = 0; ; attempt++) {
+    const { parts, row } = shownParts(text, shown, imageLabel, !checked && shown > 0)
+    if (row < 0) {
+      keepPrepared(text, imageLabel, shown, parts)
+      return { shown, parts, recut }
+    }
+    recut = true
+    if (attempt + 1 >= MAX_CHECKS) {
+      shown = 0
+      continue
+    }
+    // At the start of that row (a row of the text: the cut row at the latest), always before the last cut.
+    const last = rowAt(starts, shown - 1)
+    shown = Math.min(shown - 1, settle(starts[Math.min(row, last)]!))
+    // (A row starts after a line break: never inside a surrogate pair.)
+    shown = Math.max(0, starts[rowAt(starts, Math.max(0, shown))]!)
+  }
 }

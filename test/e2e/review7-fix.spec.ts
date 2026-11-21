@@ -290,13 +290,17 @@ test.describe("the tabs auto-open opens are bounded [R7S1-4]", () => {
     expect(await longestTask(page)).toBeLessThan(BLOCKED_MS)
   })
 
-  test("at most 32 auto-opened tabs stay open in a session; later canvases open from their chip", async ({ page }) => {
+  test("at most 32 auto-opened tabs stay open in a session; a live canvas takes the place of a closed one", async ({
+    page,
+  }) => {
     test.setTimeout(90_000)
     await boot(page)
     await stream(page, Array.from({ length: 32 }, (_, index) => opening(`d${index}`)).join("\n\n"), 64)
     await expect.poll(() => canvasTabs(page).then((tabs) => tabs.length)).toBe(32)
     // The next reply closes them (their tabs stay, struck through: the agent closed them after their reply) and opens
-    // ten more: the strip keeps 32 auto-opened tabs.
+    // ten more: the strip keeps 32 auto-opened tabs. This expected the ten not to open, the strip holding only the 32
+    // dead tabs [review8#R7F2-4]: now each new canvas takes the place of the oldest tab of a canvas the agent closed (at
+    // most 32 canvases are live, so one of 32 tabs always holds a closed one).
     await page.evaluate(() => window.__genui.appendUser("next"))
     const next = [
       ...Array.from({ length: 32 }, (_, index) => closing(`d${index}`)),
@@ -307,10 +311,12 @@ test.describe("the tabs auto-open opens are bounded [R7S1-4]", () => {
     await settle(page)
     const tabs = await canvasTabs(page)
     expect(tabs).toHaveLength(32)
-    expect(tabs.some((tab) => tab.startsWith("canvas.e"))).toBe(false)
-    // A new canvas still opens from its chip.
-    await page.locator('[data-surface="chip"]').filter({ hasText: "e9" }).getByRole("button", { name: "Open" }).click()
+    expect(tabs.filter((tab) => tab.startsWith("canvas.e")).sort()).toEqual(
+      Array.from({ length: 10 }, (_, index) => `canvas.e${index}`).sort(),
+    )
+    expect(tabs.filter((tab) => /^canvas\.d[0-9]$/.test(tab))).toEqual([])
     await expect(page.locator('[data-genui][data-surface="canvas"]').getByText("e9", { exact: true })).toBeVisible()
+    expect(await longestTask(page)).toBeLessThan(BLOCKED_MS)
   })
 })
 

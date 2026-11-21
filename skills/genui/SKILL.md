@@ -79,7 +79,7 @@ Inputs keep what the user enters. Bind each input you want back to a state path 
 
 The UI always takes the app's design and follows the user's theme and light or dark mode, so there are no color, style or className props: choose components and variants, not looks.
 
-- Keep it compact: a UI shows at most about 2,000 elements, or 500,000 characters of text, in all, nested at most 20 deep. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
+- Keep it compact: a UI shows at most about 2,000 elements, or 500,000 characters of text, in all (text an expression builds counts in each row that builds it), nested at most 20 deep. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
 - Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.
@@ -144,14 +144,14 @@ AVAILABLE COMPONENTS (42):
 
 - Stack: { direction?: "vertical" | "horizontal", gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl", align?: "start" | "center" | "end" | "stretch" | "baseline", justify?: "start" | "center" | "end" | "between" | "around", wrap?: boolean } - Flex layout. Vertical by default (gap md). Use horizontal with wrap for rows of buttons or badges. [accepts children]
 - Grid: { columns?: number, gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl" } - Grid of 1-6 columns (default 2); they collapse on narrow surfaces such as a sidebar canvas. [accepts children]
-- Card: { title?: string, description?: string, tone?: "neutral" | "info" | "success" | "warning" | "danger", padding?: "none" | "sm" | "md" } - Bordered container for a section, form or item. tone colors its accent for status cards. Not for page headers. [accepts children]
+- Card: { title?: string, description?: string, tone?: "neutral" | "info" | "success" | "warning" | "danger", padding?: "none" | "sm" | "md" } - Bordered box for a section, form or item. tone colors its accent for status cards. Not for page headers. [accepts children]
 - Separator: { orientation?: "horizontal" | "vertical", label?: string } - A divider line, optionally with a centered label.
 - Tabs: { tabs: Array<{ label: string, value: string }>, value?: string, defaultValue?: string } - Child N is the panel of tabs[N]: give exactly one child per tab (wrap several elements in a Stack). Use { $bindState } on value to read or set the active tab. [accepts children] [events: change]
 - Accordion: { items: Array<{ title: string, content?: string }>, type?: "single" | "multiple", defaultOpen?: Array<number> } - Collapsible sections. Each item's content is Markdown; or give children, where child N is the body of items[N]. type single (default) or multiple. defaultOpen lists item indexes. [accepts children]
 - Collapsible: { title: string, defaultOpen?: boolean } - A section with a disclosure header; children render inside when open. [accepts children]
 - Heading: { text: string, level?: "h1" | "h2" | "h3" | "h4" } - Section heading. h2 by default; use h1 at most once per surface.
 - Text: { text: string, variant?: "body" | "lead" | "muted" | "caption" | "code", weight?: "regular" | "medium", align?: "start" | "center" | "end" } - A paragraph of plain text; use Markdown for links, lists or emphasis.
-- Markdown: { content: string } - Rich text as Markdown in the app's style: lists, links, tables, code. Cut at a paragraph over 20,000 characters.
+- Markdown: { content: string } - Rich text as Markdown: lists, links, tables, code. Each code block counts as an element. Cut at a paragraph over 20,000 characters, lists or quotes nested over 8 deep, many tiny blocks, or long list or quote runs without blank lines or indents.
 - Code: { code: string, language?: string, title?: string } - A syntax-highlighted code block, with copy. language e.g. ts, json, sh.
 - Badge: { text: string, variant?: "default" | "secondary" | "outline" | "success" | "warning" | "danger" | "info" } - A small status label.
 - Alert: { title: string, message?: string, type?: "info" | "success" | "warning" | "error" } - A callout for important information; children (e.g. Buttons) render below the message. [accepts children]
@@ -314,4 +314,3 @@ RULES:
 17. For data-rich UIs, use multi-column layout components if available. For forms and single-column content, use vertical layout components.
 18. Always include realistic data, taken from the task at hand. Never leave data empty.
 19. Bind every input you need back to a state path of your own with $bindState, and send it with sendPrompt from a button.
-20. sendPrompt, insertPrompt, openLink and copyText run only when the user activates a control, never from watch, on.focus or on.blur.
