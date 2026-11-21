@@ -7,6 +7,7 @@ import {
   ON_SUCCESS_PARAM,
   PASSIVE_PARAM,
 } from "../catalog/actions.ts"
+import { componentDefinitions } from "../catalog/components.ts"
 import { UI_SECRET_ROOT } from "../shared/constants.ts"
 import { IGNORED_CHECK, SAFE_CHECKS } from "./pattern.ts"
 
@@ -130,6 +131,72 @@ function relocate(element: UIElement): UIElement {
   } catch {
     return element
   }
+}
+
+/**
+ * How many props an element keeps, and how many state paths it watches. json-render resolves every prop into a props
+ * object of each instance's own (each entry of a parent's `children`, each row of a repeat) and subscribes every watched
+ * path for each instance, before genui's render budget decides whether the instance renders, and whether it is
+ * visible: 4,000 entries of an element with 7,000 props, or 7,000 watched paths, froze the window for 6 to 11 s. With
+ * these bounds an instance costs at most a few dozen entries; the render budget bounds the instances (SLOT_UNITS).
+ */
+export const MAX_ELEMENT_PROPS = 32
+export const MAX_WATCH_PATHS = 32
+
+// The props each component's schema names, which an element over MAX_ELEMENT_PROPS keeps first.
+const schemaProps = new Map<string, ReadonlySet<string>>()
+function ownProps(type: string): ReadonlySet<string> {
+  let names = schemaProps.get(type)
+  if (!names) {
+    const definition = Object.hasOwn(componentDefinitions, type)
+      ? (componentDefinitions as Record<string, { readonly props?: { readonly shape?: object } }>)[type]
+      : undefined
+    names = new Set(Object.keys(definition?.props?.shape ?? {}))
+    schemaProps.set(type, names)
+  }
+  return names
+}
+
+const count = (value: number) => value.toLocaleString("en-US")
+
+// An element's props and watched paths past MAX_ELEMENT_PROPS and MAX_WATCH_PATHS are dropped, with a note.
+function capElement(element: UIElement, notes: LocalNote[]): UIElement {
+  let next = element
+  const props = element.props as Record<string, unknown>
+  const names = Object.keys(props)
+  if (names.length > MAX_ELEMENT_PROPS) {
+    const own = ownProps(element.type)
+    const kept = new Set(names.filter((name) => own.has(name)).slice(0, MAX_ELEMENT_PROPS))
+    for (const name of names) {
+      if (kept.size >= MAX_ELEMENT_PROPS) break
+      kept.add(name)
+    }
+    next = {
+      ...next,
+      props: Object.fromEntries(names.filter((name) => kept.has(name)).map((name) => [name, props[name]])),
+    }
+    notes.push({
+      severity: "warning",
+      code: "too_many_props",
+      message: `has ${count(names.length)} props: an element keeps at most ${MAX_ELEMENT_PROPS} (its component's own first), the rest are ignored`,
+    })
+  }
+  const watch: unknown = element.watch
+  if (isRecord(watch)) {
+    const paths = Object.keys(watch)
+    if (paths.length > MAX_WATCH_PATHS) {
+      next = {
+        ...next,
+        watch: Object.fromEntries(paths.slice(0, MAX_WATCH_PATHS).map((path) => [path, watch[path]])),
+      } as UIElement
+      notes.push({
+        severity: "warning",
+        code: "too_many_watches",
+        message: `watches ${count(paths.length)} state paths: an element watches at most ${MAX_WATCH_PATHS}, the rest are ignored`,
+      })
+    }
+  }
+  return next
 }
 
 function sanitizeChildren(element: UIElement, notes: LocalNote[]): UIElement {
@@ -415,6 +482,7 @@ function normalizeElement(raw: unknown): UIElement | undefined {
   let element = raw as unknown as UIElement
   if (!isRecord(element.props)) element = { ...element, props: {} }
   element = relocate(element)
+  element = capElement(element, notes)
   element = sanitizeChildren(element, notes)
   element = sanitizeStructure(element, notes)
   element = sanitizeChecks(element)

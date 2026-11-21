@@ -3,8 +3,9 @@ import { isIconName, type GenuiIconName } from "../../catalog/icons.ts"
 import { safeUrl } from "../../protocol/url.ts"
 import { useHost, useSurface } from "../host.ts"
 import { openLink } from "../outward.ts"
+import { ITEM_LISTS } from "../costs.ts"
 import { stableList, useActivation } from "./inputs.tsx"
-import { bool, list, num, oneOf, str, useBound, type GenuiComponent } from "./shared.tsx"
+import { bool, CutNote, firstItems, num, oneOf, str, useBound, useListCut, type GenuiComponent } from "./shared.tsx"
 
 // Buttons and choice controls: Button, Link, Toggle, ToggleGroup, ButtonGroup, DropdownMenu, Pagination. Styles:
 // src/gui/styles/inputs.css.
@@ -34,19 +35,31 @@ interface Item {
 
 const sameItem = (a: Item, b: Item) => a.label === b.label && a.value === b.value && a.icon === b.icon
 
-/** `{ label, value, icon? }` entries of a model-written list; malformed entries and repeated values are dropped. */
-function parseItems(raw: unknown): Item[] {
+/**
+ * `{ label, value, icon? }` entries of a model-written list, at most `max` of them (see ITEM_LISTS in
+ * src/gui/costs.ts), and how many the list holds; malformed entries and repeated values are dropped.
+ */
+function parseItems(raw: unknown, max: number): { readonly items: Item[]; readonly total: number } {
   const seen = new Set<string>()
-  return list<unknown>(raw).flatMap((entry): Item[] => {
-    if (!entry || typeof entry !== "object") return []
+  return firstItems(raw, max, (entry): Item | undefined => {
+    if (!entry || typeof entry !== "object") return undefined
     const record = entry as Record<string, unknown>
     const value = str(record.value)
-    if (!value && typeof record.value !== "string") return []
-    if (seen.has(value)) return []
+    if (!value && typeof record.value !== "string") return undefined
+    if (seen.has(value)) return undefined
     seen.add(value)
     const icon = isIconName(record.icon) ? record.icon : undefined
-    return [{ label: str(record.label, value), value, ...(icon ? { icon } : {}) }]
+    return { label: str(record.label, value), value, ...(icon ? { icon } : {}) }
   })
+}
+
+/** A component's items (see parseItems), kept stable while their content is, and the note on what it leaves out. */
+function useItems(ctx: Parameters<typeof useListCut>[0], type: "ToggleGroup" | "ButtonGroup" | "DropdownMenu") {
+  const { prop, max } = ITEM_LISTS[type]
+  const parsed = createMemo(() => parseItems(ctx.props[prop], max))
+  const items = stableList(() => parsed().items, sameItem)
+  const cut = useListCut(ctx, type, () => ({ shown: parsed().items.length, total: parsed().total }))
+  return { items, cut }
 }
 
 /**
@@ -206,7 +219,7 @@ const ToggleGroup: GenuiComponent<"ToggleGroup"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
   const activate = useActivation(ctx)
-  const items = stableList(() => parseItems(ctx.props.items), sameItem)
+  const { items, cut } = useItems(ctx, "ToggleGroup")
   const [value, setValue] = useBound<unknown>(ctx, "value", undefined)
   const multiple = () => ctx.props.type === "multiple"
   const disabled = () => bool(ctx.props.disabled)
@@ -216,6 +229,8 @@ const ToggleGroup: GenuiComponent<"ToggleGroup"> = (ctx) => {
     const values = Array.isArray(current) ? current : [current]
     return values.map(asKey).filter((entry): entry is string => !!entry)
   })
+  // Looked up once per item: a long bound array is not searched once per item.
+  const chosen = createMemo(() => new Set(selected()))
 
   const press = (item: Item) => {
     const current = selected()
@@ -232,32 +247,35 @@ const ToggleGroup: GenuiComponent<"ToggleGroup"> = (ctx) => {
   }
 
   return (
-    <div
-      data-gu="toggle-group"
-      data-type={multiple() ? "multiple" : "single"}
-      data-empty={items().length === 0 ? "" : undefined}
-      role="group"
-      onKeyDown={moveFocus}
-    >
-      <For each={items()}>
-        {(item) => {
-          const pressed = () => selected().includes(item.value)
-          return (
-            <button
-              type="button"
-              data-slot="item"
-              data-pressed={pressed() ? "" : undefined}
-              aria-pressed={pressed()}
-              disabled={disabled()}
-              onClick={() => press(item)}
-            >
-              <Show when={item.icon}>{(name) => <ui.Icon name={name()} />}</Show>
-              <span data-slot="label">{item.label}</span>
-            </button>
-          )
-        }}
-      </For>
-    </div>
+    <>
+      <div
+        data-gu="toggle-group"
+        data-type={multiple() ? "multiple" : "single"}
+        data-empty={items().length === 0 ? "" : undefined}
+        role="group"
+        onKeyDown={moveFocus}
+      >
+        <For each={items()}>
+          {(item) => {
+            const pressed = () => chosen().has(item.value)
+            return (
+              <button
+                type="button"
+                data-slot="item"
+                data-pressed={pressed() ? "" : undefined}
+                aria-pressed={pressed()}
+                disabled={disabled()}
+                onClick={() => press(item)}
+              >
+                <Show when={item.icon}>{(name) => <ui.Icon name={name()} />}</Show>
+                <span data-slot="label">{item.label}</span>
+              </button>
+            )
+          }}
+        </For>
+      </div>
+      <CutNote text={cut()} />
+    </>
   )
 }
 
@@ -269,32 +287,40 @@ const ToggleGroup: GenuiComponent<"ToggleGroup"> = (ctx) => {
 // an animation from a library the plugin cannot load.
 const ButtonGroup: GenuiComponent<"ButtonGroup"> = (ctx) => {
   const activate = useActivation(ctx)
-  const buttons = stableList(() => parseItems(ctx.props.buttons), sameItem)
+  const { items: buttons, cut } = useItems(ctx, "ButtonGroup")
   const [selected, setSelected] = useBound<string>(ctx, "selected", "", asKey)
 
   return (
-    <div data-gu="button-group" data-empty={buttons().length === 0 ? "" : undefined} role="group" onKeyDown={moveFocus}>
-      <For each={buttons()}>
-        {(button) => {
-          const pressed = () => selected() === button.value
-          return (
-            <button
-              type="button"
-              data-slot="item"
-              data-pressed={pressed() ? "" : undefined}
-              aria-pressed={pressed()}
-              onClick={() => {
-                if (pressed()) return
-                setSelected(button.value)
-                void activate("change")
-              }}
-            >
-              <span data-slot="label">{button.label}</span>
-            </button>
-          )
-        }}
-      </For>
-    </div>
+    <>
+      <div
+        data-gu="button-group"
+        data-empty={buttons().length === 0 ? "" : undefined}
+        role="group"
+        onKeyDown={moveFocus}
+      >
+        <For each={buttons()}>
+          {(button) => {
+            const pressed = () => selected() === button.value
+            return (
+              <button
+                type="button"
+                data-slot="item"
+                data-pressed={pressed() ? "" : undefined}
+                aria-pressed={pressed()}
+                onClick={() => {
+                  if (pressed()) return
+                  setSelected(button.value)
+                  void activate("change")
+                }}
+              >
+                <span data-slot="label">{button.label}</span>
+              </button>
+            )
+          }}
+        </For>
+      </div>
+      <CutNote text={cut()} />
+    </>
   )
 }
 
@@ -306,7 +332,7 @@ const DropdownMenu: GenuiComponent<"DropdownMenu"> = (ctx) => {
   const host = useHost()
   const ui = host.ui
   const activate = useActivation(ctx)
-  const items = stableList(() => parseItems(ctx.props.items), sameItem)
+  const { items, cut } = useItems(ctx, "DropdownMenu")
   const [, setValue] = useBound<string>(ctx, "value", "", asKey)
   const entries = createMemo(() =>
     items().map((item) => ({
@@ -328,6 +354,7 @@ const DropdownMenu: GenuiComponent<"DropdownMenu"> = (ctx) => {
         placement="bottom-start"
         disabled={entries().length === 0}
       />
+      <CutNote text={cut()} />
     </div>
   )
 }

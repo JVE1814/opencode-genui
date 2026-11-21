@@ -1,8 +1,22 @@
 import { createEffect, createMemo, For, Show, type Accessor, type JSX } from "solid-js"
-import { normalizeOptions, type Option } from "../../catalog/components.ts"
+import { normalizeOption } from "../../catalog/components.ts"
+import { ITEM_LISTS } from "../costs.ts"
 import { useHost, useSurface } from "../host.ts"
 import { isModalFocusMove, withIntent, withoutIntent, type Away } from "../outward.ts"
-import { bool, list, num, oneOf, str, uid, useBound, useChecks, type GenuiComponent } from "./shared.tsx"
+import {
+  bool,
+  CutNote,
+  firstItems,
+  list,
+  num,
+  oneOf,
+  str,
+  uid,
+  useBound,
+  useChecks,
+  useListCut,
+  type GenuiComponent,
+} from "./shared.tsx"
 
 // Form fields: Input, Textarea, Select, Checkbox, Radio, Switch, Slider. Buttons and choice controls are in
 // choices.tsx. Styles: src/gui/styles/inputs.css.
@@ -155,18 +169,30 @@ export function stableList<T>(compute: () => T[], same: (a: T, b: T) => boolean)
 const sameOption = (a: { label: string; value: string }, b: { label: string; value: string }) =>
   a.label === b.label && a.value === b.value
 
-/** Options from a model-written `options` prop: normalized, without duplicate values. */
-function useOptions(read: () => unknown): Accessor<{ label: string; value: string }[]> {
-  return stableList(() => {
+/**
+ * Options from a model-written `options` prop: normalized, without duplicate values, at most `max` of them (see
+ * ITEM_LISTS in src/gui/costs.ts), and how many the prop holds.
+ */
+function useOptions(
+  read: () => unknown,
+  max: number,
+): { readonly options: Accessor<{ label: string; value: string }[]>; readonly total: Accessor<number> } {
+  const parsed = createMemo(() => {
     const seen = new Set<string>()
-    const raw = list<unknown>(read()).map((item): unknown => {
-      if (typeof item === "number") return asOptionValue(item)
-      if (!item || typeof item !== "object") return item
-      const record = item as { value?: unknown }
-      return typeof record.value === "number" ? { ...record, value: asOptionValue(record.value) } : item
+    return firstItems(read(), max, (item) => {
+      let entry: unknown = item
+      if (typeof item === "number") entry = asOptionValue(item)
+      else if (item && typeof item === "object") {
+        const record = item as { value?: unknown }
+        if (typeof record.value === "number") entry = { ...record, value: asOptionValue(record.value) }
+      }
+      const option = normalizeOption(entry)
+      if (!option || seen.has(option.value)) return undefined
+      seen.add(option.value)
+      return option
     })
-    return normalizeOptions(raw as Option[]).filter((option) => !seen.has(option.value) && !!seen.add(option.value))
-  }, sameOption)
+  })
+  return { options: stableList(() => parsed().items, sameOption), total: () => parsed().total }
 }
 
 const asText = (value: unknown): string | number | undefined =>
@@ -398,7 +424,8 @@ const Select: GenuiComponent<"Select"> = (ctx) => {
   const ui = host.ui
   const id = uid("select")
   const activate = useActivation(ctx)
-  const options = useOptions(() => ctx.props.options)
+  const { options, total } = useOptions(() => ctx.props.options, ITEM_LISTS.Select.max)
+  const cut = useListCut(ctx, "Select", () => ({ shown: options().length, total: total() }))
   const [value, setValue] = useBound<string>(ctx, "value", "", asOptionValue)
   const checks = useChecks(ctx, "value")
   const label = () => str(ctx.props.label)
@@ -430,6 +457,7 @@ const Select: GenuiComponent<"Select"> = (ctx) => {
           }}
         />
       </div>
+      <CutNote text={cut()} />
       <FieldMessages id={id} error={checks.error()} />
     </div>
   )
@@ -514,7 +542,8 @@ const Radio: GenuiComponent<"Radio"> = (ctx) => {
   const choice = useChoice(ctx)
   // Set while a navigation key's default action (the browser checks the next radio, which fires `change`) runs.
   let navigating = false
-  const options = useOptions(() => ctx.props.options)
+  const { options, total } = useOptions(() => ctx.props.options, ITEM_LISTS.Radio.max)
+  const cut = useListCut(ctx, "Radio", () => ({ shown: options().length, total: total() }))
   const [value, setValue] = useBound<string>(ctx, "value", "", asOptionValue)
   const checks = useChecks(ctx, "value")
   const label = () => str(ctx.props.label)
@@ -593,6 +622,7 @@ const Radio: GenuiComponent<"Radio"> = (ctx) => {
           }}
         </For>
       </div>
+      <CutNote text={cut()} />
       <FieldMessages id={id} error={checks.error()} />
     </div>
   )

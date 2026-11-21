@@ -41,6 +41,7 @@ export default {
   "chip.open": "Open",
   "chip.updating": "Updating…",
   "chip.closed": "Closed",
+  "chip.refused": "Not opened: {{max}} canvases were open",
 
   // The canvas panel (src/gui/canvas.tsx)
   "canvas.updating": "Updating…",

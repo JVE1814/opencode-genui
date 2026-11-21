@@ -28,6 +28,7 @@ import {
   uiStatePath,
 } from "./normalize.ts"
 import { IGNORED_CHECK, patternProblem, SAFE_CHECKS } from "./pattern.ts"
+import { pointerTooLarge } from "./patch.ts"
 import type { LineError, SurfaceKind } from "./surface.ts"
 
 export interface SurfaceIssue {
@@ -439,6 +440,37 @@ const MAX_EXPRESSION_DEPTH = 16
  * `$cond` whose condition is not a condition (a path string such as "/isAdmin" instead of `{ "$state": "/isAdmin" }`).
  * The renderer shows such a prop as empty; this says why.
  */
+/**
+ * State paths an element writes or follows that are too deep or long to be paths (see MAX_POINTER_DEPTH in
+ * ./patch.ts): its repeat's list, its watched paths, its two-way bindings and the paths its actions write. Nothing can
+ * be written to such a path, so the agent hears of it here.
+ */
+function checkPaths(key: string, element: Record<string, unknown>): SurfaceIssue[] {
+  const found: [where: string, path: string][] = []
+  const repeat = element.repeat
+  if (isRecord(repeat) && typeof repeat.statePath === "string") found.push(["repeat.statePath", repeat.statePath])
+  if (isRecord(element.watch)) for (const path of Object.keys(element.watch)) found.push(["a watched path", path])
+  if (isRecord(element.props))
+    for (const [name, value] of Object.entries(element.props))
+      if (isRecord(value) && typeof value.$bindState === "string") found.push([`props.${name}`, value.$bindState])
+  for (const field of ["on", "watch"] as const) {
+    const map = element[field]
+    if (!isRecord(map)) continue
+    for (const [name, value] of Object.entries(map))
+      for (const binding of Array.isArray(value) ? value : [value]) {
+        const params = isRecord(binding) && isRecord(binding.params) ? binding.params : undefined
+        for (const param of PATH_PARAMS)
+          if (typeof params?.[param] === "string") found.push([`${field}.${name}'s ${param}`, params[param]])
+      }
+  }
+  for (const [where, path] of found) {
+    const problem = pointerTooLarge(path.startsWith("/") ? path : `/${path}`)
+    if (problem)
+      return [{ severity: "warning", code: "path_too_large", message: `${where}: ${problem}`, elementKey: key }]
+  }
+  return []
+}
+
 function checkExpressions(key: string, props: Record<string, unknown>): SurfaceIssue[] {
   const issues: SurfaceIssue[] = []
   const visit = (value: unknown, where: string, depth: number) => {
@@ -622,6 +654,7 @@ export function validateSurface(
     if (element.repeat !== undefined && !validRepeat(element.repeat))
       issues.push({ severity: "error", code: "invalid_repeat", message: INVALID_REPEAT, elementKey: key })
     issues.push(...checkBindings(key, element, known, definitions))
+    issues.push(...checkPaths(key, element))
   }
   // What the normalizer removed or ignored before this spec got here (nothing, for a spec it did not produce).
   issues.push(...normalizeNotes(spec))

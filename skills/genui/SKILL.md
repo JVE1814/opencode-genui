@@ -27,7 +27,7 @@ A canvas is a sidebar tab, about 360px wide, that stays open across turns: use i
 - Any other block patches the canvas as it is, with RFC 6902 ops (add, replace, remove, move, copy) on /elements/<key>, /elements/<key>/props/<prop> and /state/.... Replacing /root with an element the canvas has switches the view, keeping the state and what the user entered.
 - {"canvas":"<id>","close":true} on its own removes the canvas.
 - The canvas renders while the block streams, so write /root and the layout first and the data after.
-- Several canvases can exist, one tab each; give each its own id.
+- Up to 32 canvases can be open, one tab each; give each its own id.
 - If unsure what a canvas holds now (say, the chat was compacted), send the whole canvas again, with /root.
 - In your reply the block shows as a small chip that opens the canvas.
 
@@ -79,7 +79,7 @@ Inputs keep what the user enters. Bind each input you want back to a state path 
 
 The UI always takes the app's design and follows the user's theme and light or dark mode, so there are no color, style or className props: choose components and variants, not looks.
 
-- Keep it compact: a UI shows at most about 2,000 elements, or 500,000 characters of text, in all. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
+- Keep it compact: a UI shows at most about 2,000 elements, or 500,000 characters of text, in all, nested at most 20 deep. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
 - Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.
@@ -114,7 +114,6 @@ Note: state patches appear right after the elements that use them, so the UI fil
 INITIAL STATE:
 Specs include a /state field to seed the state model. Components with { $bindState } or { $bindItem } read from and write to this state, and $state expressions read from it.
 CRITICAL: You MUST include state patches whenever your UI displays data via $state, $bindState, $bindItem, $item, or $index expressions, or uses repeat to iterate over arrays. Without state, these references resolve to nothing and repeat lists render zero items.
-Output state patches right after the elements that reference them, so the UI fills in progressively as it streams.
 Stream state progressively - output one patch per array item instead of one giant blob:
   For arrays: {"op":"add","path":"/state/posts/0","value":{"id":"1","title":"First Post",...}} then /state/posts/1, /state/posts/2, etc.
   For scalars: {"op":"add","path":"/state/newTodoText","value":""}
@@ -144,19 +143,19 @@ IMPORTANT: State paths use RFC 6901 JSON Pointer syntax (e.g. "/todos/0/title").
 AVAILABLE COMPONENTS (42):
 
 - Stack: { direction?: "vertical" | "horizontal", gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl", align?: "start" | "center" | "end" | "stretch" | "baseline", justify?: "start" | "center" | "end" | "between" | "around", wrap?: boolean } - Flex layout. Vertical by default (gap md). Use horizontal with wrap for rows of buttons or badges. [accepts children]
-- Grid: { columns?: number, gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl" } - Grid of 1-6 columns (default 2). Columns collapse automatically when the surface is narrow, e.g. in a sidebar canvas. [accepts children]
+- Grid: { columns?: number, gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl" } - Grid of 1-6 columns (default 2); they collapse on narrow surfaces such as a sidebar canvas. [accepts children]
 - Card: { title?: string, description?: string, tone?: "neutral" | "info" | "success" | "warning" | "danger", padding?: "none" | "sm" | "md" } - Bordered container for a section, form or item. tone colors its accent for status cards. Not for page headers. [accepts children]
 - Separator: { orientation?: "horizontal" | "vertical", label?: string } - A divider line, optionally with a centered label.
-- Tabs: { tabs: Array<{ label: string, value: string }>, value?: string, defaultValue?: string } - Tabs. Child N is the panel of tabs[N]: give exactly one child per tab (wrap several elements in a Stack). Use { $bindState } on value to read or set the active tab. [accepts children] [events: change]
+- Tabs: { tabs: Array<{ label: string, value: string }>, value?: string, defaultValue?: string } - Child N is the panel of tabs[N]: give exactly one child per tab (wrap several elements in a Stack). Use { $bindState } on value to read or set the active tab. [accepts children] [events: change]
 - Accordion: { items: Array<{ title: string, content?: string }>, type?: "single" | "multiple", defaultOpen?: Array<number> } - Collapsible sections. Each item's content is Markdown; or give children, where child N is the body of items[N]. type single (default) or multiple. defaultOpen lists item indexes. [accepts children]
 - Collapsible: { title: string, defaultOpen?: boolean } - A section with a disclosure header; children render inside when open. [accepts children]
 - Heading: { text: string, level?: "h1" | "h2" | "h3" | "h4" } - Section heading. h2 by default; use h1 at most once per surface.
-- Text: { text: string, variant?: "body" | "lead" | "muted" | "caption" | "code", weight?: "regular" | "medium", align?: "start" | "center" | "end" } - A paragraph of plain text. For rich text with links, lists or emphasis use Markdown.
-- Markdown: { content: string } - Rich text rendered as Markdown, in the app's style. Supports lists, links, tables and code.
+- Text: { text: string, variant?: "body" | "lead" | "muted" | "caption" | "code", weight?: "regular" | "medium", align?: "start" | "center" | "end" } - A paragraph of plain text; use Markdown for links, lists or emphasis.
+- Markdown: { content: string } - Rich text as Markdown in the app's style: lists, links, tables, code. Cut at a paragraph over 20,000 characters.
 - Code: { code: string, language?: string, title?: string } - A syntax-highlighted code block, with copy. language e.g. ts, json, sh.
 - Badge: { text: string, variant?: "default" | "secondary" | "outline" | "success" | "warning" | "danger" | "info" } - A small status label.
 - Alert: { title: string, message?: string, type?: "info" | "success" | "warning" | "error" } - A callout for important information; children (e.g. Buttons) render below the message. [accepts children]
-- Table: { columns: Array<string | { key: string, label?: string, align?: "start" | "center" | "end" }>, rows: Array<Array<unknown> | Record<string, unknown>>, caption?: string, selectionPath?: string, emptyText?: string } - Data table. columns are header labels, or { key, label, align } to read object rows by key. rows are arrays of cells (in column order) or objects. Bind rows to state with { "$state": "/rows" }. With selectionPath, clicking a row writes its index to that state path and fires on.select. [events: select]
+- Table: { columns: Array<string | { key: string, label?: string, align?: "start" | "center" | "end" }>, rows: Array<Array<unknown> | Record<string, unknown>>, caption?: string, selectionPath?: string, emptyText?: string } - Data table, of at most 500 rows and 50 columns. columns are header labels, or { key, label, align } to read object rows by key. rows are arrays of cells (in column order) or objects. Bind rows to state with { "$state": "/rows" }. With selectionPath, clicking a row writes its index to that state path and fires on.select. [events: select]
 - Progress: { value: number, max?: number, label?: string, showValue?: boolean, tone?: "neutral" | "info" | "success" | "warning" | "danger" } - A progress bar. value between 0 and max (default 100).
 - Skeleton: { width?: string, height?: string, lines?: number } - A loading placeholder. width/height are CSS lengths; lines renders text-like bars.
 - Spinner: { size?: "small" | "normal" | "large", label?: string } - The app's loading indicator, with an optional label.
@@ -164,11 +163,11 @@ AVAILABLE COMPONENTS (42):
 - Icon: { name: string, size?: "small" | "normal" | "large", tone?: "neutral" | "info" | "success" | "warning" | "danger" } - One of the app's icons. Common names: check, circle-check, circle-x, circle-exclamation, warning, info, help, plus, minus, close, edit, trash, copy, download, cloud-upload, refresh, magnifying-glass, settings-gear, sliders, folder, file-document, code, terminal, branch, github, globe, link, lock, shield, eye, comment, speech-bubble, notifications, status, task, checklist, bullet-list, server, monitor, cube, brain, flask, arrow-right, arrow-up-right, chevron-right, chevron-down, stop, share.
 - Keybind: { keys: Array<string> } - A keyboard shortcut, e.g. { "keys": ["Mod", "K"] }.
 - Image: { src: string, alt: string, width?: number, height?: number, fit?: "cover" | "contain", caption?: string } - An image from an https URL or a raster data:image URL (no SVG). The user may need to click to load remote images.
-- Avatar: { name: string, src?: string, size?: "small" | "normal" | "large" } - A person or entity avatar; shows initials when there is no image.
-- Chart: { type?: "bar" | "line" | "area" | "donut", labels: Array<string>, series: Array<{ name: string, values: Array<number> }>, title?: string, height?: number, stacked?: boolean, unit?: string } - A simple chart in the app's colors. labels are the x-axis categories; each series has one value per label. donut uses the first series. Keep to at most 6 series.
+- Avatar: { name: string, src?: string, size?: "small" | "normal" | "large" } - A person or entity avatar; initials when there is no image.
+- Chart: { type?: "bar" | "line" | "area" | "donut", labels: Array<string>, series: Array<{ name: string, values: Array<number> }>, title?: string, height?: number, stacked?: boolean, unit?: string } - A simple chart in the app's colors. labels are the x-axis categories; each series has one value per label. donut uses the first series. At most 6 series and 500 labels.
 - Input: { label: string, name?: string, type?: "text" | "email" | "password" | "number" | "search" | "url", placeholder?: string, description?: string, value?: string | number, disabled?: boolean, checks?: Array<{ type: string, message: string, args?: Record<string, unknown> }>, validateOn?: "change" | "blur" | "submit" } - Single-line text field. Bind value with { "$bindState": "/form/name" }. Enter fires on.submit. checks validate it (e.g. [{ "type": "required", "message": "Required" }]). [events: submit, focus, blur]
 - Textarea: { label: string, name?: string, placeholder?: string, description?: string, rows?: number, value?: string, disabled?: boolean, checks?: Array<{ type: string, message: string, args?: Record<string, unknown> }>, validateOn?: "change" | "blur" | "submit" } - Multi-line text field. Bind value with { $bindState }.
-- Select: { label: string, name?: string, options: Array<string | { label: string, value: string }>, placeholder?: string, value?: string, disabled?: boolean, checks?: Array<{ type: string, message: string, args?: Record<string, unknown> }>, validateOn?: "change" | "blur" | "submit" } - Dropdown select. options are strings or { label, value }. Bind value with { $bindState }. [events: change]
+- Select: { label: string, name?: string, options: Array<string | { label: string, value: string }>, placeholder?: string, value?: string, disabled?: boolean, checks?: Array<{ type: string, message: string, args?: Record<string, unknown> }>, validateOn?: "change" | "blur" | "submit" } - Dropdown select of at most 500 options, strings or { label, value }. Bind value with { $bindState }. [events: change]
 - Checkbox: { label: string, name?: string, description?: string, checked?: boolean, disabled?: boolean, checks?: Array<{ type: string, message: string, args?: Record<string, unknown> }>, validateOn?: "change" | "blur" | "submit" } - A checkbox. Bind checked with { $bindState } or, in a repeat, { $bindItem }. [events: change]
 - Radio: { label: string, name?: string, options: Array<string | { label: string, value: string }>, value?: string, orientation?: "vertical" | "horizontal", disabled?: boolean, checks?: Array<{ type: string, message: string, args?: Record<string, unknown> }>, validateOn?: "change" | "blur" | "submit" } - A group of radio buttons. Bind value with { $bindState }. [events: change]
 - Switch: { label: string, name?: string, description?: string, checked?: boolean, disabled?: boolean } - An on/off switch for settings. Bind checked with { $bindState }. [events: change]
@@ -176,7 +175,7 @@ AVAILABLE COMPONENTS (42):
 - Button: { label: string, variant?: "primary" | "secondary" | "ghost" | "danger", size?: "small" | "normal" | "large", icon?: string, disabled?: boolean } - A button; on.press runs actions. primary for the main action of a form (one per surface), secondary (default) otherwise, danger for destructive actions. [events: press]
 - Link: { label: string, href?: string } - An inline link. With an http(s) href it opens in the browser; without one, on.press runs actions. [events: press]
 - Toggle: { label: string, pressed?: boolean, icon?: string, disabled?: boolean } - A two-state button. Bind pressed with { $bindState }. [events: change]
-- ToggleGroup: { items: Array<{ label: string, value: string, icon?: string }>, type?: "single" | "multiple", value?: string | Array<string>, disabled?: boolean } - A set of toggle buttons. single (default) binds a string value, multiple binds an array of values. Bind value with { $bindState }. [events: change]
+- ToggleGroup: { items: Array<{ label: string, value: string, icon?: string }>, type?: "single" | "multiple", value?: string | Array<string>, disabled?: boolean } - Toggle buttons: single (default) binds a string value, multiple an array. Bind value with { $bindState }. [events: change]
 - ButtonGroup: { buttons: Array<{ label: string, value: string }>, selected?: string } - A segmented control to pick one option. Bind selected with { $bindState }. [events: change]
 - DropdownMenu: { label: string, items: Array<{ label: string, value: string, icon?: string }>, value?: string } - A button that opens a menu. Choosing an item writes its value to the bound value ({ $bindState }) and fires on.select. [events: select]
 - Pagination: { totalPages: number, page?: number } - Page navigation (pages start at 1). Bind page with { $bindState }. [events: change]
@@ -292,7 +291,7 @@ Maps state paths (JSON Pointers) to action bindings. When the value at a watched
 Example (cascading select — changing the country resets the city):
   {"type":"Select","props":{"label":"Country","value":{"$bindState":"/form/country"},"options":["US","Canada","UK"]},"watch":{"/form/country":{"action":"setState","params":{"statePath":"/form/city","value":""}}},"children":[]}
 
-Use `watch` where changing one field should change others (resetting dependent fields, deriving values) with setState, pushState or removeState, at most 8,000 of them per change. sendPrompt, insertPrompt, openLink and copyText never run from watch.
+Use `watch` where changing one field should change others (resetting dependent fields, deriving values) with setState, pushState or removeState, at most 8,000 of them per change; an element watches at most 32 paths. sendPrompt, insertPrompt, openLink and copyText never run from watch.
 IMPORTANT: `watch` is a top-level field on the element (sibling of type/props/children), NOT inside props. Watchers only fire when the value changes, not on initial render.
 
 RULES:

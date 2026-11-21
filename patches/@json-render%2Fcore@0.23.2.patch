@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index 33cb8650ce36e5e58f5822f73e43a02f353639d3..cadc2e237ebef441bb8c2e09e771626c5bac5967 100644
+index 33cb8650ce36e5e58f5822f73e43a02f353639d3..a4ac185cd0e9bd762815deeae396902eabc9eff3 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -84,6 +84,9 @@ __export(index_exports, {
@@ -473,7 +473,70 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..cadc2e237ebef441bb8c2e09e771626c
        const result = runValidationCheck(check2, ctx);
        checks.push(result);
        if (!result.valid) {
-@@ -4199,6 +4524,9 @@ function experimental_createEvaluator(options) {
+@@ -1659,6 +1984,9 @@ var check = {
+ };
+ 
+ // src/spec-validator.ts
++// opencode-genui patch: how many distinct repeat base paths with a sample list in state validateSpec checks an element
++// under (see validateRepeatPaths).
++var MAX_REPEAT_SAMPLE_PATHS = 64;
+ function validateSpec(spec, options = {}) {
+   const { checkOrphans = false } = options;
+   const issues = [];
+@@ -1766,13 +2094,21 @@ function validateSpec(spec, options = {}) {
+   }
+   const repeatValidatedKeys = /* @__PURE__ */ new Set();
+   const repeatValidatedContexts = /* @__PURE__ */ new Set();
++  // opencode-genui patch: an element is checked once per context that can change the result (see the patch notes).
++  const repeatSamplePaths = /* @__PURE__ */ new Map();
+   const validateRepeatPaths = (key, repeatBasePath, sampleAvailable, ancestors) => {
+     if (ancestors.has(key)) return;
+     const element = spec.elements[key];
+     if (!element) return;
+     repeatValidatedKeys.add(key);
+-    const contextKey = `${key}\0${repeatBasePath ?? ""}\0${sampleAvailable}`;
++    const scope = sampleAvailable ? repeatBasePath ?? "" : repeatBasePath === void 0 ? "" : "\u0001";
++    const contextKey = `${key}\0${scope}\0${sampleAvailable}`;
+     if (repeatValidatedContexts.has(contextKey)) return;
++    if (sampleAvailable && repeatBasePath !== void 0) {
++      const paths = repeatSamplePaths.get(key) ?? 0;
++      if (paths >= MAX_REPEAT_SAMPLE_PATHS) return;
++      repeatSamplePaths.set(key, paths + 1);
++    }
+     repeatValidatedContexts.add(contextKey);
+     let childRepeatBasePath = repeatBasePath;
+     let childSampleAvailable = sampleAvailable;
+@@ -1806,14 +2142,13 @@ function validateSpec(spec, options = {}) {
+         childSampleAvailable = canCheckSample && Array.isArray(value) && value.length > 0;
+       }
+     }
+-    const nextAncestors = new Set(ancestors);
+-    nextAncestors.add(key);
++    ancestors.add(key);
+     for (const childKey of element.children ?? []) {
+       validateRepeatPaths(
+         childKey,
+         childRepeatBasePath,
+         childSampleAvailable,
+-        nextAncestors
++        ancestors
+       );
+     }
+     for (const childKeys of Object.values(element.slots ?? {})) {
+@@ -1822,10 +2157,11 @@ function validateSpec(spec, options = {}) {
+           childKey,
+           repeatBasePath,
+           sampleAvailable,
+-          nextAncestors
++          ancestors
+         );
+       }
+     }
++    ancestors.delete(key);
+   };
+   if (spec.elements[spec.root]) {
+     validateRepeatPaths(spec.root, void 0, true, /* @__PURE__ */ new Set());
+@@ -4199,6 +4535,9 @@ function experimental_createEvaluator(options) {
    resolveElementProps,
    resolvePropValue,
    resolveRepeatItemStatePath,
@@ -484,7 +547,7 @@ index 33cb8650ce36e5e58f5822f73e43a02f353639d3..cadc2e237ebef441bb8c2e09e771626c
    runValidation,
    runValidationCheck,
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 9dee77c008b7edf735950a0a65fa1fa9e5531978..5fd89990af705ea7edb59137435c0f975b78b8ad 100644
+index 9dee77c008b7edf735950a0a65fa1fa9e5531978..d4bfa3d8363d33bafefae96f58e97f0896fbd6d6 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -116,6 +116,7 @@ var VisibilityConditionStrictSchema = z.lazy(
@@ -948,7 +1011,70 @@ index 9dee77c008b7edf735950a0a65fa1fa9e5531978..5fd89990af705ea7edb59137435c0f97
        const result = runValidationCheck(check2, ctx);
        checks.push(result);
        if (!result.valid) {
-@@ -3453,6 +3775,9 @@ export {
+@@ -914,6 +1236,9 @@ var check = {
+ };
+ 
+ // src/spec-validator.ts
++// opencode-genui patch: how many distinct repeat base paths with a sample list in state validateSpec checks an element
++// under (see validateRepeatPaths).
++var MAX_REPEAT_SAMPLE_PATHS = 64;
+ function validateSpec(spec, options = {}) {
+   const { checkOrphans = false } = options;
+   const issues = [];
+@@ -1021,13 +1346,21 @@ function validateSpec(spec, options = {}) {
+   }
+   const repeatValidatedKeys = /* @__PURE__ */ new Set();
+   const repeatValidatedContexts = /* @__PURE__ */ new Set();
++  // opencode-genui patch: an element is checked once per context that can change the result (see the patch notes).
++  const repeatSamplePaths = /* @__PURE__ */ new Map();
+   const validateRepeatPaths = (key, repeatBasePath, sampleAvailable, ancestors) => {
+     if (ancestors.has(key)) return;
+     const element = spec.elements[key];
+     if (!element) return;
+     repeatValidatedKeys.add(key);
+-    const contextKey = `${key}\0${repeatBasePath ?? ""}\0${sampleAvailable}`;
++    const scope = sampleAvailable ? repeatBasePath ?? "" : repeatBasePath === void 0 ? "" : "\u0001";
++    const contextKey = `${key}\0${scope}\0${sampleAvailable}`;
+     if (repeatValidatedContexts.has(contextKey)) return;
++    if (sampleAvailable && repeatBasePath !== void 0) {
++      const paths = repeatSamplePaths.get(key) ?? 0;
++      if (paths >= MAX_REPEAT_SAMPLE_PATHS) return;
++      repeatSamplePaths.set(key, paths + 1);
++    }
+     repeatValidatedContexts.add(contextKey);
+     let childRepeatBasePath = repeatBasePath;
+     let childSampleAvailable = sampleAvailable;
+@@ -1061,14 +1394,13 @@ function validateSpec(spec, options = {}) {
+         childSampleAvailable = canCheckSample && Array.isArray(value) && value.length > 0;
+       }
+     }
+-    const nextAncestors = new Set(ancestors);
+-    nextAncestors.add(key);
++    ancestors.add(key);
+     for (const childKey of element.children ?? []) {
+       validateRepeatPaths(
+         childKey,
+         childRepeatBasePath,
+         childSampleAvailable,
+-        nextAncestors
++        ancestors
+       );
+     }
+     for (const childKeys of Object.values(element.slots ?? {})) {
+@@ -1077,10 +1409,11 @@ function validateSpec(spec, options = {}) {
+           childKey,
+           repeatBasePath,
+           sampleAvailable,
+-          nextAncestors
++          ancestors
+         );
+       }
+     }
++    ancestors.delete(key);
+   };
+   if (spec.elements[spec.root]) {
+     validateRepeatPaths(spec.root, void 0, true, /* @__PURE__ */ new Set());
+@@ -3453,6 +3786,9 @@ export {
    resolveElementProps,
    resolvePropValue,
    resolveRepeatItemStatePath,

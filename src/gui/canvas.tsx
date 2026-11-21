@@ -29,6 +29,7 @@ import { allowOutward } from "./outward.ts"
 import { persistSurface, surfaceEntry, writeStore } from "./persist.ts"
 import type { SessionEntry } from "./sessions.ts"
 import type { GuiEnv } from "./setup.tsx"
+import { canvasesRefused } from "./issues.ts"
 import { askToFix, SurfaceView } from "./surface.tsx"
 
 type TabShown = "hidden" | "shown" | "missing"
@@ -223,7 +224,15 @@ function CanvasView(props: {
   const streaming = () => !!state()?.streaming
   const title = () => entry().title(canvas()) ?? canvas()
   const runtime = createMemo(() => getSurface(surfaceKey(props.session().key, "canvas", canvas())))
-  const compiled = createMemo(() => compileSpec(state()?.spec ?? null, { streaming: streaming() }))
+  // The newest canvas also says how many canvases were not opened (see MAX_CANVASES in src/protocol/fold.ts).
+  const refused = createMemo(() => {
+    const ids = index().canvasIds()
+    return ids[ids.length - 1] === canvas() ? index().refused().size : 0
+  })
+  const compiled = createMemo(() => {
+    const result = compileSpec(state()?.spec ?? null, { streaming: streaming() })
+    return refused() > 0 ? { ...result, issues: [...result.issues, canvasesRefused(refused())] } : result
+  })
   const lineErrors = () => (streaming() ? [] : (state()?.lineErrors ?? []))
   const generation = () => state()?.generation
 

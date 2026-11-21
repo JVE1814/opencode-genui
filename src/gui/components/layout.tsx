@@ -2,9 +2,12 @@ import { children, createMemo, createSignal, For, Index, Show, type JSX } from "
 import type { ComponentName } from "../../catalog/components.ts"
 import { useHost } from "../host.ts"
 import { MarkdownText } from "./content.tsx"
+import { ITEM_LISTS } from "../costs.ts"
 import { isCommitKey, useChoice } from "./inputs.tsx"
 import {
   bool,
+  CutNote,
+  firstItems,
   list,
   num,
   oneOf,
@@ -12,6 +15,7 @@ import {
   trackOverflow,
   uid,
   useBound,
+  useListCut,
   useRemembered,
   type GenuiComponent,
 } from "./shared.tsx"
@@ -154,24 +158,29 @@ interface TabItem {
   readonly value: string
 }
 
-/** Tabs from the prop: `{ label, value }` objects, tolerating plain strings and a missing label or value. */
-function tabItems(value: unknown): TabItem[] {
-  return list(value).flatMap((item, index): TabItem[] => {
+/**
+ * Tabs from the prop: `{ label, value }` objects, tolerating plain strings and a missing label or value; at most `max`
+ * of them (see ITEM_LISTS in src/gui/costs.ts), and how many the prop holds.
+ */
+function tabItems(value: unknown, max: number): { readonly items: TabItem[]; readonly total: number } {
+  return firstItems(value, max, (item, index): TabItem | undefined => {
     if (typeof item === "string" || typeof item === "number") {
       const text = str(item)
-      return text ? [{ label: text, value: text }] : []
+      return text ? { label: text, value: text } : undefined
     }
-    if (!isRecord(item)) return []
+    if (!isRecord(item)) return undefined
     const label = str(item.label)
     const key = str(item.value) || label || String(index)
-    return [{ label: label || key, value: key }]
+    return { label: label || key, value: key }
   })
 }
 
 const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
   const base = uid("tabs")
   const choice = useChoice(ctx)
-  const tabs = createMemo(() => tabItems(ctx.props.tabs))
+  const parsed = createMemo(() => tabItems(ctx.props.tabs, ITEM_LISTS.Tabs.max))
+  const tabs = createMemo(() => parsed().items)
+  const cut = useListCut(ctx, "Tabs", () => ({ shown: tabs().length, total: parsed().total }))
   const [value, setValue] = useBound(ctx, "value", "", (next) => (typeof next === "string" ? next : undefined))
   const panels = useChildList(() => ctx.children)
   let listRef: HTMLDivElement | undefined
@@ -194,9 +203,10 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
 
   // Child N is the panel of tab N. With a different number of children (and not merely because the spec is still
   // streaming them in) the children are not panels: show them all, as the spec probably switches content itself.
+  // Panels of tabs past the ones shown stay hidden.
   const mapped = createMemo(() => {
     const count = panels().length
-    const total = tabs().length
+    const total = parsed().total
     return total > 0 && (count === total || (!!ctx.loading && count < total))
   })
 
@@ -278,6 +288,7 @@ const Tabs: GenuiComponent<"Tabs"> = (ctx) => {
           )}
         </Index>
       </div>
+      <CutNote text={cut()} />
       <div
         data-slot="panels"
         role={mapped() ? undefined : "tabpanel"}
@@ -312,11 +323,12 @@ interface AccordionItem {
   readonly content: string
 }
 
-function accordionItems(value: unknown): AccordionItem[] {
-  return list(value).flatMap((item): AccordionItem[] => {
-    if (typeof item === "string") return [{ title: item, content: "" }]
-    if (!isRecord(item)) return []
-    return [{ title: str(item.title), content: str(item.content) }]
+/** Sections from the prop, at most `max` of them (see ITEM_LISTS in src/gui/costs.ts), and how many it holds. */
+function accordionItems(value: unknown, max: number): { readonly items: AccordionItem[]; readonly total: number } {
+  return firstItems(value, max, (item): AccordionItem | undefined => {
+    if (typeof item === "string") return { title: item, content: "" }
+    if (!isRecord(item)) return undefined
+    return { title: str(item.title), content: str(item.content) }
   })
 }
 
@@ -326,9 +338,12 @@ function accordionItems(value: unknown): AccordionItem[] {
  */
 const Accordion: GenuiComponent<"Accordion"> = (ctx) => {
   const { ui } = useHost()
-  const items = createMemo(() => accordionItems(ctx.props.items))
+  const parsed = createMemo(() => accordionItems(ctx.props.items, ITEM_LISTS.Accordion.max))
+  const items = createMemo(() => parsed().items)
+  const cut = useListCut(ctx, "Accordion", () => ({ shown: items().length, total: parsed().total }))
   const bodies = useChildList(() => ctx.children)
-  const extra = createMemo(() => bodies().slice(items().length))
+  // Children past the items: the bodies of sections left out are not among them.
+  const extra = createMemo(() => bodies().slice(parsed().total))
   const multiple = () => ctx.props.type === "multiple"
 
   const initial = createMemo((): ReadonlySet<number> => {
@@ -369,7 +384,7 @@ const Accordion: GenuiComponent<"Accordion"> = (ctx) => {
                 </summary>
                 <div data-slot="content">
                   <Show when={item().content}>
-                    <MarkdownText text={item().content} />
+                    <MarkdownText text={item().content} owner={ctx} />
                   </Show>
                   {bodies()[index]}
                 </div>
@@ -378,6 +393,7 @@ const Accordion: GenuiComponent<"Accordion"> = (ctx) => {
           </Index>
         </div>
       </Show>
+      <CutNote text={cut()} />
       <Show when={extra().length > 0}>
         <div data-slot="extra">{extra()}</div>
       </Show>

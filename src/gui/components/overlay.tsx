@@ -12,11 +12,12 @@ import {
   type JSX,
 } from "solid-js"
 import { useStateBinding, useStateStore } from "@json-render/solid"
+import { ITEM_LISTS } from "../costs.ts"
 import { QuietWriteContext, useHost, useSurface } from "../host.ts"
 import { asModalFocusMove, modalRefusal, noteModal, noteModalShown, warnModalRefusal } from "../outward.ts"
 import { MarkdownText } from "./content.tsx"
 import { GuardedImage, statePath } from "./data.tsx"
-import { list, str, uid, type GenuiComponent } from "./shared.tsx"
+import { CutNote, firstItems, str, uid, useListCut, type GenuiComponent } from "./shared.tsx"
 
 // Overlay components: Dialog, Drawer, Tooltip, Popover, Carousel. Styles: src/gui/styles/overlay.css.
 // Dialog and Drawer are native <dialog> elements shown with showModal(), Popover is a native popover="auto" panel
@@ -338,7 +339,7 @@ const Popover: GenuiComponent<"Popover"> = (ctx) => {
       <div data-slot="panel" ref={panel} id={`${id}-panel`} popover="auto" role="dialog" aria-label={trigger()}>
         <Show when={content()}>
           <div data-slot="content">
-            <MarkdownText text={content()} />
+            <MarkdownText text={content()} owner={ctx} />
           </div>
         </Show>
         <Show when={nested()}>
@@ -365,11 +366,14 @@ interface CarouselItem {
  */
 const Carousel: GenuiComponent<"Carousel"> = (ctx) => {
   const host = useHost()
-  const items = createMemo<CarouselItem[]>(() =>
-    list(ctx.props.items)
-      .filter(isRecord)
-      .map((item) => ({ title: str(item.title), description: str(item.description), image: item.image })),
+  // At most ITEM_LISTS.Carousel.max cards (src/gui/costs.ts, which the render budget charges); the rest is said.
+  const parsed = createMemo(() =>
+    firstItems(ctx.props.items, ITEM_LISTS.Carousel.max, (item): CarouselItem | undefined =>
+      isRecord(item) ? { title: str(item.title), description: str(item.description), image: item.image } : undefined,
+    ),
   )
+  const items = createMemo(() => parsed().items)
+  const cut = useListCut(ctx, "Carousel", () => ({ shown: items().length, total: parsed().total }))
 
   let viewport: HTMLDivElement | undefined
   const [atStart, setAtStart] = createSignal(true)
@@ -504,6 +508,7 @@ const Carousel: GenuiComponent<"Carousel"> = (ctx) => {
             />
           </div>
         </Show>
+        <CutNote text={cut()} />
       </Show>
     </div>
   )

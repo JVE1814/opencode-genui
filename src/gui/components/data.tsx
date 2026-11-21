@@ -5,9 +5,22 @@ import { isIconName } from "../../catalog/icons.ts"
 import { isRemoteImage, safeUrl, urlHost } from "../../protocol/url.ts"
 import { MAX_TABLE_COLUMNS, tableRows, tableWidth } from "../costs.ts"
 import { useHost, useSurface, type Host } from "../host.ts"
+import { tableCut } from "../issues.ts"
 import { askOutward } from "../outward.ts"
 import { useActivation } from "./inputs.tsx"
-import { bool, display, list, num, oneOf, str, trackOverflow, uid, type GenuiComponent } from "./shared.tsx"
+import {
+  amount,
+  bool,
+  display,
+  list,
+  num,
+  oneOf,
+  str,
+  trackOverflow,
+  uid,
+  useCut,
+  type GenuiComponent,
+} from "./shared.tsx"
 
 // Data components: Table, Progress, Skeleton, Spinner, Stat, Image, Avatar. Styles: src/gui/styles/data.css.
 // GuardedImage and statePath are shared with overlay.tsx (Carousel, Dialog, Drawer).
@@ -181,18 +194,36 @@ const Table: GenuiComponent<"Table"> = (ctx) => {
     return all.slice(0, tableRows(all.length, Math.max(1, tableWidth(ctx.props.columns, all))))
   })
   const columns = createMemo(() => tableColumns(ctx.props.columns, rows()))
-  // What the table leaves out, said under it.
-  const cut = createMemo(() => {
-    const total = allColumns(ctx.props.columns, allRows())
-    const shownRows = rows().length
-    return shownRows < allRows().length || columns().length < total
+  // What the table leaves out, said under it and reported to the agent.
+  const counts = createMemo(
+    () => {
+      const total = allColumns(ctx.props.columns, allRows())
+      return { rows: rows().length, totalRows: allRows().length, columns: columns().length, totalColumns: total }
+    },
+    undefined,
+    {
+      equals: (a, b) =>
+        a.rows === b.rows &&
+        a.totalRows === b.totalRows &&
+        a.columns === b.columns &&
+        a.totalColumns === b.totalColumns,
+    },
+  )
+  const isCut = () => counts().rows < counts().totalRows || counts().columns < counts().totalColumns
+  const cut = () => {
+    const { rows, totalRows, columns, totalColumns } = counts()
+    return isCut()
       ? host.t("c.table.cut", {
-          rows: shownRows,
-          totalRows: allRows().length,
-          columns: columns().length,
-          totalColumns: total,
+          rows: amount(rows),
+          totalRows: amount(totalRows),
+          columns: amount(columns),
+          totalColumns: amount(totalColumns),
         })
       : ""
+  }
+  useCut(ctx, () => {
+    const { rows, totalRows, columns, totalColumns } = counts()
+    return isCut() ? tableCut(rows, totalRows, columns, totalColumns) : undefined
   })
   const values = createMemo(() => {
     const cols = columns()

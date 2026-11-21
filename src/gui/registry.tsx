@@ -53,6 +53,29 @@ export function EvaluationLend(props: { readonly lend: Lend; readonly children: 
   })
 }
 
+/**
+ * What hears of an element that could not render (see RenderErrorContext in patches/@json-render%2Fsolid): called by the
+ * element's error boundary as it shows its fallback (nothing), so cleanups registered in it run when the element goes.
+ */
+type RenderErrorReport = (error: unknown, type: unknown) => void
+const RenderErrorContext = (
+  jsonRender as unknown as { readonly RenderErrorContext?: Context<RenderErrorReport | undefined> }
+).RenderErrorContext
+
+/** Provides `report` to the elements rendered in `children` (see RenderErrorContext). */
+export function RenderErrors(props: {
+  readonly report: RenderErrorReport
+  readonly children: JSX.Element
+}): JSX.Element {
+  if (!RenderErrorContext) return props.children
+  return createComponent(RenderErrorContext.Provider, {
+    value: props.report,
+    get children() {
+      return props.children
+    },
+  })
+}
+
 /** Every catalog component's native implementation. `satisfies` makes a missing one a type error. */
 export function genuiComponents(): Components<GenuiCatalog> {
   return {

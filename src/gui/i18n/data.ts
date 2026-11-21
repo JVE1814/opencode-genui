@@ -38,4 +38,5 @@ export default {
   "c.chart.category": "Category",
   "c.chart.value": "Value",
   "c.chart.share": "Share",
+  "c.chart.cut": "Showing {{points}} of {{totalPoints}} labels and {{series}} of {{totalSeries}} series",
 } satisfies Record<string, string>

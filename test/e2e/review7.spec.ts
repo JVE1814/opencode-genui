@@ -25,13 +25,24 @@ async function boot(page: Page) {
   await page.evaluate(() => window.__genui.appendUser("go"))
 }
 
-async function say(page: Page, text: string) {
-  await page.evaluate((reply) => window.__genui.appendAssistant(reply), text)
+/** Appends an assistant reply; returns how long the page spent on the append's own task (see `longestSince`). */
+async function say(page: Page, text: string): Promise<number> {
+  return page.evaluate(async (reply) => {
+    const started = performance.now()
+    const done = window.__genui.appendAssistant(reply)
+    const own = performance.now() - started
+    await done
+    return own
+  }, text)
 }
 
-/** Appends a completed assistant message whose tool part returned `output` (Markdown): blocks in it are untrusted. */
-async function toolOutput(page: Page, output: string) {
-  await page.evaluate((text) => {
+/**
+ * Appends a completed assistant message whose tool part returned `output` (Markdown): blocks in it are untrusted.
+ * Returns how long the page spent on the append's own task.
+ */
+async function toolOutput(page: Page, output: string): Promise<number> {
+  return page.evaluate((text) => {
+    const started = performance.now()
     const app = window.__genui.host.app
     const session = app.sessions.current()
     const id = app.server.startAssistant(session.id, [
@@ -40,43 +51,50 @@ async function toolOutput(page: Page, output: string) {
     ])
     app.server.appendText(session.id, id, "Done.")
     app.server.complete(session.id, id)
+    return performance.now() - started
   }, output)
 }
 
-/** Starts the clock for `pauseOver` (kept as a step, so each test reads as before and after). */
-async function watchPauses(_page: Page) {}
-
-/** How long `action` keeps the test waiting: an append or a key press renders in the page's task, which it awaits. */
-async function timed(action: () => Promise<unknown>): Promise<number> {
-  const started = Date.now()
-  await action()
-  return Date.now() - started
+/**
+ * Starts recording the page's long tasks (PerformanceObserver), for `longestSince`. What the page itself measured: other
+ * test workers sharing the CPUs change it far less than the wall-clock round trips these tests timed before
+ * [review7#R6F3-4].
+ */
+async function watchTasks(page: Page) {
+  await page.evaluate(() => {
+    const record = window as unknown as { __longest: number; __observer?: PerformanceObserver }
+    record.__longest = 0
+    record.__observer?.disconnect()
+    record.__observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) record.__longest = Math.max(record.__longest, entry.duration)
+    })
+    record.__observer.observe({ type: "longtask" })
+  })
 }
 
 /**
- * Pings the page every 100 ms for `ms` (an evaluate waits until the main thread is free), and returns the longest a
- * ping waited: how long the window kept the user waiting, as the review's probes measure it.
+ * The longest task since `watchTasks`, after waiting `ms`: the longest long task, or `own`, the time an evaluate's own
+ * task took in the page (an append), which the observer does not report, if that was longer.
  */
-async function pauseOver(page: Page, ms: number): Promise<number> {
-  const end = Date.now() + ms
-  let longest = 0
-  while (Date.now() < end) {
-    const started = Date.now()
-    await page.evaluate(() => 1)
-    longest = Math.max(longest, Date.now() - started)
-    await page.waitForTimeout(100)
-  }
-  return longest
+async function longestSince(page: Page, ms: number, own = 0): Promise<number> {
+  await page.waitForTimeout(ms)
+  const longest = await page.evaluate(() => {
+    const record = window as unknown as { __longest: number; __observer: PerformanceObserver }
+    for (const entry of record.__observer.takeRecords()) record.__longest = Math.max(record.__longest, entry.duration)
+    return record.__longest
+  })
+  return Math.max(longest, own)
 }
 
 const untrusted = (page: Page) => page.locator('[data-playground-tool-output] [data-genui][data-surface="inline"]')
 
 /**
- * How long the window may keep the test waiting: the 1 s target. The fixed code blocks for 50 to 300 ms, the base tree
- * for 1.2 to 13 s. These tests asserted 300 and 400 ms, which wall-clock time passed when other test workers shared the
- * CPUs (5 of 12 runs with --workers=4) [review8#R6F2-4].
+ * The longest task the page may run (see `longestSince`): the fixed code's longest tasks measured 40 to 270 ms with
+ * four test workers sharing the CPUs, the base tree's 1.2 to 13 s. These tests timed wall-clock round trips, at 300 and
+ * 400 ms, which other workers stretched past their limits; then at 1 s, which a threefold regression passed
+ * [review8#R6F2-4, review7#R6F3-4].
  */
-const BLOCKED_MS = 1000
+const BLOCKED_MS = 500
 
 test.describe("evaluating expressions is bounded in time [R6S1-1]", () => {
   test("2,000 rows of 50 $format each: neither the block's arrival nor a key press blocks the window", async ({
@@ -91,26 +109,23 @@ test.describe("evaluating expressions is bounded in time [R6S1-1]", () => {
       length: 0,
       suffix: "",
     }
-    await watchPauses(page)
-    const arrival = await timed(() =>
-      toolOutput(
-        page,
-        block("spec", undefined, [
-          add("/state", { q: "", rows: Array.from({ length: 1998 }, () => 0) }),
-          root("card"),
-          element("card", "Card", { title: "Rows" }, ["in", "list"]),
-          element("in", "Input", { label: "Search", value: { $bindState: "/q" } }),
-          add("/elements/list", { type: "Stack", props: {}, repeat: { statePath: "/rows" }, children: ["row"] }),
-          element("row", "Text", { text }),
-        ]),
-      ),
+    await watchTasks(page)
+    const arrival = await toolOutput(
+      page,
+      block("spec", undefined, [
+        add("/state", { q: "", rows: Array.from({ length: 1998 }, () => 0) }),
+        root("card"),
+        element("card", "Card", { title: "Rows" }, ["in", "list"]),
+        element("in", "Input", { label: "Search", value: { $bindState: "/q" } }),
+        add("/elements/list", { type: "Stack", props: {}, repeat: { statePath: "/rows" }, children: ["row"] }),
+        element("row", "Text", { text }),
+      ]),
     )
-    expect(arrival).toBeLessThan(BLOCKED_MS)
-    expect(await pauseOver(page, 3000)).toBeLessThan(BLOCKED_MS)
+    expect(await longestSince(page, 3000, arrival)).toBeLessThan(BLOCKED_MS)
     await untrusted(page).getByLabel("Search").click()
-    await watchPauses(page)
-    expect(await timed(() => page.keyboard.type("x"))).toBeLessThan(BLOCKED_MS)
-    expect(await pauseOver(page, 3000)).toBeLessThan(BLOCKED_MS)
+    await watchTasks(page)
+    await page.keyboard.type("x")
+    expect(await longestSince(page, 3000)).toBeLessThan(BLOCKED_MS)
     await expect(untrusted(page).getByLabel("Search")).toHaveValue("x")
   })
 
@@ -121,32 +136,33 @@ test.describe("evaluating expressions is bounded in time [R6S1-1]", () => {
     test.slow()
     await boot(page)
     const terms = Array.from({ length: 4000 }, () => ({ $state: "/q", eq: "never" }))
-    await watchPauses(page)
-    const arrival = await timed(() =>
-      toolOutput(
-        page,
-        block("spec", undefined, [
-          add("/state", { q: "", rows: Array.from({ length: 1998 }, (_, index) => index) }),
-          root("card"),
-          element("card", "Card", { title: "Rows" }, ["in", "list"]),
-          element("in", "Input", { label: "Search", value: { $bindState: "/q" } }),
-          add("/elements/list", { type: "Stack", props: {}, repeat: { statePath: "/rows" }, children: ["row"] }),
-          element("row", "Badge", { text: "row" }, [], {
-            visible: { $or: [...terms, { $state: "/q", neq: "never" }] },
-          }),
-        ]),
-      ),
+    await watchTasks(page)
+    const arrival = await toolOutput(
+      page,
+      block("spec", undefined, [
+        add("/state", { q: "", rows: Array.from({ length: 1998 }, (_, index) => index) }),
+        root("card"),
+        element("card", "Card", { title: "Rows" }, ["in", "list"]),
+        element("in", "Input", { label: "Search", value: { $bindState: "/q" } }),
+        add("/elements/list", { type: "Stack", props: {}, repeat: { statePath: "/rows" }, children: ["row"] }),
+        element("row", "Badge", { text: "row" }, [], {
+          visible: { $or: [...terms, { $state: "/q", neq: "never" }] },
+        }),
+      ]),
     )
-    expect(arrival).toBeLessThan(BLOCKED_MS)
-    expect(await pauseOver(page, 4000)).toBeLessThan(BLOCKED_MS)
-    // Every row shows once its condition is evaluated (as many as the render budget holds).
+    expect(await longestSince(page, 4000, arrival)).toBeLessThan(BLOCKED_MS)
+    // Each row shows once its condition is evaluated, as many rows as the render budget holds. A row is charged its
+    // element's written size where it is built (about 290 child slots for a condition of 4,000 terms), so the 4,000
+    // child slots of a surface hold a dozen rows, and the surface says the rest do not show [review7#R7S1-3]. (Charged
+    // one slot each, all 1,998 rows were built, and each evaluated its 4,000 terms on every key press: 9.8 s of tasks.)
     await expect
       .poll(() => untrusted(page).getByText("row", { exact: true }).count(), { timeout: 15_000 })
-      .toBeGreaterThan(1900)
+      .toBeGreaterThanOrEqual(10)
+    await expect(untrusted(page).locator('[data-gu-chrome="issues"]')).toContainText("the UI is too large")
     await untrusted(page).getByLabel("Search").click()
-    await watchPauses(page)
-    expect(await timed(() => page.keyboard.type("x"))).toBeLessThan(BLOCKED_MS)
-    expect(await pauseOver(page, 4000)).toBeLessThan(BLOCKED_MS)
+    await watchTasks(page)
+    await page.keyboard.type("x")
+    expect(await longestSince(page, 4000)).toBeLessThan(BLOCKED_MS)
   })
 })
 
@@ -168,20 +184,17 @@ test.describe("a state shared by copies [R6S1-2]", () => {
   }) => {
     // Its stored snapshot turned 800 million characters into JSON: 4.4 s frozen.
     await boot(page)
-    await watchPauses(page)
-    const arrival = await timed(() =>
-      say(
-        page,
-        block("canvas", { canvas: "dag", title: "DAG" }, [
-          ...doubling(24),
-          root("card"),
-          element("card", "Card", { title: "DAG" }, ["t"]),
-          element("t", "Text", { text: { $truncate: { $state: "/a24" }, length: 8 } }),
-        ]),
-      ),
+    await watchTasks(page)
+    const arrival = await say(
+      page,
+      block("canvas", { canvas: "dag", title: "DAG" }, [
+        ...doubling(24),
+        root("card"),
+        element("card", "Card", { title: "DAG" }, ["t"]),
+        element("t", "Text", { text: { $truncate: { $state: "/a24" }, length: 8 } }),
+      ]),
     )
-    expect(arrival).toBeLessThan(BLOCKED_MS)
-    expect(await pauseOver(page, 2500)).toBeLessThan(BLOCKED_MS)
+    expect(await longestSince(page, 2500, arrival)).toBeLessThan(BLOCKED_MS)
     const canvas = page.locator('[data-gu-chrome="canvas"][data-canvas="dag"]')
     await expect(canvas.getByText(/1 issue/)).toBeVisible()
   })
@@ -192,22 +205,19 @@ test.describe("a state shared by copies [R6S1-2]", () => {
     // 4.4 KB: 15.6 s frozen, with no click.
     await boot(page)
     const ref = { $truncate: { $state: "/a21" }, length: 8 }
-    await watchPauses(page)
-    const arrival = await timed(() =>
-      toolOutput(
-        page,
-        block("spec", undefined, [
-          ...doubling(21),
-          root("card"),
-          element("card", "Card", { title: "DAG" }, ["t"]),
-          element("t", "Text", {
-            text: { $concat: Array.from({ length: 8 }, () => ({ $truncate: ref, length: 0, suffix: "" })) },
-          }),
-        ]),
-      ),
+    await watchTasks(page)
+    const arrival = await toolOutput(
+      page,
+      block("spec", undefined, [
+        ...doubling(21),
+        root("card"),
+        element("card", "Card", { title: "DAG" }, ["t"]),
+        element("t", "Text", {
+          text: { $concat: Array.from({ length: 8 }, () => ({ $truncate: ref, length: 0, suffix: "" })) },
+        }),
+      ]),
     )
-    expect(arrival).toBeLessThan(BLOCKED_MS)
-    expect(await pauseOver(page, 2500)).toBeLessThan(BLOCKED_MS)
+    expect(await longestSince(page, 2500, arrival)).toBeLessThan(BLOCKED_MS)
     await expect(untrusted(page).getByText("DAG")).toBeVisible()
   })
 })
@@ -253,9 +263,9 @@ test("typing into a UI whose row watches each copy a long text to a new path kee
   await surface.getByLabel("Search").click()
   let pause = 0
   for (const key of "abcdefghijkl") {
-    await watchPauses(page)
-    pause = Math.max(pause, await timed(() => page.keyboard.type(key)))
-    pause = Math.max(pause, await pauseOver(page, 3000))
+    await watchTasks(page)
+    await page.keyboard.type(key)
+    pause = Math.max(pause, await longestSince(page, 3000))
   }
   expect(pause).toBeLessThan(BLOCKED_MS)
   await cdp.send("HeapProfiler.collectGarbage")

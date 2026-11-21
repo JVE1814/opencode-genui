@@ -75,6 +75,12 @@ export interface TrackedStore extends StateStore {
   noteSkipped(): void
   /** Whether work was skipped since the agent's state last changed (see `noteSkipped`). */
   skippedWork(): boolean
+  /**
+   * Whether the agent's last change left edits of list items not looked up, or compared, for MAX_HASHED_ITEMS or
+   * MAX_RECONCILE_WORK: such an edit stayed at its index when the list kept its length, and was dropped otherwise.
+   */
+  editsUnmatched(): boolean
+  /** Hears `skippedWork` and `editsUnmatched` change. */
   onSkippedWork(listener: () => void): () => void
   onOverridesChange(listener: () => void): () => void
 }
@@ -312,27 +318,11 @@ const own = (value: unknown, key: string): unknown =>
     ? (value as Record<string, unknown>)[key]
     : undefined
 
-// Whether two items are the same apart from the member at `rest` (an empty `rest`: the whole values).
-function sameExcept(a: unknown, b: unknown, rest: readonly string[]): boolean {
-  if (rest.length === 0) return jsonEqual(a, b)
-  if (Object.is(a, b)) return true
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false
-  if (Array.isArray(a) !== Array.isArray(b)) return false
-  if (Array.isArray(a) && a.length !== (b as unknown[]).length) return false
-  const [head, ...tail] = rest
-  for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
-    if (key !== head) {
-      if (!jsonEqual(own(a, key), own(b, key))) return false
-    } else if (tail.length > 0 && !sameExcept(own(a, key), own(b, key), tail)) return false
-  }
-  return true
-}
-
 // --- Finding a list's items by content ------------------------------------------------------------------------------
 
-// A structural hash of a JSON-like value, the same for values jsonEqual (src/protocol/fold.ts) finds equal: an object's
-// members in any order, an array's items with their index. Seeded per window, so a spec cannot be written to collide.
-// Equal hashes are only candidates: the caller compares the values themselves.
+// A structural hash of a JSON-like value, the same for values `Matcher.equal` finds equal: an object's members in any
+// order, an array's items with their index. Seeded per window, so a spec cannot be written to collide. Equal hashes
+// are only candidates: the caller compares the values themselves.
 const HASH_SEED = (Math.random() * 0x100000000) >>> 0
 
 function hashText(text: string): number {
@@ -347,45 +337,248 @@ const mix = (hash: number) => {
   return (next ^ (next >>> 16)) >>> 0
 }
 
-// What one member (an object's key, an array's index) adds to its container's hash.
-const memberHash = (key: string, value: unknown, depth: number) =>
-  mix(Math.imul(hashText(key), 0x9e3779b1) ^ hashOf(value, depth))
-
-function hashOf(value: unknown, depth = 0): number {
+function leafHash(value: unknown): number {
   if (typeof value === "string") return mix(hashText(value) ^ 0x51)
   if (typeof value === "number") return mix(hashText(Object.is(value, -0) ? "-0" : String(value)) ^ 0x52)
-  if (value === null || typeof value !== "object") return mix(hashText(String(value)) ^ 0x53)
-  // Past jsonEqual's depth nothing is equal; a constant only costs comparisons.
-  if (depth > 200) return 0x54
-  return containerHash(value, depth)
+  return mix(hashText(String(value)) ^ 0x53)
 }
 
-// The sum of a container's members' hashes (so one member's can be taken out, see ItemFinder), with its kind and, for
-// an array, its length (sameExcept needs equal lengths).
-function containerHash(value: object, depth: number): number {
-  let hash = Array.isArray(value) ? mix(0x55 ^ value.length) : 0x56
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index++)
-      hash = (hash + memberHash(String(index), value[index], depth + 1)) >>> 0
-  } else {
-    for (const key of Object.keys(value))
-      hash = (hash + memberHash(key, (value as Record<string, unknown>)[key], depth + 1)) >>> 0
-  }
-  return hash
-}
+const isContainer = (value: unknown): value is object => typeof value === "object" && value !== null
 
 /**
- * Finds a list's items by content during one reconcile: for each list (by identity) and each way of comparing (by key
- * field, or whole items apart from one member), the indices of its items by hash, built once. An edit whose item moved
- * then looks its item up instead of scanning the list: after a select-all wrote an edit per row, an agent patch that
- * moved every row compared each edit with the whole list (7,000 rows and 2,000 edits took 7 s per patch).
+ * How tall a container may be to be compared member by member, and hashed with what lies below its members (jsonEqual
+ * in src/protocol/fold.ts stops at this depth too). A taller member counts as different unless it is the very same
+ * object, and adds TALL to its container's hash; walking a value stops this many levels down, so a deep chain costs
+ * neither the stack nor more than these levels.
  */
-class ItemFinder {
+const MAX_COMPARED_HEIGHT = 200
+const TALL = 0x54
+
+/**
+ * How much one reconcile may hash and compare, in members (and 16 characters of a string) visited: about four times
+ * the largest state a UI holds. Every container is hashed once and every pair of containers compared once per
+ * reconcile (see Matcher), so this is only a backstop: past it, a list's items are looked up no more and new
+ * comparisons count as changed, and the UI says so (see TrackedStore.editsUnmatched).
+ */
+export const MAX_RECONCILE_WORK = 4_000_000
+
+/**
+ * How many list items the lookups of one reconcile hash in all (each way of comparing a list's items hashes all of it
+ * once, see Matcher.nearest): a few ways over the longest lists a UI shows. Past it, an item is looked up no more.
+ */
+export const MAX_HASHED_ITEMS = 200_000
+
+/** A container's hash (see Matcher.walk) and its height, at most MAX_COMPARED_HEIGHT + 1. */
+interface Hashed {
+  readonly hash: number
+  readonly height: number
+}
+/** A walk that stopped before it could tell (a lower bound of the height, see Matcher.walk). */
+interface Unfinished {
+  readonly hash: number
+  readonly height: number
+  readonly partial: true
+}
+
+const SAME = Symbol("same")
+const MANY = Symbol("many")
+/** How two containers differ: not at all, in one member (its key), or in more (or in kind or length). */
+type Diff = string | typeof SAME | typeof MANY
+
+/**
+ * Hashes and compares the agent's values for one reconcile, each container once and each pair of containers once, so
+ * what an edit costs does not grow with the size of its item. Edits under one large item each compared and hashed all
+ * of it: after a select-all wrote 7,600 edits below a list inside one row of 85 KB, an agent patch that changed one
+ * field of the row froze the window for 21 s, and saving the edits (see `overrides`) for 3.6 s. The agent's state is
+ * never changed in place (patches copy what they change, see src/protocol/patch.ts), so nothing goes stale within a
+ * reconcile.
+ */
+export class Matcher {
+  private readonly hashes = new WeakMap<object, Hashed>()
+  private readonly diffs = new WeakMap<object, WeakMap<object, Diff>>()
+  private readonly keyHashes = new Map<string, number>()
   private readonly lists = new Map<readonly unknown[], Map<string, Map<number, number[]>>>()
+  private hashedItems = 0
+  private work = 0
+  /** Whether a lookup or a comparison was given up for MAX_RECONCILE_WORK or MAX_HASHED_ITEMS. */
+  cut = false
+
+  private keyHash(key: string): number {
+    let hash = this.keyHashes.get(key)
+    if (hash === undefined) {
+      this.work += 1 + (key.length >> 4)
+      this.keyHashes.set(key, (hash = Math.imul(hashText(key), 0x9e3779b1)))
+    }
+    return hash
+  }
+
+  // An array index's hash, as `keyHash` gives an object key's (a list of 40,000 items hashed each index as text).
+  private static indexHash(index: number): number {
+    return Math.imul(mix((index + 1) ^ HASH_SEED ^ 0x2545f491), 0x9e3779b1)
+  }
+
+  // The hash of a container's member's key: an object's key, or an array's index (`key` as text).
+  private keyOf(container: object, key: string): number {
+    return Array.isArray(container) ? Matcher.indexHash(Number(key)) : this.keyHash(key)
+  }
+
+  // What one member adds to its container's hash, from its key's hash (see `keyOf`) and its value's.
+  private static memberHash(key: number, hash: number): number {
+    return mix(key ^ hash)
+  }
+
+  /**
+   * A container's hash: the sum of its members' (so one member's can be taken out, see `hashExcept`), with its kind
+   * and, for an array, its length, a taller member adding TALL. A pure function of the value, remembered by identity.
+   * `depth` only bounds the walk: a container more than MAX_COMPARED_HEIGHT levels below the walk's start is not
+   * entered, so a member's result may be a lower bound of its height (`partial`), which tells TALL apart only once it
+   * passes the bound; from the start (depth 0) every member is told apart, and the result is whole.
+   */
+  private walk(value: object, depth: number): Hashed | Unfinished {
+    const known = this.hashes.get(value)
+    if (known) return known
+    if (depth > MAX_COMPARED_HEIGHT) return { hash: 0, height: 1, partial: true }
+    let hash = Array.isArray(value) ? mix(0x55 ^ value.length) : 0x56
+    let height = 1
+    let whole = true
+    const add = (key: number, member: unknown) => {
+      this.work++
+      let contribution: number
+      if (isContainer(member)) {
+        const below = this.walk(member, depth + 1)
+        height = Math.max(height, Math.min(below.height + 1, MAX_COMPARED_HEIGHT + 1))
+        if (below.height > MAX_COMPARED_HEIGHT) contribution = TALL
+        else if ("partial" in below) {
+          whole = false
+          return
+        } else contribution = below.hash
+      } else {
+        if (typeof member === "string") this.work += member.length >> 4
+        contribution = leafHash(member)
+      }
+      hash = (hash + Matcher.memberHash(key, contribution)) >>> 0
+    }
+    if (Array.isArray(value))
+      for (let index = 0; index < value.length; index++) add(Matcher.indexHash(index), value[index])
+    else for (const key of Object.keys(value)) add(this.keyHash(key), (value as Record<string, unknown>)[key])
+    if (!whole && height <= MAX_COMPARED_HEIGHT) return { hash: 0, height, partial: true }
+    const result: Hashed = { hash, height }
+    this.hashes.set(value, result)
+    return result
+  }
+
+  private tall(value: object): boolean {
+    return this.walk(value, 0).height > MAX_COMPARED_HEIGHT
+  }
+
+  /** The hash of a value (see `walk`). */
+  hash(value: unknown): number {
+    return isContainer(value) ? this.walk(value, 0).hash : leafHash(value)
+  }
+
+  // What a member adds to its container's hash before `memberHash`.
+  private contribution(member: unknown): number {
+    return isContainer(member) && this.tall(member) ? TALL : this.hash(member)
+  }
+
+  /**
+   * The hash of a value apart from the member at `rest` (from `from` on), the same for any two values `sameExcept`
+   * finds the same apart from it: the member at the end of `rest` is left out, and each member on the way to it is
+   * hashed apart from what lies below it. (Hashing items without only their first member put rows that differ below
+   * it, in `a.c` for an edit at `a/b`, in one bucket, and an edit whose row was gone compared itself with all of
+   * them: edits × rows per agent patch.) Costs the length of `rest`: the hashes it takes apart are remembered.
+   */
+  hashExcept(value: unknown, rest: readonly string[], from = 0): number {
+    if (!isContainer(value)) return leafHash(value)
+    const whole = this.walk(value, 0).hash
+    const head = rest[from]
+    if (head === undefined || !Object.hasOwn(value, head)) return whole
+    const member = (value as Record<string, unknown>)[head]
+    // A value that is not a container has nothing below it to leave out: its member counts whole.
+    if (from < rest.length - 1 && !isContainer(member)) return whole
+    const key = this.keyOf(value, head)
+    const without = (whole - Matcher.memberHash(key, this.contribution(member))) >>> 0
+    if (from === rest.length - 1) return without
+    return (without + Matcher.memberHash(key, this.hashExcept(member, rest, from + 1))) >>> 0
+  }
+
+  // Whether a container's member equals another's: the same object, or equal values short enough to compare.
+  private memberEqual(a: unknown, b: unknown): boolean {
+    if (Object.is(a, b)) return true
+    if (!isContainer(a) || !isContainer(b) || this.tall(a) || this.tall(b)) return false
+    return this.equal(a, b)
+  }
+
+  /** Whether two values are the same JSON (as jsonEqual in src/protocol/fold.ts). */
+  equal(a: unknown, b: unknown): boolean {
+    if (Object.is(a, b)) return true
+    if (!isContainer(a) || !isContainer(b)) return false
+    if (this.hash(a) !== this.hash(b)) return false
+    return this.diff(a, b) === SAME
+  }
+
+  // How two containers differ, worked out once per pair; past MAX_RECONCILE_WORK, a pair not compared yet differs.
+  private diff(a: object, b: object): Diff {
+    let row = this.diffs.get(a)
+    const known = row?.get(b)
+    if (known !== undefined) return known
+    let result: Diff = SAME
+    if (Array.isArray(a) !== Array.isArray(b) || (Array.isArray(a) && a.length !== (b as unknown[]).length))
+      result = MANY
+    else if (this.work > MAX_RECONCILE_WORK) {
+      this.cut = true
+      result = MANY
+    } else if (Array.isArray(a)) {
+      const other = b as unknown[]
+      for (let index = 0; index < a.length && result !== MANY; index++) {
+        this.work++
+        if (!this.memberEqual(a[index], other[index])) result = result === SAME ? String(index) : MANY
+      }
+    } else {
+      const proto = Object.getPrototypeOf(a)
+      if (proto !== Object.getPrototypeOf(b) || (proto !== Object.prototype && proto !== null)) result = MANY
+      else {
+        const keys = Object.keys(a)
+        for (let index = 0; index < keys.length && result !== MANY; index++) {
+          const key = keys[index]!
+          this.work++
+          if (!this.memberEqual(own(a, key), own(b, key))) result = result === SAME ? key : MANY
+        }
+        const others = Object.keys(b)
+        for (let index = 0; index < others.length && result !== MANY; index++) {
+          const key = others[index]!
+          if (Object.hasOwn(a, key)) continue
+          this.work++
+          if (!this.memberEqual(undefined, own(b, key))) result = result === SAME ? key : MANY
+        }
+      }
+    }
+    if (!row) this.diffs.set(a, (row = new WeakMap()))
+    row.set(b, result)
+    return result
+  }
+
+  /**
+   * Whether two items are the same apart from the member at `rest` (from `from` on; an empty `rest`: the whole
+   * values). Costs the length of `rest` once each pair of containers on the way has been compared.
+   */
+  sameExcept(a: unknown, b: unknown, rest: readonly string[], from = 0): boolean {
+    if (from >= rest.length) return this.equal(a, b)
+    if (Object.is(a, b)) return true
+    if (!isContainer(a) || !isContainer(b)) return false
+    const diff = this.diff(a, b)
+    if (diff === SAME) return true
+    const head = rest[from]!
+    if (diff !== head) return false
+    return from === rest.length - 1 || this.sameExcept(own(a, head), own(b, head), rest, from + 1)
+  }
 
   /**
    * The index nearest `near` (the earlier on a tie) of an item of `list` that `same` accepts, among those whose hash
-   * `hash` gives the same as `wanted`; undefined when there is none.
+   * `hash` gives the same as `wanted`; undefined when there is none. For each list (by identity) and each way of
+   * comparing (by key field, whole items, or items apart from a member), the indices of its items by hash are built
+   * once: after a select-all wrote an edit per row, an agent patch that moved every row compared each edit with the
+   * whole list (7,000 rows and 2,000 edits took 7 s per patch).
    */
   nearest(
     list: readonly unknown[],
@@ -399,8 +592,16 @@ class ItemFinder {
     if (!ways) this.lists.set(list, (ways = new Map()))
     let byHash = ways.get(way)
     if (!byHash) {
+      // Each way of comparing items hashes the whole list once. Edits whose paths name a different field each (written
+      // through an expression) could ask for a way each: past the bounds, an item is looked up no more (as if gone).
+      if (this.hashedItems + list.length > MAX_HASHED_ITEMS || this.work > MAX_RECONCILE_WORK) {
+        this.cut = true
+        return undefined
+      }
+      this.hashedItems += list.length
       byHash = new Map()
       for (let index = 0; index < list.length; index++) {
+        this.work++
         const key = hash(list[index])
         const bucket = byHash.get(key)
         if (bucket) bucket.push(index)
@@ -428,13 +629,6 @@ class ItemFinder {
     }
     return undefined
   }
-}
-
-// The hash of an item without its member `key` (see containerHash), for comparing items apart from that member.
-function hashWithout(item: unknown, key: string): number {
-  if (typeof item !== "object" || item === null) return hashOf(item)
-  const whole = containerHash(item, 0)
-  return Object.hasOwn(item, key) ? (whole - memberHash(key, (item as Record<string, unknown>)[key], 1)) >>> 0 : whole
 }
 
 // Whether `tokens` from `start` on match all of `body`: the path is at or under it.
@@ -557,6 +751,78 @@ export function isJsonValue(value: unknown, depth = 0): boolean {
   }
 }
 
+/**
+ * A value's length written out as JSON, or `cap + 1` once it is surely longer, or -1 when it is not JSON (see
+ * isJsonValue). Its size is first counted from below (each string, key and entry takes at least its own characters
+ * written out), stopping past `cap`, so a large value is not written out, nor even walked whole.
+ */
+export function jsonLength(value: unknown, cap: number): number {
+  let least = 0
+  const stack: unknown[] = [value]
+  while (stack.length > 0) {
+    const next = stack.pop()
+    if (typeof next === "string") least += next.length + 2
+    else if (Array.isArray(next)) {
+      least += 1 + Math.max(1, next.length)
+      for (let index = 0; index < next.length && least <= cap; index++) stack.push(next[index])
+    } else if (isContainer(next)) {
+      least += 1
+      for (const key in next) {
+        const member = (next as Record<string, unknown>)[key]
+        if (!Object.hasOwn(next, key) || member === undefined) continue
+        // `"key":` and a comma or the closing brace.
+        least += key.length + 4
+        stack.push(member)
+        if (least > cap) break
+      }
+    } else least += 1
+    if (least > cap) return cap + 1
+  }
+  if (!isJsonValue(value)) return -1
+  const length = JSON.stringify(value).length
+  return length > cap ? cap + 1 : length
+}
+
+/**
+ * `next` with each member that equals the one at its place in `previous` replaced by that one, and `previous` itself
+ * when all of it is equal. Only containers of `owned` (made by the compose that gave `next`) are changed, and walked
+ * member by member; any other value is the agent's, kept or compared whole. The renderer compares by identity: composed
+ * anew, every item the user's edits are under was a new object after each agent patch, and json-render updated every
+ * row of their list (1,900 rows after a select-all, a quarter of a second per patch).
+ */
+function share(next: unknown, previous: unknown, owned: ReadonlySet<object>): unknown {
+  if (Object.is(next, previous)) return previous
+  if (!isContainer(next) || !isContainer(previous) || Array.isArray(next) !== Array.isArray(previous)) return next
+  if (!owned.has(next)) return jsonEqual(next, previous) ? previous : next
+  let same = true
+  if (Array.isArray(next)) {
+    const before = previous as unknown[]
+    if (next.length !== before.length) same = false
+    for (let index = 0; index < next.length; index++) {
+      if (index >= before.length) continue
+      const member = share(next[index], before[index], owned)
+      if (member !== next[index]) next[index] = member
+      if (member !== before[index]) same = false
+    }
+  } else {
+    const target = next as Record<string, unknown>
+    const before = previous as Record<string, unknown>
+    const keys = Object.keys(target)
+    if (keys.length !== Object.keys(before).length || Object.getPrototypeOf(target) !== Object.getPrototypeOf(before))
+      same = false
+    for (const key of keys) {
+      if (!Object.hasOwn(before, key)) {
+        same = false
+        continue
+      }
+      const member = share(target[key], before[key], owned)
+      if (member !== target[key]) target[key] = member
+      if (member !== before[key]) same = false
+    }
+  }
+  return same ? previous : next
+}
+
 // json-render writes JSON pointers, but its own reader also accepts them without the leading slash. Writing the root
 // itself is not something a component does, so it is ignored rather than guessed at.
 function pointer(path: unknown): string | undefined {
@@ -607,6 +873,8 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
   let inWindow = true
   let refusedTold = false
   let skipped = false
+  // Whether the last reconcile gave up on looking up or comparing items (see `editsUnmatched`).
+  let unmatched = false
   const skipListeners = new Set<() => void>()
   const grow = (size: number) => {
     liveSize += size
@@ -652,11 +920,17 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
     }
   }
 
-  const compose = () =>
-    replaceAll(
+  // The agent's state with the edits on top, sharing the current snapshot's objects wherever the content is the same
+  // (see `share`).
+  const compose = (): StateModel => {
+    const owned = new Set<object>()
+    const next = replaceAll(
       layer,
       live().map((edit) => [edit.tokens, edit.value] as const),
+      owned,
     )
+    return share(next, snapshot, owned) as StateModel
+  }
 
   // Keeps the current snapshot object when the content did not change, since the renderer compares by identity.
   const commit = (next: StateModel) => {
@@ -700,7 +974,7 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
   // item is gone. Each level is refreshed to the item found (`refreshed` says whether that changed anything). A list the
   // agent replaced with something else is left to the comparison at the edit's path.
   let refreshed = false
-  let finder = new ItemFinder()
+  let matcher = new Matcher()
   const follow = (edit: Edit, levels: readonly Level[]): readonly string[] | undefined => {
     let tokens = edit.tokens
     for (const level of levels) {
@@ -713,22 +987,29 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
       const id = field === undefined ? undefined : own(level.item, field)
       const same =
         id !== undefined && id !== null
-          ? (item: unknown) => jsonEqual(own(item, field!), id)
-          : (item: unknown) => sameExcept(item, level.item, rest)
+          ? (item: unknown) => matcher.equal(own(item, field!), id)
+          : (item: unknown) => matcher.sameExcept(item, level.item, rest)
       let at: number | undefined
       if (index < list.length && (Object.is(list[index], level.item) || same(list[index]))) at = index
       else {
         // The nearest equal item: a list of equal items keeps the edit where it was.
         at =
           id !== undefined && id !== null
-            ? finder.nearest(list, `key:${field}`, (item) => hashOf(own(item, field!)), hashOf(id), index, same)
+            ? matcher.nearest(
+                list,
+                `key:${field}`,
+                (item) => matcher.hash(own(item, field!)),
+                matcher.hash(id),
+                index,
+                same,
+              )
             : rest.length === 0
-              ? finder.nearest(list, "whole", (item) => hashOf(item), hashOf(level.item), index, same)
-              : finder.nearest(
+              ? matcher.nearest(list, "whole", (item) => matcher.hash(item), matcher.hash(level.item), index, same)
+              : matcher.nearest(
                   list,
-                  `without:${rest[0]}`,
-                  (item) => hashWithout(item, rest[0]!),
-                  hashWithout(level.item, rest[0]!),
+                  `without:${rest.join("\u0000")}`,
+                  (item) => matcher.hashExcept(item, rest),
+                  matcher.hashExcept(level.item, rest),
                   index,
                   same,
                 )
@@ -823,7 +1104,7 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
     }
     let changed = false
     let stale = false
-    finder = new ItemFinder()
+    matcher = new Matcher()
     const all = live()
     const kept = all.filter((edit) => {
       // An edit made on top of a dropped one (under its path, later) goes too.
@@ -840,7 +1121,7 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
       }
       refreshed = false
       const tokens = follow(edit, edit.levels)
-      if (tokens === undefined || !jsonEqual(edit.against.value, getAt(layer, tokens))) {
+      if (tokens === undefined || !matcher.equal(edit.against.value, getAt(layer, tokens))) {
         dropped.add(edit.path)
         return false
       }
@@ -852,7 +1133,8 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
       if (refreshed) changed = true
       return true
     })
-    finder = new ItemFinder()
+    unmatched = matcher.cut
+    matcher = new Matcher()
     if (stale) persisted = undefined
     if (!changed && kept.length === all.length) return false
     setEdits(kept)
@@ -861,15 +1143,27 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
   }
 
   // An edit's levels as stored: an item of a keyed list as its key alone, others whole. Levels too big to store (an
-  // outer item holding a long list) are left out; the edit then takes the items at its path when it loads.
-  const storable = (edit: Edit): StoredLevel[] => {
-    const levels = (edit.levels ?? []).map((level): StoredLevel => {
+  // outer item holding a long list) are left out; the edit then takes the items at its path when it loads. `lengthOf`
+  // gives a value's JSON length (see jsonLength), remembered for the call of `overrides`: the edits under one item share
+  // it, and checking and writing out the whole item for each of them made saving 7,600 edits under one row of 85 KB
+  // take 3.6 s.
+  const storable = (edit: Edit, lengthOf: (value: unknown) => number): StoredLevel[] => {
+    // The levels written out: `[` and `]`, and for each, `[depth,item,length]` and a comma before all but the first.
+    let length = 2
+    const levels: StoredLevel[] = []
+    for (const level of edit.levels ?? []) {
       const field = keyOf(edit.tokens.slice(0, level.depth))
       const id = field === undefined ? undefined : own(level.item, field)
-      return [level.depth, id !== undefined && id !== null ? { [field!]: id } : level.item, level.length]
-    })
-    if (!levels.every((level) => isJsonValue(level[1]))) return []
-    return JSON.stringify(levels).length <= MAX_STORED_LEVELS ? levels : []
+      const keyed = id !== undefined && id !== null
+      const item = keyed ? { [field!]: id } : level.item
+      // `{"field":id}`: the braces, the field's JSON, a colon and the id's.
+      const itemLength = keyed ? lengthOf(id) + JSON.stringify(field).length + 3 : lengthOf(item)
+      if (itemLength < 0 || (keyed && lengthOf(id) < 0)) return []
+      length += (levels.length > 0 ? 1 : 0) + 4 + String(level.depth).length + itemLength + String(level.length).length
+      if (length > MAX_STORED_LEVELS) return []
+      levels.push([level.depth, item, level.length])
+    }
+    return levels
   }
 
   const isSecret = (edit: Edit) => isSecretPath(edit.path) || coveredBy(secrets, edit.tokens)
@@ -877,12 +1171,12 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
   const stored = (edit: Edit) => edit.persist && !isSecret(edit)
 
   // An edit as stored, without what it records of its action (see `overrides`).
-  const entryOf = (edit: Edit): OverrideEntry => {
+  const entryOf = (edit: Edit, lengthOf: (value: unknown) => number): OverrideEntry => {
     const value = withoutSecrets(edit.value, edit.tokens, secrets)
     const against = edit.against === UNKNOWN ? UNKNOWN : edit.against.value
     if (against === UNKNOWN || (against !== undefined && !isJsonValue(against))) return [edit.path, value]
     // (The agent's values, here and in the levels, are the spec's own state, never something the user typed.)
-    const levels = storable(edit)
+    const levels = storable(edit, lengthOf)
     return [
       edit.path,
       value,
@@ -896,9 +1190,16 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
     if (persisted) return persisted
     const all = live().filter(stored)
     const entries = new Map<Edit, OverrideEntry>()
+    const lengths = new WeakMap<object, number>()
+    const lengthOf = (value: unknown) => {
+      if (!isContainer(value)) return jsonLength(value, MAX_STORED_LEVELS)
+      let known = lengths.get(value)
+      if (known === undefined) lengths.set(value, (known = jsonLength(value, MAX_STORED_LEVELS)))
+      return known
+    }
     const entry = (edit: Edit) => {
       let known = entries.get(edit)
-      if (!known) entries.set(edit, (known = entryOf(edit)))
+      if (!known) entries.set(edit, (known = entryOf(edit, lengthOf)))
       return known
     }
     // An edit's stored size in UTF-8 bytes with its separator, written out only when its value alone may fit.
@@ -985,7 +1286,9 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
         skipped = false
         emit(skipListeners)
       }
+      const before = unmatched
       const dropped = reconcile()
+      if (unmatched !== before) emit(skipListeners)
       commit(compose())
       if (dropped) emit(editListeners)
     },
@@ -1047,7 +1350,9 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
           record(target, entry[1], loadedAction(stored), against, against === UNKNOWN ? undefined : levels)
         }
       for (const edit of unstored) record(edit.path, edit.value, edit.action, edit.against, edit.levels, edit.size)
+      const before = unmatched
       reconcile()
+      if (unmatched !== before) emit(skipListeners)
       commit(compose())
     },
     reset() {
@@ -1064,6 +1369,7 @@ export function createTrackedStore(base?: Record<string, unknown>): TrackedStore
       emit(skipListeners)
     },
     skippedWork: () => skipped,
+    editsUnmatched: () => unmatched,
     onSkippedWork(listener) {
       skipListeners.add(listener)
       return () => {

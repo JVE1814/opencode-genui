@@ -10,6 +10,7 @@ import {
   untrack,
   type Accessor,
   type JSX,
+  useContext,
 } from "solid-js"
 import { JSONUIProvider, Renderer } from "@json-render/solid"
 import type { CompiledSurface } from "../protocol/compile.ts"
@@ -21,14 +22,23 @@ import type { SurfaceRuntime } from "../runtime/surfaces.ts"
 import { VALIDATION_FUNCTIONS } from "../protocol/pattern.ts"
 import { createHandlers, type ChainLink } from "./actions.ts"
 import { ChainBridge } from "./chain.ts"
-import { reserveToolbar, SurfaceMemoryContext } from "./components/shared.tsx"
+import { CutsContext, reserveToolbar, SurfaceMemoryContext } from "./components/shared.tsx"
 import { joinInlinePool, windowPool } from "../runtime/budget.ts"
-import { poolKind, SKIPPED_WORK, tooLarge } from "./issues.ts"
-import { createRenderBudget, RenderBudgetContext } from "./element.ts"
+import {
+  EDITS_UNMATCHED,
+  MAX_CUT_ISSUES,
+  moreCuts,
+  poolKind,
+  renderFailed,
+  SKIPPED_WORK,
+  tooDeep,
+  tooLarge,
+} from "./issues.ts"
+import { createRenderBudget, RenderBudgetContext, SpecElementsContext } from "./element.ts"
 import { ErrorCard, IssuesFooter } from "./fallback.tsx"
 import { HostContext, QuietWriteContext, SurfaceInfoContext, type Host, type SurfaceContext } from "./host.ts"
 import { allowOutward, lendActivation, noteAgentState } from "./outward.ts"
-import { EvaluationLend, getRendering } from "./registry.tsx"
+import { EvaluationLend, getRendering, RenderErrors } from "./registry.tsx"
 
 export interface SurfaceViewProps {
   readonly host: Host
@@ -133,6 +143,54 @@ function observeHeight(element: HTMLElement, listener: (height: number) => void)
   }
 }
 
+/**
+ * What a surface's components leave out (see CutsContext in src/gui/components/shared.tsx): each distinct issue once,
+ * however many rows of a repeat report it, and at most MAX_CUT_ISSUES of them, the rest counted in one. Reports
+ * change the issues at most once per microtask, so a thousand cut lists mounting in one task rebuild them once.
+ */
+function createCuts() {
+  const reports = new Map<string, { readonly issue: SurfaceIssue; count: number }>()
+  const [version, setVersion] = createSignal(undefined, { equals: false })
+  let queued = false
+  const changed = () => {
+    if (queued) return
+    queued = true
+    queueMicrotask(() => {
+      queued = false
+      setVersion(undefined)
+    })
+  }
+  const issues = createMemo((): readonly SurfaceIssue[] => {
+    version()
+    const out: SurfaceIssue[] = []
+    for (const { issue } of reports.values()) {
+      if (out.length === MAX_CUT_ISSUES) break
+      out.push(issue)
+    }
+    return reports.size > MAX_CUT_ISSUES ? [...out, moreCuts(reports.size - MAX_CUT_ISSUES)] : out
+  })
+  const report = (issue: SurfaceIssue) => {
+    const key = `${issue.elementKey ?? ""}\u0000${issue.message}`
+    let entry = reports.get(key)
+    if (!entry) {
+      entry = { issue, count: 0 }
+      reports.set(key, entry)
+      changed()
+    }
+    entry.count++
+    const held = entry
+    let withdrawn = false
+    return () => {
+      if (withdrawn) return
+      withdrawn = true
+      if (--held.count > 0 || reports.get(key) !== held) return
+      reports.delete(key)
+      changed()
+    }
+  }
+  return { issues, report }
+}
+
 function Frame(props: SurfaceViewProps) {
   const host = props.host
   const streaming = () => props.streaming?.() ?? false
@@ -151,18 +209,35 @@ function Frame(props: SurfaceViewProps) {
     sliced: true,
     lend: () => lendActivation(props.info),
   })
-  // Whether json-render skipped part of what a change of the state set off (until the agent's next state).
+  // Whether json-render skipped part of what a change of the state set off (until the agent's next state), and whether
+  // the agent's last state left edits of list items unmatched.
   const [skippedWork, setSkippedWork] = createSignal(false)
+  const [unmatched, setUnmatched] = createSignal(false)
   createEffect(() => {
     const store = props.runtime().store
-    setSkippedWork(store.skippedWork())
-    onCleanup(store.onSkippedWork(() => setSkippedWork(store.skippedWork())))
+    const update = () => {
+      setSkippedWork(store.skippedWork())
+      setUnmatched(store.editsUnmatched())
+    }
+    update()
+    onCleanup(store.onSkippedWork(update))
   })
+  const cuts = createCuts()
   const issues = () => {
     const compiled = props.compiled().issues
     const skipped = budget.skipped()
     const shown = skipped > 0 ? [...compiled, tooLarge(kind(), budget.pooled() === skipped)] : compiled
-    return skippedWork() ? [...shown, SKIPPED_WORK] : shown
+    const cut = cuts.issues()
+    const deep = budget.tooDeep()
+    const failed = budget.failed()
+    const all = [
+      ...shown,
+      ...cut,
+      ...(deep > 0 ? [tooDeep(deep)] : []),
+      ...(failed.length > 0 ? [renderFailed(failed)] : []),
+      ...(unmatched() ? [EDITS_UNMATCHED] : []),
+    ]
+    return skippedWork() ? [...all, SKIPPED_WORK] : all
   }
   const lineErrors = () => (streaming() ? NO_LINES : (props.lineErrors?.() ?? NO_LINES))
   const canFix = () => (props.canFix ? props.canFix() : !!props.info.sendPrompt)
@@ -238,14 +313,16 @@ function Frame(props: SurfaceViewProps) {
           {(runtime) => (
             <SurfaceMemoryContext.Provider value={runtime.memory}>
               <RenderBudgetContext.Provider value={budget}>
-                <Render
-                  host={host}
-                  info={props.info}
-                  runtime={runtime}
-                  compiled={props.compiled}
-                  streaming={streaming}
-                  canFix={canFix}
-                />
+                <CutsContext.Provider value={cuts.report}>
+                  <Render
+                    host={host}
+                    info={props.info}
+                    runtime={runtime}
+                    compiled={props.compiled}
+                    streaming={streaming}
+                    canFix={canFix}
+                  />
+                </CutsContext.Provider>
               </RenderBudgetContext.Provider>
             </SurfaceMemoryContext.Provider>
           )}
@@ -267,6 +344,19 @@ function Render(props: {
   readonly canFix: Accessor<boolean>
 }) {
   const store = props.runtime.store
+  const budget = useContext(RenderBudgetContext)
+  // An element that could not render shows nothing; the surface lists its error while it is mounted.
+  const failed = (error: unknown) => {
+    if (!budget) return
+    const message = String((error as Error | undefined)?.message ?? error).slice(0, 200)
+    budget.setFailed((errors) => [...errors, message])
+    onCleanup(() =>
+      budget.setFailed((errors) => {
+        const at = errors.indexOf(message)
+        return at < 0 ? errors : errors.toSpliced(at, 1)
+      }),
+    )
+  }
   let agentState: unknown
   createComputed(() => {
     const spec = props.compiled().spec
@@ -312,12 +402,16 @@ function Render(props: {
         <ChainBridge link={link} />
         <QuietWriteContext.Provider value={(path, value) => store.set(path, value)}>
           <EvaluationLend lend={() => lendActivation(props.info)}>
-            <Renderer
-              spec={props.compiled().spec}
-              registry={registry}
-              loading={props.streaming()}
-              fallback={fallback}
-            />
+            <RenderErrors report={failed}>
+              <SpecElementsContext.Provider value={() => props.compiled().spec?.elements}>
+                <Renderer
+                  spec={props.compiled().spec}
+                  registry={registry}
+                  loading={props.streaming()}
+                  fallback={fallback}
+                />
+              </SpecElementsContext.Provider>
+            </RenderErrors>
           </EvaluationLend>
         </QuietWriteContext.Provider>
       </JSONUIProvider>

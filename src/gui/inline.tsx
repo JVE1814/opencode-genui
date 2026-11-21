@@ -1,6 +1,7 @@
 import { createComputed, createMemo, Show, untrack, type JSX } from "solid-js"
 import type { CodeBlockProps } from "@opencode/plugin/gui"
 import { compileBlock } from "../protocol/compile.ts"
+import { MAX_CANVASES } from "../protocol/fold.ts"
 import { blockKind, canvasIdOf, isMeaningful, parseBlock, type ParsedBlock } from "../protocol/surface.ts"
 import { getSurface, surfaceKey } from "../runtime/surfaces.ts"
 import { reserveToolbar } from "./components/shared.tsx"
@@ -154,6 +155,8 @@ function Chip(input: { readonly env: GuiEnv; readonly props: CodeBlockProps; rea
   const index = () => entry()?.index
   const state = () => index()?.canvas(canvas)
   const closed = () => block.header.close === true || (!state() && !!index()?.removed().has(canvas))
+  // Not opened: MAX_CANVASES were open (the canvas issue says so to the agent, see CanvasView).
+  const refused = () => !state() && !closed() && !!index()?.refused().has(canvas)
   const title = () => block.header.title ?? entry()?.title(canvas) ?? canvas
   const open = () => {
     const current = props.session
@@ -174,6 +177,10 @@ function Chip(input: { readonly env: GuiEnv; readonly props: CodeBlockProps; rea
               <span aria-hidden="true">·</span>
               <span>{host.t("chip.closed")}</span>
             </Show>
+            <Show when={refused()}>
+              <span aria-hidden="true">·</span>
+              <span>{host.t("chip.refused", { max: MAX_CANVASES })}</span>
+            </Show>
             <Show when={!closed() && state()?.streaming}>
               <span aria-hidden="true">·</span>
               <span data-gu-live="" />
@@ -181,7 +188,7 @@ function Chip(input: { readonly env: GuiEnv; readonly props: CodeBlockProps; rea
             </Show>
           </span>
         </span>
-        <Show when={!closed()}>
+        <Show when={!closed() && !refused()}>
           <host.ui.Button size="small" variant="neutral" onClick={open}>
             {host.t("chip.open")}
           </host.ui.Button>

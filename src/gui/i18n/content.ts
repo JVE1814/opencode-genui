@@ -2,6 +2,8 @@
 export default {
   // Link text for a Markdown image without alt text (Markdown images show as links, see components/markdown.ts).
   "c.markdown.image": "Image",
+  // Under a Markdown text too long to show whole (see shownLength in components/markdown.ts).
+  "c.markdown.cut": "Showing the first {{shown}} of {{total}} characters",
 
   "c.code.copy": "Copy code",
   "c.code.copied": "Copied to clipboard",
@@ -26,4 +28,14 @@ export default {
   "c.keybind.space": "Space",
   "c.keybind.backspace": "Backspace",
   "c.keybind.delete": "Delete",
+
+  // Under a component that draws only the first items of a long list (see ITEM_LISTS in src/gui/costs.ts), by the
+  // list's noun there.
+  "c.cut.keys": "Showing {{shown}} of {{total}} keys",
+  "c.cut.tabs": "Showing {{shown}} of {{total}} tabs",
+  "c.cut.options": "Showing {{shown}} of {{total}} options",
+  "c.cut.items": "Showing {{shown}} of {{total}} items",
+  "c.cut.buttons": "Showing {{shown}} of {{total}} buttons",
+  "c.cut.sections": "Showing {{shown}} of {{total}} sections",
+  "c.cut.cards": "Showing {{shown}} of {{total}} cards",
 } satisfies Record<string, string>

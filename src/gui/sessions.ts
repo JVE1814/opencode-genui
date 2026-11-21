@@ -155,7 +155,9 @@ function createEntry(
       false,
     )
 
-    const index = createSessionIndex({ messages, snapshots, extra, loaded, revert, deleted })
+    // A backfill reached the session's first message: a canvas whose base was not found has none.
+    const [searched, setSearched] = createSignal(false)
+    const index = createSessionIndex({ messages, snapshots, extra, loaded, revert, deleted, searched })
 
     // Titles of canvases seen in this window, for canvases the agent closed since.
     const [titles, setTitles] = createSignal<ReadonlyMap<string, string>>(new Map())
@@ -194,8 +196,9 @@ function createEntry(
           written.delete(canvas)
         }
         const current = new Map<string, number>()
+        // A canvas on an unknown base counts its generations from that base, not from the canvas's first block.
         for (const state of states)
-          if (!state.missingBase && state.spec !== null) current.set(state.id, state.generation)
+          if (!state.baseUnknown && !state.missingBase && state.spec !== null) current.set(state.id, state.generation)
         return pruneCanvasEntries(next, current, gone)
       })
     }
@@ -330,10 +333,11 @@ function createEntry(
 
     const load = (full: boolean): Promise<readonly MessageLike[]> => {
       if (running?.epoch === revertEpoch) return running.promise
-      const missing = () => untrack(index.canvases).some((state) => state.missingBase)
+      const missing = () => untrack(index.canvases).some((state) => state.baseUnknown)
       // The server still lists the messages a staged revert hides, and a load that outlived a revert's change may hold
       // messages that are gone: neither joins the transcript.
       const epoch = revertEpoch
+      let reachedStart = false
       const merge = (loaded: readonly unknown[]) => {
         if (controller.signal.aborted || epoch !== revertEpoch) return
         const cut = staged?.cut
@@ -342,6 +346,7 @@ function createEntry(
       }
       const promise = backfill(untrack(server).client, id, {
         signal: controller.signal,
+        onStart: () => (reachedStart = true),
         ...(full
           ? {}
           : {
@@ -353,6 +358,8 @@ function createEntry(
       })
         .then((loaded) => {
           merge(loaded)
+          // With the whole history merged, the fold settles the canvases whose base it did not find.
+          if (reachedStart && !controller.signal.aborted && epoch === revertEpoch) setSearched(true)
           return loaded
         })
         .finally(() => {

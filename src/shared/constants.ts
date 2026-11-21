@@ -42,5 +42,13 @@ export const TEXT_PER_UNIT = 250
  */
 export const SLOT_UNITS = 2 * RENDER_UNITS
 
+/**
+ * How deep elements nest at most (the root is at depth 1, a repeat's rows one below it). Each level of nesting takes a
+ * few hundred stack frames in json-render's renderer and Solid's, and past about 50 levels (about 30 when every level
+ * is a repeat) the stack overflowed: the rest of the UI vanished with nothing said. An element nested deeper renders
+ * nothing, and the surface says so (see GenuiElement in src/gui/element.ts). The skill tells the agent.
+ */
+export const MAX_DEPTH = 20
+
 /** How many rows a repeat renders at most (the json-render patch in patches/ applies the same number). */
 export const MAX_REPEAT_ROWS = 2000

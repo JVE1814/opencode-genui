@@ -116,7 +116,7 @@ test.describe("a Table is charged for its cells [R6S2-2]", () => {
     expect(cells).toBeGreaterThan(0)
     expect(cells).toBeLessThanOrEqual(10_000)
     await expect(untrusted(page).locator('[data-gu="table"] [data-slot="cut"]').first()).toHaveText(
-      "Showing 200 of 500 rows and 50 of 1000 columns",
+      "Showing 200 of 500 rows and 50 of 1,000 columns",
     )
     // The pool of tool output holds one such table; the others report that they do not fit.
     await expect(

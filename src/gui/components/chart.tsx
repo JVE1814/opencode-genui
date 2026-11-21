@@ -1,8 +1,9 @@
 import { createMemo, createSignal, Index, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { MAX_CHART_POINTS as MAX_POINTS, MAX_CHART_SERIES as MAX_SERIES } from "../costs.ts"
 import { useHost } from "../host.ts"
+import { chartCut } from "../issues.ts"
 import { numberFormat } from "./data.tsx"
-import { bool, display, list, num, oneOf, str, uid, type GenuiComponent } from "./shared.tsx"
+import { amount, bool, CutNote, display, list, num, oneOf, str, uid, useCut, type GenuiComponent } from "./shared.tsx"
 
 // Chart: bar (grouped or stacked), line, area and donut as plain SVG. Styles: src/gui/styles/chart.css.
 //
@@ -56,6 +57,9 @@ export interface ChartData {
   readonly labels: readonly string[]
   readonly series: readonly ChartSeries[]
   readonly count: number
+  /** How many labels (or values of the longest series, without labels) and series the spec gave, drawn or not. */
+  readonly totalPoints: number
+  readonly totalSeries: number
 }
 
 /**
@@ -63,12 +67,18 @@ export interface ChartData {
  * become gaps), at most MAX_SERIES series. Without labels, the longest series decides the count and labels are 1..n.
  */
 export function chartData(labels: unknown, series: unknown, seriesName: (index: number) => string): ChartData {
-  const raw = list(series).filter(isRecord).slice(0, MAX_SERIES)
-  const names = list(labels).map((label) => display(label))
+  const all = list(series).filter(isRecord)
+  const raw = all.slice(0, MAX_SERIES)
+  const given = list(labels)
+  // Only the labels drawn are read.
+  const names = given.slice(0, MAX_POINTS).map((label) => display(label))
   const longest = raw.reduce((max, item) => Math.max(max, list(item.values).length), 0)
-  const count = Math.min(MAX_POINTS, names.length > 0 ? names.length : longest)
+  const totalPoints = given.length > 0 ? given.length : longest
+  const count = Math.min(MAX_POINTS, totalPoints)
   return {
     count,
+    totalPoints,
+    totalSeries: all.length,
     labels: Array.from({ length: count }, (_, index) => names[index] || String(index + 1)),
     series: raw.map((item, index) => {
       const values = list(item.values)
@@ -470,6 +480,37 @@ const Chart: GenuiComponent<"Chart"> = (ctx) => {
   const data = createMemo(() =>
     chartData(ctx.props.labels, ctx.props.series, (index) => host.t("c.chart.seriesName", { index })),
   )
+  // What the chart leaves out, said under it and reported to the agent.
+  const counts = createMemo(
+    () => {
+      const { count, totalPoints, series, totalSeries } = data()
+      return { points: count, totalPoints, series: series.length, totalSeries }
+    },
+    undefined,
+    {
+      equals: (a, b) =>
+        a.points === b.points &&
+        a.totalPoints === b.totalPoints &&
+        a.series === b.series &&
+        a.totalSeries === b.totalSeries,
+    },
+  )
+  const isCut = () => counts().points < counts().totalPoints || counts().series < counts().totalSeries
+  const cut = () => {
+    const { points, totalPoints, series, totalSeries } = counts()
+    return isCut()
+      ? host.t("c.chart.cut", {
+          points: amount(points),
+          totalPoints: amount(totalPoints),
+          series: amount(series),
+          totalSeries: amount(totalSeries),
+        })
+      : ""
+  }
+  useCut(ctx, () => {
+    const { points, totalPoints, series, totalSeries } = counts()
+    return isCut() ? chartCut(points, totalPoints, series, totalSeries) : undefined
+  })
   const slices = createMemo(() => (type() === "donut" ? donutSlices(data(), host.t("c.chart.other")) : []))
   const total = createMemo(() => slices().reduce((sum, slice) => sum + slice.value, 0))
   const empty = () =>
@@ -962,6 +1003,7 @@ const Chart: GenuiComponent<"Chart"> = (ctx) => {
           </Show>
         </table>
       </Show>
+      <CutNote text={cut()} />
     </figure>
   )
 }

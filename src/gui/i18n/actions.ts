@@ -1,6 +1,5 @@
 /** Copy for the action gate and confirm dialogs (src/gui/actions.ts, src/gui/outward.ts). Keys are unique across fragments. */
 export default {
-  // Shown on untrusted surfaces after genui's note: the spec's own confirm text, quoted.
   // The payload of a confirm, last in its description: what is sent, opened or copied, in full.
   "confirm.detail": "{{label}}: {{text}}",
   "confirm.detailLong": "{{label}} ({{count}} characters): {{text}}",

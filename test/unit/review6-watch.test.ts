@@ -218,10 +218,12 @@ describe("watch work is bounded per change and per task [review6#R1]", () => {
     view.dispose()
   })
 
-  test("work that keeps setting off more work that waits stops after 40 tasks in a row", async () => {
+  test("work that keeps setting off more work that waits stops after 40 such works [R6F3-3]", async () => {
     // An element that fires its event whenever its value changes, as the UI can when it renders (a focus that moves),
     // and an event whose slow actions change that value: each round is new work, and each waits for the next task once
-    // the slice is spent, so without a limit on tasks in a row it went on for good, a slice per task.
+    // the slice is spent, so without a limit it went on for good, a slice per task. (The limit counts such works that
+    // had to wait, not tasks: a change that goes on over many tasks within its counts is not cut, see
+    // test/unit/review7-patch.test.ts.)
     let runs = 0
     const Echo: ElementImpl = (ctx) => {
       createEffect(
@@ -258,7 +260,9 @@ describe("watch work is bounded per change and per task [review6#R1]", () => {
     const view = render(spec, store, { Echo }, { slow: () => void (busy(20), runs++) })
     view.set("/v", 1)
     await new Promise((resolve) => setTimeout(resolve, 4000))
-    expect(warnings.some((warning) => warning.includes("kept waiting for 40 tasks in a row"))).toBe(true)
+    expect(
+      warnings.some((warning) => warning.includes("kept setting off new work that waited for a later task (40 times")),
+    ).toBe(true)
     const after = runs
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(runs).toBe(after)

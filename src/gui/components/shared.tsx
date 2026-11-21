@@ -1,12 +1,15 @@
 import {
   createContext,
   createEffect,
+  createMemo,
   createRoot,
   createSignal,
   onCleanup,
+  Show,
   untrack,
   useContext,
   type Accessor,
+  type JSX,
   type Setter,
 } from "solid-js"
 import type { ValidationConfig } from "@json-render/core"
@@ -19,7 +22,11 @@ import {
 } from "@json-render/solid"
 import type { GenuiCatalog } from "../../catalog/index.ts"
 import type { ComponentName } from "../../catalog/components.ts"
+import type { SurfaceIssue } from "../../protocol/validate.ts"
+import { ITEM_LISTS, type ListComponent } from "../costs.ts"
 import { elementKeyOf } from "../element.ts"
+import { useHost } from "../host.ts"
+import { listCut } from "../issues.ts"
 
 /**
  * Conventions for every genui component (src/gui/components/*.tsx):
@@ -102,6 +109,89 @@ export function useBound<T>(
   }
 
   return [value, set]
+}
+
+/**
+ * The first `max` items of a model-written list that `parse` accepts (it returns undefined for an entry it skips), and
+ * how many items the list holds: those accepted, plus every entry after the last one parsed. A list longer than `max`
+ * is not parsed to its end, so what a component does with a list is bounded by `max`, whatever its length.
+ */
+export function firstItems<T>(
+  raw: unknown,
+  max: number,
+  parse: (entry: unknown, index: number) => T | undefined,
+): { readonly items: T[]; readonly total: number } {
+  const entries = list(raw)
+  const items: T[] = []
+  let index = 0
+  for (; index < entries.length && items.length < max; index++) {
+    const item = parse(entries[index], index)
+    if (item !== undefined) items.push(item)
+  }
+  return { items, total: items.length + entries.length - index }
+}
+
+/**
+ * Where a component reports what it leaves out (a list cut to what it draws, a long text cut), as an issue of its
+ * element: the surface lists it with its other issues, so the user sees it and "Ask agent to fix" tells the agent (see
+ * src/gui/surface.tsx). Returns the function that withdraws the report.
+ */
+export const CutsContext = createContext<(issue: SurfaceIssue) => () => void>()
+
+/** Reports `issue()` to the surface while it is defined and the component is mounted (see CutsContext). */
+export function useCut(ctx: BaseComponentProps<Record<string, unknown>>, issue: () => SurfaceIssue | undefined): void {
+  const report = useContext(CutsContext)
+  if (!report) return
+  const elementKey = elementKeyOf(ctx)
+  createEffect(() => {
+    const found = issue()
+    if (found) onCleanup(report(elementKey === undefined ? found : { ...found, elementKey }))
+  })
+}
+
+const counted = (a: { shown: number; total: number }, b: { shown: number; total: number }) =>
+  a.shown === b.shown && a.total === b.total
+
+/**
+ * For a component that draws a list item by item (see ITEM_LISTS in src/gui/costs.ts): the note that says how many
+ * of its items it leaves out (empty while it draws them all), reported to the surface as well (see useCut).
+ */
+export function useListCut(
+  ctx: BaseComponentProps<Record<string, unknown>>,
+  type: ListComponent,
+  count: () => { readonly shown: number; readonly total: number },
+): Accessor<string> {
+  const host = useHost()
+  const { noun } = ITEM_LISTS[type]
+  const counts = createMemo(count, undefined, { equals: counted })
+  useCut(ctx, () => {
+    const { shown, total } = counts()
+    return shown < total ? listCut(type, total) : undefined
+  })
+  return () => {
+    const { shown, total } = counts()
+    return shown < total ? host.t(`c.cut.${noun}`, { shown: amount(shown), total: amount(total) }) : ""
+  }
+}
+
+/** A count as the notes show it ("10,000"). */
+export const amount = (value: number): string => value.toLocaleString()
+
+/** The note under (or, `inline`, after) a component that leaves part of its content out, while there is one. */
+export function CutNote(props: { readonly text: string; readonly inline?: boolean }): JSX.Element {
+  return (
+    <Show when={props.text}>
+      {props.inline ? (
+        <span data-gu-description data-gu-cut="">
+          {props.text}
+        </span>
+      ) : (
+        <div data-gu-description data-gu-cut="">
+          {props.text}
+        </div>
+      )}
+    </Show>
+  )
 }
 
 /** The surface's per-element UI memory (`SurfaceRuntime.memory`), provided by the surface. */

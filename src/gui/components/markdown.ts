@@ -33,8 +33,9 @@
 // the square of their number (8,000 of them in 32 KB took 13 s), and KaTeX costs about 5 µs per character of math. Past
 // a text's budget, emphasis delimiters are written as character references (`&#42;`), which marked shows as the
 // character and never reads as a delimiter, and math is written as text. The rest of marked's work grows faster than
-// the text too (each inline token rescans the rest of its paragraph for math), so a text shows its first
-// MAX_MARKDOWN_TEXT characters.
+// the paragraph (each inline token rescans the rest of its paragraph for the app's math delimiters): past a paragraph's
+// first MAX_ESCAPES backslashes, escapes are written as character references, and a text is cut where a paragraph
+// runs past MAX_PARAGRAPH characters (see `shownLength`).
 
 import { safeUrl } from "../../protocol/url.ts"
 
@@ -61,8 +62,26 @@ export const MAX_EMPHASIS = 1_000_000
 export const MAX_MATH = 20_000
 export const MATH_SPAN_COST = 40
 
-/** How much of one Markdown text is shown (about 0.3 s of marked's work at worst); the rest is cut, with "…". */
-export const MAX_MARKDOWN_TEXT = 40_000
+/**
+ * How much of one Markdown text is shown at most: the render budget's whole text (see RENDER_UNITS), so a text the
+ * budget lets render is cut only by MAX_PARAGRAPH. The rest is cut, with "…", and MarkdownText says so.
+ */
+export const MAX_MARKDOWN_TEXT = 500_000
+
+/**
+ * How long one paragraph (what marked lexes as one inline run: see `shownLength`) may be; the text is cut where one
+ * runs past it. marked's inline work grows faster than a paragraph: in Chromium, 500,000 characters of bare URLs in
+ * one paragraph took 12 s and of `a<b ` 1.9 s, while in paragraphs of 20,000 characters they cost about 1.2 and
+ * 0.4 µs a character.
+ */
+export const MAX_PARAGRAPH = 20_000
+
+/**
+ * The backslashes of a paragraph that stay as written; the rest are written as character references (see `inline`).
+ * marked makes a token of every escape, and for each token it searches the rest of the paragraph for the app's math
+ * delimiters, slowly where the paragraph is full of backslashes: 40,000 characters of `a\*` took 0.7 s in Chromium.
+ */
+export const MAX_ESCAPES = 100
 
 /** A fresh budget for a text of `length` characters. */
 export const markdownBudget = (length: number): MarkdownBudget => ({
@@ -112,12 +131,23 @@ function dedent(line: string, indent: string): string {
 }
 
 /**
- * Splits Markdown into prose and fenced code blocks: a fence with only whitespace before it, at the top level or
- * indented in a list item (its lines lose the fence's indentation). Math fences and fences that open after a quote or
- * list marker stay in the prose, up to and including their closing fence. An unclosed block runs to the end.
+ * How many of a text's fenced code blocks show as code blocks of their own (`ui.Code`); later fences stay in the prose
+ * around them, which the app's Markdown shows as code too. Each `ui.Code` is a component of the app's (with a Markdown
+ * renderer and a highlighting round trip of its own), and a text of tiny fences built 3,900 of them in 40,000
+ * characters. Each code block costs the render budget, as much as an element in the prose and more on its own (see
+ * codeUnits in src/gui/costs.ts).
  */
-export function splitMarkdown(text: string): MarkdownPart[] {
+export const MAX_CODE_PARTS = 32
+
+/**
+ * Splits Markdown into prose and fenced code blocks: a fence with only whitespace before it, at the top level or
+ * indented in a list item (its lines lose the fence's indentation), up to `maxCode` of them (see MAX_CODE_PARTS).
+ * Math fences, fences past `maxCode` and fences that open after a quote or list marker stay in the prose, up to and
+ * including their closing fence. An unclosed block runs to the end.
+ */
+export function splitMarkdown(text: string, maxCode = MAX_CODE_PARTS): MarkdownPart[] {
   const parts: MarkdownPart[] = []
+  let codeParts = 0
   let prose: string[] = []
   let open: (Fence & { indent: string; language?: string; lines: string[] }) | undefined
   /** A fence kept in the prose (math, quoted, after a list marker), up to and including its closing fence. */
@@ -150,7 +180,8 @@ export function splitMarkdown(text: string): MarkdownPart[] {
     const nested = NESTED_FENCE.exec(line)
     const start = nested ? null : FENCE.exec(line)
     const fence = nested ? opening(nested[1], nested[2]!) : opening(start?.[2], start?.[3] ?? "")
-    if (fence && start && !MATH_FENCES.has(languageOf(start[3]!).toLowerCase())) {
+    if (fence && start && codeParts < maxCode && !MATH_FENCES.has(languageOf(start[3]!).toLowerCase())) {
+      codeParts++
       flush()
       const language = languageOf(start[3]!)
       open = { ...fence, indent: start[1]!, ...(language ? { language } : {}), lines: [] }
@@ -164,6 +195,45 @@ export function splitMarkdown(text: string): MarkdownPart[] {
   return parts
 }
 
+/**
+ * A Markdown text's code blocks: all it renders, and those it shows on their own (see MAX_CODE_PARTS). The rest render
+ * within its Markdown: fences past the first MAX_CODE_PARTS, fences in a quote or after a list marker, and indented
+ * code blocks, each a code block of the app's renderer.
+ */
+export interface CodeBlocks {
+  readonly total: number
+  readonly own: number
+}
+const NO_CODE: CodeBlocks = Object.freeze({ total: 0, own: 0 })
+
+// The code blocks of recent texts (see codeBlocks): the rows of a repeat share one text, which is counted once.
+const codeCounts = new Map<string, CodeBlocks>()
+
+/** A Markdown text's code blocks (see CodeBlocks), for its charge in the render budget. */
+export function codeBlocks(text: string): CodeBlocks {
+  if (!text.includes("```") && !text.includes("~~~") && !/^(?: {4}| {0,3}\t)/m.test(text)) return NO_CODE
+  let known = codeCounts.get(text)
+  if (known === undefined) {
+    let own = 0
+    let total = 0
+    for (const part of splitMarkdown(text)) {
+      if (part.kind === "code") own++
+      else total += codeStarts(part.text.split("\n"))
+    }
+    known = own + total === 0 ? NO_CODE : { total: own + total, own }
+    if (codeCounts.size >= 64) codeCounts.delete(codeCounts.keys().next().value!)
+    codeCounts.set(text, known)
+  }
+  return known
+}
+
+/** How many code blocks the lines of a prose text open (see lineKinds): fenced ones, and runs of indented code. */
+function codeStarts(lines: readonly string[]): number {
+  const starts = { count: 0 }
+  lineKinds(lines, starts)
+  return starts.count
+}
+
 type LineKind = "prose" | "code" | "math"
 
 /** A display-math block's opening line (`$` or `$$` alone, as the app's KaTeX extension reads it). */
@@ -174,7 +244,7 @@ const MATH_BLOCK = /^\${1,2}$/
  * or in a list item, or any other fence when the text was not split), indented code after a blank line, and display
  * math blocks.
  */
-function lineKinds(lines: readonly string[]): LineKind[] {
+function lineKinds(lines: readonly string[], code?: { count: number }): LineKind[] {
   // Whether the same `$` or `$$` line comes later, computed once from the end (a search per line was quadratic).
   const closed: boolean[] = []
   const seen = new Set<string>()
@@ -207,6 +277,7 @@ function lineKinds(lines: readonly string[]): LineKind[] {
     if (open) {
       const math = !!start && MATH_FENCES.has(languageOf(start[3]!).toLowerCase())
       fence = { ...open, kind: math ? "math" : "code" }
+      if (code && !math) code.count++
       kinds.push(fence.kind)
       blank = indented = false
       continue
@@ -219,6 +290,7 @@ function lineKinds(lines: readonly string[]): LineKind[] {
     }
     const empty = line.trim() === ""
     const isCode: boolean = !empty && /^(?: {4}| {0,3}\t)/.test(line) && (blank || indented)
+    if (code && isCode && !indented) code.count++
     kinds.push(isCode ? "code" : "prose")
     indented = isCode || (indented && empty)
     blank = empty
@@ -327,9 +399,11 @@ const isEscapable = (char: string | undefined) => char !== undefined && ASCII_PU
 
 /**
  * Text (an address) that marked shows as written: defused, so it stays inert even as plain text, with the characters
- * that would start emphasis, code, math, a table cell, a link or an entity escaped.
+ * that would start emphasis, code, math, a table cell, a link or an entity written as character references. Not as
+ * backslash escapes: marked makes a token of each, and a link text of 9,500 of them (a bare URL full of `_`) took 0.4 s.
  */
-const literal = (text: string) => defuse(text).replace(/[\\`*_[\]<>~|!$]|&(?=#?\w+;)/g, "\\$&")
+const literal = (text: string) =>
+  defuse(text).replace(/[\\`*_[\]<>~|!$]|&(?=#?\w+;)/g, (char) => `&#${char.charCodeAt(0)};`)
 
 /** Backslash escapes and the usual character references in a link's address or title resolved (as CommonMark does). */
 function unescape(text: string): string {
@@ -784,6 +858,7 @@ function inline(
   const mathEnd = mathScanner(src)
   const bareUrlEnd = bareUrlScanner(src)
   const work = linkWork(src)
+  let escapes = 0
 
   for (let index = 0; index < src.length; ) {
     const char = src[index]!
@@ -801,8 +876,12 @@ function inline(
       }
     }
     if (char === "\\") {
-      const length = isEscapable(src[index + 1]) ? 2 : 1
-      pending += src.slice(index, index + length)
+      const next = src[index + 1]
+      const length = isEscapable(next) ? 2 : 1
+      // Past the paragraph's first MAX_ESCAPES, a backslash (or the character it escapes) is written as a character
+      // reference, which shows the same and is no token for the renderer. A backslash before a line break stays.
+      if (++escapes > MAX_ESCAPES && next !== "\n") pending += length === 2 ? `&#${next!.charCodeAt(0)};` : "&#92;"
+      else pending += src.slice(index, index + length)
       index += length
       continue
     }
@@ -1076,11 +1155,98 @@ function mathGroup(lines: readonly string[], budget: MarkdownBudget): string {
 }
 
 /**
- * A model-written Markdown text as MarkdownText hands it to the renderer: its parts (see `splitMarkdown`), the prose
- * ones neutralized, sharing one budget (see MarkdownBudget), so splitting a text into parts gains nothing.
+ * A list item or an ATX heading at the top level: a line that interrupts a paragraph and starts an inline run of its
+ * own (with more indentation, marked continues the paragraph).
  */
-export function prepareMarkdown(text: string, imageLabel: string): MarkdownPart[] {
-  const shown = text.length > MAX_MARKDOWN_TEXT ? `${text.slice(0, MAX_MARKDOWN_TEXT)}\n\n…` : text
+/** An ATX heading: a line marked lexes as an inline run of its own. */
+const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/
+/** A list item's first line, in a quote or not: the quote markers, the indentation after them, and the marker. */
+const LIST_ITEM = /^((?:[ \t]*>)*)([ \t]*)([-*+]|\d{1,9}[.)])(?:[ \t]|$)/
+/** A line with only quote markers and whitespace: a blank line within a quote. */
+const QUOTE_BLANK = /^[ \t>]*$/
+/** A table's delimiter row (`| --- | :-: |`): the lines after it, up to a blank line, are rows. */
+const TABLE_DELIMITER = /^[ \t>]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/
+
+const indentOf = (space: string) => {
+  let width = 0
+  for (const char of space) width += char === "\t" ? 4 - (width % 4) : 1
+  return width
+}
+
+/** Where a Markdown text is cut, and why: MAX_MARKDOWN_TEXT, or a paragraph past MAX_PARAGRAPH. */
+export interface MarkdownCut {
+  /** How many of the text's characters show (its length when nothing is cut). */
+  readonly shown: number
+  readonly reason?: "text" | "paragraph"
+}
+
+/**
+ * How much of a Markdown text shows: up to MAX_MARKDOWN_TEXT characters, cut where a paragraph runs past
+ * MAX_PARAGRAPH, on a code point's boundary. A paragraph is what marked lexes as one inline run at most: prose lines up
+ * to a blank line (in a quote too), where an ATX heading, a top-level list item, a list item nested at any depth in a
+ * list, and each row of a table start a run of their own, and every other line continues the run (a list marker
+ * indented 4 spaces or more past where the item before it starts its text, or outside a list, continues the paragraph
+ * before it, as marked reads it). Code blocks and
+ * display math are not runs. One pass over the lines. (Counting a nested list or a table as one run cut ordinary
+ * release notes of 21 to 30 KB, which marked lexes in a few milliseconds.)
+ */
+export function shownLength(text: string): MarkdownCut {
+  const lines = text.split("\n")
+  const kinds = lineKinds(lines)
+  let cut: MarkdownCut | undefined
+  let offset = 0
+  let run = 0
+  // Whether the current run is in a list (it started at a list item), where the content of the list's last item starts,
+  // and whether the lines are a table's rows.
+  let inList = false
+  let content = 0
+  let inTable = false
+  let afterBlank = true
+  for (let index = 0; index < lines.length && !cut; index++) {
+    const line = lines[index]!
+    if (kinds[index] !== "prose" || QUOTE_BLANK.test(line)) {
+      run = 0
+      inTable = false
+      afterBlank = kinds[index] === "prose"
+    } else {
+      const item = LIST_ITEM.exec(line)
+      if (HEADING.test(line)) {
+        run = 0
+        inList = inTable = false
+      } else if (item && (indentOf(item[2]!) <= 3 || (inList && indentOf(item[2]!) < content + 4))) {
+        run = 0
+        inList = true
+        content = indentOf(item[2]!) + item[3]!.length + 1
+      } else if (inTable) run = 0
+      else if (TABLE_DELIMITER.test(line) && line.includes("|")) {
+        // The header row before it is a row of its own too; the delimiter row itself holds no text.
+        run = 0
+        inTable = true
+      } else if (afterBlank && indentOf(/^[ \t]*/.exec(line)![0]) <= 3) inList = false
+      if (run + line.length > MAX_PARAGRAPH) cut = { shown: offset + MAX_PARAGRAPH - run, reason: "paragraph" }
+      run += line.length + 1
+      afterBlank = false
+    }
+    offset += line.length + 1
+  }
+  if (!cut && text.length > MAX_MARKDOWN_TEXT) cut = { shown: MAX_MARKDOWN_TEXT, reason: "text" }
+  if (!cut) return { shown: text.length }
+  // Never between the halves of a surrogate pair.
+  const high = text.charCodeAt(cut.shown - 1)
+  return high >= 0xd800 && high <= 0xdbff ? { ...cut, shown: cut.shown - 1 } : cut
+}
+
+/**
+ * A model-written Markdown text as MarkdownText hands it to the renderer: what `shownLength` lets show, as parts (see
+ * `splitMarkdown`), the prose ones neutralized, sharing one budget (see MarkdownBudget), so splitting a text into parts
+ * gains nothing. A cut text ends with "…".
+ */
+export function prepareMarkdown(
+  text: string,
+  imageLabel: string,
+  cut: MarkdownCut = shownLength(text),
+): MarkdownPart[] {
+  const shown = cut.shown < text.length ? `${text.slice(0, cut.shown)}\n\n…` : text
   const budget = markdownBudget(shown.length)
   return splitMarkdown(shown).map((part) =>
     part.kind === "markdown" ? { kind: "markdown", text: neutralizeMarkdown(part.text, imageLabel, budget) } : part,

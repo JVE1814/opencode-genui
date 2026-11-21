@@ -20,14 +20,22 @@ const tone = z.enum(["neutral", "info", "success", "warning", "danger"]).optiona
 
 export type Option = z.infer<typeof option>
 
+/** One option, a plain string or `{ label, value }`, as `{ label, value }`; undefined for anything else. */
+export function normalizeOption(item: unknown): { label: string; value: string } | undefined {
+  if (typeof item === "string") return { label: item, value: item }
+  if (item && typeof item === "object" && typeof (item as { value?: unknown }).value === "string") {
+    const { label, value } = item as { label?: unknown; value: string }
+    return { label: typeof label === "string" ? label : value, value }
+  }
+  return undefined
+}
+
 /** Options may be plain strings or `{ label, value }`; components normalize them with this. */
 export function normalizeOptions(options: readonly Option[] | undefined | null): { label: string; value: string }[] {
   if (!Array.isArray(options)) return []
   return options.flatMap((item) => {
-    if (typeof item === "string") return [{ label: item, value: item }]
-    if (item && typeof item === "object" && typeof item.value === "string")
-      return [{ label: typeof item.label === "string" ? item.label : item.value, value: item.value }]
-    return []
+    const option = normalizeOption(item)
+    return option ? [option] : []
   })
 }
 
@@ -52,8 +60,7 @@ export const componentDefinitions = {
   Grid: {
     props: z.object({ columns: z.number().int().min(1).max(6).optional(), gap }),
     slots: ["default"],
-    description:
-      "Grid of 1-6 columns (default 2). Columns collapse automatically when the surface is narrow, e.g. in a sidebar canvas.",
+    description: "Grid of 1-6 columns (default 2); they collapse on narrow surfaces such as a sidebar canvas.",
     example: { columns: 3, gap: "md" },
   },
   Card: {
@@ -81,7 +88,7 @@ export const componentDefinitions = {
     slots: ["default"],
     events: ["change"],
     description:
-      "Tabs. Child N is the panel of tabs[N]: give exactly one child per tab (wrap several elements in a Stack). Use { $bindState } on value to read or set the active tab.",
+      "Child N is the panel of tabs[N]: give exactly one child per tab (wrap several elements in a Stack). Use { $bindState } on value to read or set the active tab.",
     example: {
       tabs: [
         { label: "Overview", value: "overview" },
@@ -118,11 +125,12 @@ export const componentDefinitions = {
       weight: z.enum(["regular", "medium"]).optional(),
       align: z.enum(["start", "center", "end"]).optional(),
     }),
-    description: "A paragraph of plain text. For rich text with links, lists or emphasis use Markdown.",
+    description: "A paragraph of plain text; use Markdown for links, lists or emphasis.",
   },
   Markdown: {
     props: z.object({ content: z.string() }),
-    description: "Rich text rendered as Markdown, in the app's style. Supports lists, links, tables and code.",
+    description:
+      "Rich text as Markdown in the app's style: lists, links, tables, code. Cut at a paragraph over 20,000 characters.",
   },
   Code: {
     props: z.object({ code: z.string(), language: z.string().optional(), title: z.string().optional() }),
@@ -163,7 +171,7 @@ export const componentDefinitions = {
     }),
     events: ["select"],
     description:
-      'Data table. columns are header labels, or { key, label, align } to read object rows by key. rows are arrays of cells (in column order) or objects. Bind rows to state with { "$state": "/rows" }. With selectionPath, clicking a row writes its index to that state path and fires on.select.',
+      'Data table, of at most 500 rows and 50 columns. columns are header labels, or { key, label, align } to read object rows by key. rows are arrays of cells (in column order) or objects. Bind rows to state with { "$state": "/rows" }. With selectionPath, clicking a row writes its index to that state path and fires on.select.',
     example: {
       columns: ["Service", "Status"],
       rows: [
@@ -232,7 +240,7 @@ export const componentDefinitions = {
       src: z.string().optional(),
       size: z.enum(["small", "normal", "large"]).optional(),
     }),
-    description: "A person or entity avatar; shows initials when there is no image.",
+    description: "A person or entity avatar; initials when there is no image.",
   },
   Chart: {
     props: z.object({
@@ -245,7 +253,7 @@ export const componentDefinitions = {
       unit: z.string().optional(),
     }),
     description:
-      "A simple chart in the app's colors. labels are the x-axis categories; each series has one value per label. donut uses the first series. Keep to at most 6 series.",
+      "A simple chart in the app's colors. labels are the x-axis categories; each series has one value per label. donut uses the first series. At most 6 series and 500 labels.",
     example: { type: "bar", labels: ["Mon", "Tue", "Wed"], series: [{ name: "Builds", values: [12, 18, 9] }] },
   },
 
@@ -292,7 +300,7 @@ export const componentDefinitions = {
       validateOn,
     }),
     events: ["change"],
-    description: "Dropdown select. options are strings or { label, value }. Bind value with { $bindState }.",
+    description: "Dropdown select of at most 500 options, strings or { label, value }. Bind value with { $bindState }.",
   },
   Checkbox: {
     props: z.object({
@@ -377,7 +385,7 @@ export const componentDefinitions = {
     }),
     events: ["change"],
     description:
-      "A set of toggle buttons. single (default) binds a string value, multiple binds an array of values. Bind value with { $bindState }.",
+      "Toggle buttons: single (default) binds a string value, multiple an array. Bind value with { $bindState }.",
   },
   ButtonGroup: {
     props: z.object({

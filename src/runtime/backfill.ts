@@ -22,6 +22,8 @@ export interface BackfillOptions {
   /** The most messages to load. Default 1000. */
   readonly max?: number
   readonly signal?: AbortSignal
+  /** Called once the session's first message is loaded: its history holds nothing older. */
+  readonly onStart?: () => void
 }
 
 const PAGE_SIZE = 100
@@ -70,8 +72,13 @@ export async function backfill(
       }
       if (until?.(loaded.toReversed())) break
       const next = response?.cursor?.next
-      // A short page is the last; a page with nothing new means the cursor is not moving.
-      if (data.length < limit || added === 0 || typeof next !== "string" || next === cursor) break
+      // A short page is the last, as is one without a next cursor; a page with nothing new means the cursor is not
+      // moving, which says nothing about where the history starts.
+      if (data.length < limit || next === null || (next === undefined && added > 0)) {
+        options.onStart?.()
+        break
+      }
+      if (added === 0 || typeof next !== "string" || next === cursor) break
       cursor = next
     }
   } catch {

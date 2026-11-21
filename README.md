@@ -177,24 +177,51 @@ Specs are written by a model and treated as data:
   in the window); an edit past that is ignored.
 - **Bounded work.** The work a spec can give the window, with or without your clicks, is bounded in these ways:
   - Validation patterns run on a linear-time matcher (no backreferences or lookarounds) with a shared work budget, and
-    the other checks read at most 512 characters as a number (8,192 as a URL); Markdown is prepared, and where a spec's
-    password fields write is found, in time linear in their size.
+    the other checks read at most 512 characters as a number (8,192 as a URL); Markdown is prepared, where a spec's
+    password fields write is found, and json-render's check of a spec's repeat paths runs (on every streamed change of
+    a canvas), in time linear in their size: an element is checked at most twice (in a repeat or not), plus once for
+    each list with items in state that it can repeat over (at most 64).
+  - A JSON pointer (a patch's path, or a state path that an action, a binding, a repeat or a watch names) has at most
+    64 levels and 2,048 characters. A patch line with a longer one is a line error, nothing is written to a longer state
+    path, and the validator reports one where the spec writes it out.
+  - An element keeps at most 32 props (its component's own first) and watches at most 32 state paths; the rest are
+    ignored and reported. json-render resolves an element's props and subscribes its watches for every instance of it
+    (each entry of a parent's children, each row of a repeat), before it knows whether the instance renders.
+  - Elements nest at most 20 levels deep (the stack overflowed past about 50): a deeper one is not shown, and the UI
+    says so. An element whose component throws shows nothing, and the UI lists its error.
   - What the app's Markdown renderer does with a text is bounded too: past a budget per text (in proportion to its
     length), emphasis markers (`*`, `_`, `~`) that marked would search a paragraph for show as plain characters, and so
-    does math past about 20,000 characters; a text shows its first 40,000 characters.
+    does math past about 20,000 characters. Past a paragraph's first 100 backslash escapes, escapes are written as
+    character references, which display the same, and so is the text of the links genui writes for bare addresses. A
+    text shows up to 500,000 characters, and is cut where one paragraph runs past 20,000 characters (marked's inline
+    work grows faster than a paragraph; a list item, at any depth, and a table row count on their own, as marked lexes
+    them); a note says "Showing the first N of M characters", and the agent gets an issue. A text shows its first 32
+    fenced code blocks as code blocks of their own (the app's code block component) and the rest as code within its
+    Markdown; every code block it renders (fenced, in a quote or a list item too, or indented) costs the render
+    budget, 4 units on its own and 1 within the Markdown.
   - State actions in a row (setState, pushState, removeState), and the first actions of the watches one change wakes,
     run in one batch, so the UI re-evaluates once instead of once per write; a write calls only the watches of its own
     path, and a watch is not woken by its own writes. `validateForm` checks every field and writes all results at once;
     each field shows only its own result, a hundred fields per frame. After the agent's patch, the edits you made in a
-    list follow their items by looking them up, not by searching the list.
+    list follow their items by looking them up, not by searching the list: by key, by whole item, or by the item apart
+    from what the edit changed. Each value is hashed and each pair of values compared at most once per patch, so an
+    edit costs the depth of its path, not the size of its item; a patch hashes at most 200,000 list items and visits 4
+    million values in all (past that, an edit not matched yet stays at its index if its list kept its length and
+    nothing about it is left to compare, and goes otherwise; the UI says so). The state the UI reads keeps its objects
+    where their content did
+    not change (json-render compares them by identity), and saving your edits checks each list item they go through
+    once.
   - One change (a key press, a click, or anything else in one task) with all it sets off runs at most 4,000 watch
     wakes, 8,000 state actions (a select-all over a full UI whose rows write four times each) and 64 awaited actions
     (validateForm, custom actions) or actions of watches woken by other watches, counted across every UI in the
     window; the rest is skipped, the console says so and the UI shows an issue. Each of your input events counts
     afresh.
   - Once actions have run for 50 ms in one task, the rest of a list woken directly waits for the next task, so the
-    window answers in between (40 tasks in a row at most, then the rest is skipped), and watches set off by other
-    watches stop. While an activation's actions wait so, its permission to act outward or open a modal is set aside.
+    window answers in between; a change goes on so over as many tasks as it takes, within the counts above, however
+    slow the machine. Watches set off by other watches stop, and work the UI sets off as it renders while lists wait is
+    skipped where it would wait once 40 such works have waited (so are lists that waited 40 tasks in a row without
+    any action running). While an activation's actions wait so, its permission to act outward or open a modal is set
+    aside, and they go on in a task of their own.
   - `$template`, `$concat` and `$join` build at most a million characters each, 4 million per task in all, and 4
     million for the actions of one change (also in its later tasks); past that the prop is left empty and an action
     using it does not run. A list in state is turned into text only as far as there is room; `$truncate`, `$math`,
@@ -208,23 +235,36 @@ Specs are written by a model and treated as data:
     Until then an element shows nothing, or keeps what it showed; past a bound the prop is left empty, the action does
     not run, and the field counts as invalid. Numbers and dates are read from at most 512 characters.
   - A UI shows at most about 2,000 elements or 500,000 characters of text in all, and builds at most 4,000 child
-    elements (a repeat counts its rows times its children, so a repeat inside a repeat is the product of both lists);
-    a repeat shows at most 2,000 rows, its first ones as far as they fit, and its rows share their element's values
-    that hold no expression instead of copying them. A Table counts its cells and a Chart its points (drawn and
-    listed for screen readers), ten to an element, and a Table shows at most 500 rows, 50 columns and 10,000 cells,
-    saying what it leaves out. The UIs in the window also share one bound per kind: about 6,000 for the agent's inline
-    UIs (of which the newest one, mounted last, always keeps 2,000), 4,000 for canvases, 2,000 for older copies of a UI
-    the agent sent again, and 2,000 for blocks in tool output or files, so twenty copies of a large block render once
-    and never take the newest copy's room. What does not fit is reported as an issue and comes back once room is freed. Rendering more than about 1,000
-    elements or 100 ms in one task continues in the next tasks. One edit of state holds at most a million characters,
-    and `copy` operations add at most a million characters to a spec in all (a copy shares what it copies, so copies
-    of copies doubled the state at each step); a copy past that is left out and reported.
+    elements, each counted once more for every 250 characters it is written with, where it is built (a repeat counts
+    its rows times its children, so a repeat inside a repeat is the product of both lists, and an element listed 4,000
+    times is refused before json-render resolves it 4,000 times); a
+    repeat shows at most 2,000 rows, its first ones as far as they fit (only those rows are matched to the list's items,
+    in linear time, so a long list costs no more than the rows it shows), and its rows share their element's values that
+    hold no expression instead of copying them. A Table counts its cells and a Chart its points (drawn and listed for
+    screen readers), ten to an element; a Table shows at most 500 rows, 50 columns and 10,000 cells, and a Chart 500
+    labels and 6 series. A component that draws a list prop item by item draws at most: Keybind 16 keys; Radio, Tabs,
+    ToggleGroup, ButtonGroup and DropdownMenu 200 items; Select, Accordion and Carousel 500, and each item drawn counts
+    in the render budget (a radio option 0.4 units, a tab, key or button 0.2, an Accordion section 0.8). What a
+    component leaves out is said under it ("Showing 200 of 10,000 options") and reported as an issue (twenty such issues
+    per UI, the rest counted in one). The UIs in the window also share one bound per kind: about 6,000 for the agent's
+    inline UIs (of which the newest one, mounted last, always keeps 2,000), 4,000 for canvases, 2,000 for older copies
+    of a UI the agent sent again, and 2,000 for blocks in tool output or files, so twenty copies of a large block render
+    once and never take the newest copy's room. What does not fit is reported as an issue and comes back once room is
+    freed. Rendering more than about 1,000 elements or 100 ms in one task continues in the next tasks. One edit of state
+    holds at most a million characters, and `copy` operations add at most a million characters to a spec in all (a copy
+    shares what it copies, so copies of copies doubled the state at each step); a copy past that is left out and
+    reported.
   - A Dialog or Drawer never opens from focus, blur, a slider or a browsed choice, and the focus moves it makes as it
     opens and closes do not run a field's `on.focus` or `on.blur`. It opens at most once per task at its path (a second
     one bound to the same path stays closed while the first shows), never again in a task in which it closed, and at
     most 8 modals open per task in the whole window, counted per UI state, so a remounted Dialog counts too. Once you
     dismiss one (Escape, its close button, its backdrop), only a press or another activation opens a modal of that UI,
     until you activate one of its controls or the agent sends a new version of it; for 1.5 s that holds in every UI.
+  - A session has at most 32 canvases open (each opens a tab). A block for another canvas is not applied (nor a
+    later patch to it, until it is sent again whole while there is room): its chip says it was not opened, and the
+    newest canvas reports how many were not, until one is closed. Each block counts the canvases open where it is in
+    the conversation. A canvas the agent closes in the reply that opened it takes its tab with it, and at most 32 of
+    the tabs genui opened by itself stay open in a session; a canvas past that opens from its chip.
 
 ## Development
 
@@ -267,15 +307,20 @@ playground/        fake desktop host for development and end-to-end tests
   re-sending the session hint after a reconnect, has been verified in the desktop app itself (only in the playground
   and in unit tests).
 - A fenced code block in a Markdown list item renders after the item, as a block of its own. One inside a Markdown
-  quote stays with the app's renderer: its copy button may copy invisible joiners. Markdown links show no favicon, and
-  their address shows in their tooltip rather than the status bar.
+  quote, or past a text's 32nd, stays with the app's renderer: its copy button may copy invisible joiners. Markdown
+  links show no favicon, and their address shows in their tooltip rather than the status bar.
 - The app's confirm dialog cannot be selected or copied from, and runs its text together: genui shows line breaks in
   the payload as ↵.
 - What the bounds above send to later tasks still runs there: a spec at the bounds can keep the window busy in short
-  tasks for a few seconds, while it answers in between. Some work within one task is not split: an element's first
-  evaluation in a task (up to 200 ms), re-rendering what one batch of a select-all changed, and one element's own
-  rendering (a Table of 10,000 cells, a Markdown text of 40,000 characters). Measured in the playground: under 0.3 s
-  per task for each.
+  tasks for a few seconds, while it answers in between (a select-all on a much slower machine, for minutes). Some work
+  within one task is not split: an element's first evaluation in a task (up to 200 ms), re-rendering what one batch of
+  a select-all changed, and one element's own rendering (a Table of 10,000 cells, a Markdown text of 100 KB, an open
+  Select of 500 options). Measured: under 0.4 s per task for each, and, at the measured rate, about 0.6 s for a
+  Markdown text of 500,000 characters written to be slow (built with `$template` from state).
+- A canvas whose base is in messages not loaded renders once its spec holds a whole tree, but keeps loading older
+  messages, and is saved only once the base is found or the whole history was loaded without finding one (a session
+  past 1,000 assistant messages may never settle such a canvas). Edits you make to it meanwhile may be dropped if the
+  base found changes its generation.
 - A remote image you load (with a click, or by the setting that allows remote images) is whatever its server sends,
   an SVG one too, whose drawing genui cannot bound: a page cannot learn an image's type before the browser draws it,
   and cross-origin reads to check it first are refused. Load images only from addresses you trust.

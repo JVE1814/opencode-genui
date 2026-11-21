@@ -124,21 +124,30 @@ describe("foldCanvases", () => {
     expect(fixed.settled).toBeDefined()
   })
 
-  test("a new canvas started with a `replace` of /root settles once its root element arrives [review6#R9]", () => {
+  test("a new canvas started with a `replace` of /root renders once its root element arrives, and settles once the history is searched [review6#R9, review7#R6F3-1]", () => {
     const switched = { op: "replace", path: "/root", value: "main" }
     const first = block("msg_05", json({ canvas: "main" }, switched, { op: "add", path: "/state/x", value: 1 }))
     // Alone, the switch may belong to a canvas in messages not loaded: its base is looked for.
     expect(only(foldCanvases({}, [first])).missingBase).toBe(true)
-    // Once the spec holds its root element, nothing is missing: it renders, settles and is saved. Before, it waited
-    // for a base that does not exist, behind "Part of this canvas is missing", for good.
-    const state = only(foldCanvases({}, [first, block("msg_06", json(element("main", "hi")))]))
+    expect(only(foldCanvases({}, [first])).baseUnknown).toBe(true)
+    // Once the spec holds its root element, nothing is missing: it renders. Before review6#R9, it waited for a base
+    // that does not exist, behind "Part of this canvas is missing", for good.
+    const blocks = [first, block("msg_06", json(element("main", "hi")))]
+    const state = only(foldCanvases({}, blocks))
     expect(state.missingBase).toBe(false)
     expect(state.spec).toEqual({
       root: "main",
       elements: { main: { type: "Text", props: { text: "hi" } } },
       state: { x: 1 },
     } as never)
-    expect(state.settled?.spec).toBe(state.spec!)
+    // It may still be an old canvas's view switch whose base is in messages not loaded (review7#R6F3-1): the base is
+    // looked for, and nothing is saved, until the whole history is loaded without finding one. (This test asserted
+    // that it settled right away, which saved such a canvas without its title and state.)
+    expect(state.baseUnknown).toBe(true)
+    expect(state.settled).toBeUndefined()
+    const searched = only(foldCanvases({}, blocks, { searched: true }))
+    expect(searched.baseUnknown).toBe(false)
+    expect(searched.settled?.spec).toBe(searched.spec!)
     // A root element whose children are not all there still waits for its base.
     const partial = only(
       foldCanvases({}, [
@@ -164,7 +173,7 @@ describe("foldCanvases", () => {
       ]),
     )
     expect(whole.missingBase).toBe(false)
-    expect(whole.settled).toBeDefined()
+    expect(whole.settled).toBeUndefined()
   })
 
   test("a root switch with a prop edit on an unknown base keeps looking for the base [R6F1-3]", () => {

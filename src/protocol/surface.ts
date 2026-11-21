@@ -1,6 +1,6 @@
 import type { Spec } from "@json-render/core"
 import { CANVAS_LANGUAGE, DEFAULT_CANVAS } from "../shared/constants.ts"
-import type { Patch } from "./patch.ts"
+import { pointerTooLarge, type Patch } from "./patch.ts"
 
 /**
  * The optional first line of a block: a JSON object without `op`. Stock json-render tooling skips it, since it is not a
@@ -151,7 +151,11 @@ export function parseBlock(body: string, options: { partial?: boolean } = {}): P
     }
     const patch = toPatch(value)
     if (patch) {
-      patches.push(patch)
+      // A path too deep or long to walk (see MAX_POINTER_DEPTH) is refused here, so the agent hears of it.
+      const tooLarge =
+        pointerTooLarge(patch.path) ?? (patch.from === undefined ? undefined : pointerTooLarge(patch.from))
+      if (tooLarge) errors.push({ line: index + 1, text: line.slice(0, 200), message: tooLarge })
+      else patches.push(patch)
       return
     }
     if (isSpecDocument(value)) {

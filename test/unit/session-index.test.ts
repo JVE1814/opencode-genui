@@ -425,6 +425,44 @@ describe("createSessionIndex fresh", () => {
     expect(index.fresh()).toEqual([])
   })
 
+  test("a fresh canvas the agent closes in the reply that started it is withdrawn, once [review7#R7S1-4]", () => {
+    // A reply that opened and closed 650 canvases in turn left a tab open for each, all of them for removed canvases.
+    const { index, push, append, complete, setStore } = setup([assistant("msg_01", "hello")])
+    push(user("msg_02"))
+    push(assistant("msg_03", fence("canvas", lines({ canvas: "a" }, root(), element("main", "a"))), false))
+    expect(index.fresh()).toEqual(["a"])
+    index.consumeFresh("a")
+    expect(index.withdrawn()).toEqual([])
+    append(2, `\n${fence("canvas", lines({ canvas: "a", close: true }))}`)
+    expect(index.withdrawn()).toEqual(["a"])
+    index.consumeWithdrawn("a")
+    expect(index.withdrawn()).toEqual([])
+
+    // One that stays open through its reply is not withdrawn, nor when a later reply closes it.
+    append(2, `\n${fence("canvas", lines({ canvas: "b" }, root(), element("main", "b")))}`)
+    expect(index.fresh()).toEqual(["b"])
+    index.consumeFresh("b")
+    complete(2)
+    expect(index.withdrawn()).toEqual([])
+    push(user("msg_04"))
+    push(assistant("msg_05", fence("canvas", lines({ canvas: "b", close: true })), false))
+    expect(index.withdrawn()).toEqual([])
+
+    // A close that comes with the end of the reply withdraws it too.
+    push(user("msg_06"))
+    push(assistant("msg_07", fence("canvas", lines({ canvas: "c" }, root(), element("main", "c"))), false))
+    expect(index.fresh()).toEqual(["c"])
+    index.consumeFresh("c")
+    setStore("messages", 6, (message) => ({
+      ...message,
+      content: [
+        { type: "text", text: `${message.content[0]!.text}\n${fence("canvas", lines({ canvas: "c", close: true }))}` },
+      ],
+      time: { created: 1, completed: 3 },
+    }))
+    expect(index.withdrawn()).toEqual(["c"])
+  })
+
   test("a canvas in a reply still being written when the session loads is fresh; one in a finished reply is not", () => {
     const { index } = setup([
       assistant("msg_04", fence("canvas", lines({ canvas: "done" }, root()))),

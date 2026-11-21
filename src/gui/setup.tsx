@@ -13,7 +13,7 @@ import {
   type SessionRef,
 } from "@opencode/plugin/gui"
 import { Schema } from "effect"
-import { compareRefs } from "../protocol/fold.ts"
+import { compareRefs, MAX_CANVASES } from "../protocol/fold.ts"
 import {
   activationTarget,
   ensureInstructions,
@@ -86,6 +86,13 @@ export interface GuiEnv {
   resetSurfaces(session?: SessionRef): void
 }
 
+/**
+ * How many of the tabs auto-open opened may be open in a session at once: as many as a session has canvases (see
+ * MAX_CANVASES). Each canvas a reply streams opens its tab, and a reply that opened and closed canvases in turn left
+ * hundreds of tabs, the work of each delta growing with them.
+ */
+export const MAX_AUTO_OPEN = MAX_CANVASES
+
 export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
   ctx.add(Style, css)
 
@@ -96,6 +103,10 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
   const sessions = createSessionRegistry(store, { owner: getOwner() })
   const closed = new Set<string>()
   const closedKey = (session: SessionRef, canvas: string) => `${session.key}\n${canvas}`
+  // Per session key: the canvases whose tab auto-open opened (see MAX_AUTO_OPEN), and the tabs genui is closing itself
+  // (not the user: auto-open may open them again).
+  const autoOpened = new Map<string, Set<string>>()
+  const closing = new Set<string>()
   const tabKey = (canvas: string) => `${ctx.id}:${CANVAS_TAB_PREFIX}${canvas}`
   // Per session key: the canvas the narrow-screen view shows.
   const [mobile, setMobile] = createSignal<ReadonlyMap<string, string>>(new Map())
@@ -154,7 +165,10 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     mobileCanvas: (session) => mobile().get(session.key),
     showMobileCanvas: showMobile,
     closeCanvas: (session, canvas) => ctx.layout.close(tabKey(canvas), session),
-    markClosed: (session, canvas) => void closed.add(closedKey(session, canvas)),
+    markClosed(session, canvas) {
+      const key = closedKey(session, canvas)
+      if (!closing.delete(key)) closed.add(key)
+    },
     async sendPrompt(session, text) {
       await applyComposerModel(session)
       await session.server.client.session.prompt({ sessionID: session.id, text })
@@ -244,9 +258,12 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     const current = ctx.sessions.current()
     if (current) keep.add(current.key)
     sessions.prune(keep)
+    for (const key of autoOpened.keys()) if (!keep.has(key)) autoOpened.delete(key)
   })
 
   // ── Auto-open: a canvas that starts in a live reply opens its tab once ────────────────────────────────────────
+  // At most MAX_AUTO_OPEN of the tabs it opened stay open in a session; past that, a new canvas opens from its chip. A
+  // canvas the agent closes again in the reply that started it takes its tab with it.
   createEffect(() => {
     const session = ctx.sessions.current()
     if (!session) return
@@ -255,10 +272,33 @@ export const setup: Plugin.Setup<GenuiDeclarations> = (ctx) => {
     if (fresh.length === 0) return
     const mode = host.prefs().autoOpen
     untrack(() => {
+      let opened = autoOpened.get(session.key)
+      if (!opened) autoOpened.set(session.key, (opened = new Set()))
+      for (const canvas of [...opened])
+        if (ctx.layout.state(tabKey(canvas), session) === "closed") opened.delete(canvas)
       for (const canvas of fresh) {
-        if (mode !== "off" && !closed.has(closedKey(session, canvas)))
+        if (mode !== "off" && !closed.has(closedKey(session, canvas)) && opened.size < MAX_AUTO_OPEN) {
           ctx.layout.open(tabKey(canvas), session, { tab: mode === "select" ? "select" : "append", background: true })
+          opened.add(canvas)
+        }
         index.consumeFresh(canvas)
+      }
+    })
+  })
+  createEffect(() => {
+    const session = ctx.sessions.current()
+    if (!session) return
+    const index = sessions.get(session).index
+    const withdrawn = index.withdrawn()
+    if (withdrawn.length === 0) return
+    untrack(() => {
+      const opened = autoOpened.get(session.key)
+      for (const canvas of withdrawn) {
+        if (opened?.delete(canvas) && ctx.layout.state(tabKey(canvas), session) !== "closed") {
+          closing.add(closedKey(session, canvas))
+          ctx.layout.close(tabKey(canvas), session)
+        }
+        index.consumeWithdrawn(canvas)
       }
     })
   })

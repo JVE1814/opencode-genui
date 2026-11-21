@@ -13,10 +13,33 @@ export const EMPTY_SPEC: Spec = Object.freeze({ root: "", elements: Object.freez
 // A model-written path must never reach an object's prototype.
 const FORBIDDEN = new Set(["__proto__", "constructor", "prototype"])
 
-/** Splits an RFC 6901 pointer into tokens, or returns undefined for a pointer that is not one. */
+/**
+ * How deep and long a JSON pointer may be (spec patches, state actions, bindings, agent patches). Nothing a UI does
+ * needs more, and a pointer of 50,000 segments in a 100 KB block cost seconds wherever it was walked (the stack
+ * overflowed, and a click crashed the window's renderer). Longer pointers are refused: a patch line with one is a line
+ * error (see parseBlock in ./surface.ts), and a write to one is ignored.
+ */
+export const MAX_POINTER_DEPTH = 64
+export const MAX_POINTER_LENGTH = 2048
+
+/** Why a pointer is refused for its size (see MAX_POINTER_DEPTH), or undefined when it is within the bounds. */
+export function pointerTooLarge(path: string): string | undefined {
+  if (path.length > MAX_POINTER_LENGTH)
+    return `the path is ${path.length.toLocaleString("en-US")} characters long: a path has at most ${MAX_POINTER_LENGTH.toLocaleString("en-US")} characters and ${MAX_POINTER_DEPTH} levels`
+  let depth = 0
+  for (let index = path.indexOf("/"); index !== -1; index = path.indexOf("/", index + 1))
+    if (++depth > MAX_POINTER_DEPTH)
+      return `the path is nested more than ${MAX_POINTER_DEPTH} levels deep: a path has at most ${MAX_POINTER_DEPTH} levels`
+  return undefined
+}
+
+/**
+ * Splits an RFC 6901 pointer into tokens, or returns undefined for a pointer that is not one, or that is deeper or
+ * longer than MAX_POINTER_DEPTH and MAX_POINTER_LENGTH allow.
+ */
 export function parsePointer(path: string): string[] | undefined {
   if (path === "") return []
-  if (!path.startsWith("/")) return undefined
+  if (!path.startsWith("/") || pointerTooLarge(path) !== undefined) return undefined
   const tokens = path
     .slice(1)
     .split("/")
@@ -52,21 +75,22 @@ export function getAt(doc: unknown, tokens: readonly string[]): unknown {
 
 // Sets `value` at `tokens`, copying only the containers on the path. Missing parents are created as objects, because a
 // stream may add `/elements/a` before anything created `/elements`. `insert` shifts later array items, as "add" does.
-function setAt(doc: unknown, tokens: readonly string[], value: unknown, insert: boolean): unknown {
-  const [head, ...rest] = tokens
+function setAt(doc: unknown, tokens: readonly string[], value: unknown, insert: boolean, depth = 0): unknown {
+  const head = tokens[depth]
   if (head === undefined) return value
+  const last = depth === tokens.length - 1
 
   if (Array.isArray(doc)) {
     const index = arrayIndex(head, doc.length, true)
     if (index < 0) return doc
-    if (rest.length === 0) {
+    if (last) {
       if (!insert && index < doc.length && Object.is(doc[index], value)) return doc
       const next = doc.slice()
       if (insert) next.splice(index, 0, value)
       else next[index] = value
       return next
     }
-    const child = setAt(doc[index], rest, value, insert)
+    const child = setAt(doc[index], tokens, value, insert, depth + 1)
     if (child === doc[index]) return doc
     const next = doc.slice()
     next[index] = child
@@ -74,7 +98,7 @@ function setAt(doc: unknown, tokens: readonly string[], value: unknown, insert: 
   }
 
   const source = isObject(doc) ? doc : {}
-  const child = rest.length === 0 ? value : setAt(source[head], rest, value, insert)
+  const child = last ? value : setAt(source[head], tokens, value, insert, depth + 1)
   if (isObject(doc) && Object.hasOwn(source, head) && Object.is(source[head], child)) return doc
   return { ...source, [head]: child }
 }
@@ -106,24 +130,29 @@ function setOwned(doc: unknown, tokens: readonly string[], depth: number, value:
 /**
  * `replace` operations applied in order, as many `applyPatch` calls would (the same result), copying each container
  * on their paths once: one at a time, each copied every container on its path, so ten thousand values set under one
- * object copied it ten thousand times. Each path must be a parsed pointer (see `parsePointer`).
+ * object copied it ten thousand times. Each path must be a parsed pointer (see `parsePointer`). `owned` receives the
+ * containers made by this call.
  */
-export function replaceAll<T>(doc: T, replacements: Iterable<readonly [tokens: readonly string[], value: unknown]>): T {
-  const owned = new Set<object>()
+export function replaceAll<T>(
+  doc: T,
+  replacements: Iterable<readonly [tokens: readonly string[], value: unknown]>,
+  owned = new Set<object>(),
+): T {
   let next: unknown = doc
   for (const [tokens, value] of replacements) next = setOwned(next, tokens, 0, value, owned)
   return next as T
 }
 
-function removeAt(doc: unknown, tokens: readonly string[]): unknown {
-  const [head, ...rest] = tokens
+function removeAt(doc: unknown, tokens: readonly string[], depth = 0): unknown {
+  const head = tokens[depth]
   if (head === undefined) return doc
+  const last = depth === tokens.length - 1
 
   if (Array.isArray(doc)) {
     const index = arrayIndex(head, doc.length, false)
     if (index < 0) return doc
-    if (rest.length === 0) return doc.toSpliced(index, 1)
-    const child = removeAt(doc[index], rest)
+    if (last) return doc.toSpliced(index, 1)
+    const child = removeAt(doc[index], tokens, depth + 1)
     if (child === doc[index]) return doc
     const next = doc.slice()
     next[index] = child
@@ -131,11 +160,11 @@ function removeAt(doc: unknown, tokens: readonly string[]): unknown {
   }
 
   if (!isObject(doc) || !Object.hasOwn(doc, head)) return doc
-  if (rest.length === 0) {
+  if (last) {
     const { [head]: _removed, ...next } = doc
     return next
   }
-  const child = removeAt(doc[head], rest)
+  const child = removeAt(doc[head], tokens, depth + 1)
   return child === doc[head] ? doc : { ...doc, [head]: child }
 }
 

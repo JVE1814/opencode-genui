@@ -28,7 +28,7 @@ import {
   type Meter,
   type Waiter,
 } from "../runtime/budget.ts"
-import { MAX_REPEAT_ROWS, RENDER_UNITS, SLOT_UNITS, TEXT_PER_UNIT } from "../shared/constants.ts"
+import { MAX_DEPTH, MAX_REPEAT_ROWS, RENDER_UNITS, SLOT_UNITS, TEXT_PER_UNIT } from "../shared/constants.ts"
 import { domUnits } from "./costs.ts"
 import { boundedDirective } from "./directives.ts"
 
@@ -140,12 +140,49 @@ export function elementUnits(element: { readonly type?: unknown; readonly props?
 }
 
 /**
- * How many child renderers an element builds once it renders (see SLOT_UNITS): one per entry of its `children`, or,
- * for a repeat, one per child in each of its rows (one per row without children), whether each child then fits or not.
+ * The spec's elements as written, before json-render resolves them for each instance: a parent charges its child
+ * renderers by them (see `childSlots`). Each surface provides it (src/gui/surface.tsx); without it, a child takes one
+ * slot.
  */
-export function slotsOf(element: { readonly children?: unknown; readonly repeat?: unknown } | undefined, rows: number) {
-  const children = Array.isArray(element?.children) ? element.children.length : 0
-  return element?.repeat ? Math.min(rows, MAX_REPEAT_ROWS) * Math.max(1, children) : children
+export const SpecElementsContext = createContext<Accessor<Readonly<Record<string, unknown>> | undefined>>()
+
+/**
+ * The slots one child renderer of an element takes (see SLOT_UNITS): one, plus one for every TEXT_PER_UNIT characters
+ * of the child's element as written (see `sizeOf`). json-render resolves an instance's props into values of its own,
+ * and keeps them, before the instance can tell whether it fits: 4,000 entries of a child whose prop held a list of
+ * 40,000 numbers and one expression kept 700 MB, and 2,000 rows of it 360 MB. Charged at the parent, such a child is
+ * refused before json-render builds it.
+ */
+export function childSlots(element: unknown): number {
+  return 1 + Math.floor(Math.min(sizeOf(element), SIZE_LIMIT + 1) / TEXT_PER_UNIT)
+}
+
+/**
+ * The slots of one entry of each of an element's `children` together (see `childSlots`; `slotOf` gives a child key's),
+ * or 1 for none: what one row of a repeat takes. Counted only to just past what a surface holds.
+ */
+export function rowSlots(
+  element: { readonly children?: unknown } | undefined,
+  slotOf: (key: unknown) => number = () => 1,
+): number {
+  const children = Array.isArray(element?.children) ? element.children : []
+  let slots = 0
+  for (let index = 0; index < children.length && slots <= SLOT_UNITS; index++) slots += slotOf(children[index])
+  return Math.max(1, Math.min(slots, SLOT_UNITS + 1))
+}
+
+/**
+ * How many slots an element's child renderers take once it renders (see SLOT_UNITS and `childSlots`): those of each
+ * entry of its `children`, or, for a repeat, those of one row (see `rowSlots`) for each of its rows, whether each child
+ * then fits or not.
+ */
+export function slotsOf(
+  element: { readonly children?: unknown; readonly repeat?: unknown } | undefined,
+  rows: number,
+  slotOf: (key: unknown) => number = () => 1,
+) {
+  if (element?.repeat) return Math.min(rows, MAX_REPEAT_ROWS) * rowSlots(element, slotOf)
+  return Array.isArray(element?.children) && element.children.length > 0 ? rowSlots(element, slotOf) : 0
 }
 
 /**
@@ -180,6 +217,12 @@ export interface RenderBudget {
   /** How many of those would fit in the surface's own budget: the room went to other surfaces of the pool. */
   readonly pooled: Accessor<number>
   readonly setPooled: (update: (count: number) => number) => void
+  /** How many mounted elements render nothing because they nest deeper than MAX_DEPTH. */
+  readonly tooDeep: Accessor<number>
+  readonly setTooDeep: (update: (count: number) => number) => void
+  /** The errors of mounted elements that could not render (see RenderErrors in src/gui/registry.tsx), oldest first. */
+  readonly failed: Accessor<readonly string[]>
+  readonly setFailed: (update: (errors: readonly string[]) => readonly string[]) => void
 }
 
 export function createRenderBudget(
@@ -192,6 +235,8 @@ export function createRenderBudget(
   const meter = createMeter(RENDER_UNITS, SLOT_UNITS)
   const [skipped, setSkipped] = createSignal(0)
   const [pooled, setPooled] = createSignal(0)
+  const [tooDeep, setTooDeep] = createSignal(0)
+  const [failed, setFailed] = createSignal<readonly string[]>([])
   return {
     get used() {
       return meter.units
@@ -204,11 +249,20 @@ export function createRenderBudget(
     setSkipped,
     pooled,
     setPooled,
+    tooDeep,
+    setTooDeep,
+    failed,
+    setFailed,
   }
 }
 
 /** The surface's render budget (none outside a surface: unit tests render without a limit unless they provide one). */
 export const RenderBudgetContext = createContext<RenderBudget>()
+
+export { MAX_DEPTH }
+
+// How deep the element being rendered is (see MAX_DEPTH).
+const DepthContext = createContext(0)
 
 /**
  * json-render's hooks for the state and repeat scope an element renders in, so a repeat's rows are known before they
@@ -260,12 +314,15 @@ const REFUSED: Fit = Object.freeze({ fits: false })
  */
 function useFit(budget: RenderBudget, props: ComponentRenderProps, hooks?: JsonRenderHooks): Accessor<Fit> {
   const rows = useRows(props, hooks)
+  const elements = useContext(SpecElementsContext)
+  const slotOf = (key: unknown) => {
+    const child = typeof key === "string" ? elements?.()?.[key] : undefined
+    return child === undefined ? 1 : childSlots(child)
+  }
   const units = createMemo(() => elementUnits(props.element))
-  const slots = createMemo(() => slotsOf(props.element, rows()))
+  const slots = createMemo(() => slotsOf(props.element, rows(), slotOf))
   // The slots one row of the element's repeat takes, or 0 without a repeat.
-  const perRow = createMemo(() =>
-    props.element?.repeat ? Math.max(1, Array.isArray(props.element.children) ? props.element.children.length : 0) : 0,
-  )
+  const perRow = createMemo(() => (props.element?.repeat ? rowSlots(props.element, slotOf) : 0))
   const [woken, setWoken] = createSignal(undefined, { equals: false })
   const waiter: Waiter = { wake: () => setWoken(undefined), queued: false, disposed: false }
   let hold: Hold | undefined
@@ -409,22 +466,41 @@ export function createElementRenderer(
     return rendered as unknown as JSX.Element
   }
 
+  // The element's children render one level deeper.
+  const nested = (depth: number, render: () => JSX.Element): JSX.Element =>
+    createComponent(DepthContext.Provider, {
+      value: depth,
+      get children() {
+        return render()
+      },
+    })
+
   const RowsContext = hooks?.RepeatRowsContext
   return function GenuiElement(props: ComponentRenderProps): JSX.Element {
     const budget = useContext(RenderBudgetContext)
-    if (!budget) return renderElement(props)
+    const depth = useContext(DepthContext) + 1
+    if (depth > MAX_DEPTH) {
+      if (budget) {
+        budget.setTooDeep((count) => count + 1)
+        onCleanup(() => budget.setTooDeep((count) => count - 1))
+      }
+      return undefined
+    }
+    if (!budget) return nested(depth, () => renderElement(props))
     const fit = useFit(budget, props, hooks)
     const fits = createMemo(() => fit().fits)
     const rows = createMemo(() => fit().rows)
     const render = () =>
-      RowsContext
-        ? createComponent(RowsContext.Provider, {
-            value: rows,
-            get children() {
-              return renderElement(props)
-            },
-          })
-        : renderElement(props)
+      nested(depth, () =>
+        RowsContext
+          ? createComponent(RowsContext.Provider, {
+              value: rows,
+              get children() {
+                return renderElement(props)
+              },
+            })
+          : renderElement(props),
+      )
     return createMemo(() => (fits() ? untrack(render) : undefined)) as unknown as JSX.Element
   }
 }

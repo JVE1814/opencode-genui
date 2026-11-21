@@ -1,5 +1,14 @@
 import { standardDirectives } from "@json-render/directives"
-import { CANVAS_LANGUAGE, DEFAULT_CANVAS, INLINE_LANGUAGE, RENDER_UNITS, TEXT_PER_UNIT } from "../shared/constants.ts"
+import {
+  CANVAS_LANGUAGE,
+  DEFAULT_CANVAS,
+  INLINE_LANGUAGE,
+  MAX_DEPTH,
+  RENDER_UNITS,
+  TEXT_PER_UNIT,
+} from "../shared/constants.ts"
+import { MAX_CANVASES } from "../protocol/fold.ts"
+import { MAX_WATCH_PATHS } from "../protocol/normalize.ts"
 import { formatSentMessage, MAX_SENT_MESSAGE, MAX_TEXT_WITH_DATA, TRUNCATED } from "../shared/message.ts"
 import { MAX_PATTERN_INPUT, MAX_PATTERN_LENGTH } from "../protocol/pattern.ts"
 import {
@@ -56,7 +65,7 @@ A canvas is a sidebar tab, about 360px wide, that stays open across turns: use i
 - Any other block patches the canvas as it is, with RFC 6902 ops (add, replace, remove, move, copy) on /elements/<key>, /elements/<key>/props/<prop> and /state/.... Replacing /root with an element the canvas has switches the view, keeping the state and what the user entered.
 - {"canvas":"<id>","close":true} on its own removes the canvas.
 - The canvas renders while the block streams, so write /root and the layout first and the data after.
-- Several canvases can exist, one tab each; give each its own id.
+- Up to ${MAX_CANVASES} canvases can be open, one tab each; give each its own id.
 - If unsure what a canvas holds now (say, the chat was compacted), send the whole canvas again, with /root.
 - In your reply the block shows as a small chip that opens the canvas.
 
@@ -101,7 +110,7 @@ ${indent(sentExample)}
 
 The UI always takes the app's design and follows the user's theme and light or dark mode, so there are no color, style or className props: choose components and variants, not looks.
 
-- Keep it compact: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
+- Keep it compact: a UI shows at most about ${RENDER_UNITS.toLocaleString("en-US")} elements, or ${(RENDER_UNITS * TEXT_PER_UNIT).toLocaleString("en-US")} characters of text, in all, nested at most ${MAX_DEPTH} deep. Prefer Card, Stack and Grid for layout, Headings for structure, Badge and Stat for status, and at most one primary Button per UI.
 - Put realistic data in /state, taken from the task at hand.
 - Give each repeat a "key" (an id field): what the user enters in an item then stays with it when you add, remove or reorder items.
 - Never put secrets (API keys, tokens, passwords) in a spec: it stays in the transcript.`
@@ -166,6 +175,11 @@ export const PROMPT_FIXES: readonly { readonly from: string; readonly to: string
     to: `- pattern — match a regular expression (args: { "pattern": "regex" }), without backreferences or lookarounds, at most ${MAX_PATTERN_LENGTH} characters; a value longer than ${MAX_PATTERN_INPUT} characters fails it`,
   },
   {
+    // Said already, a few lines up ("Note: state patches appear right after the elements that use them").
+    from: "Output state patches right after the elements that reference them, so the UI fills in progressively as it streams.\n",
+    to: "",
+  },
+  {
     from: "Include realistic sample data in state. For blogs: 3-4 posts with titles, excerpts, authors, dates. For product lists: 3-5 items with names, prices, descriptions. Never leave arrays empty.",
     to: "Include realistic data in state, taken from the task at hand. Never leave arrays empty.",
   },
@@ -183,7 +197,7 @@ export const PROMPT_FIXES: readonly { readonly from: string; readonly to: string
   },
   {
     from: "Use `watch` for cascading dependencies where changing one field should trigger side effects (loading data, resetting dependent fields, computing derived values).",
-    to: "Use `watch` where changing one field should change others (resetting dependent fields, deriving values) with setState, pushState or removeState, at most 8,000 of them per change. sendPrompt, insertPrompt, openLink and copyText never run from watch.",
+    to: `Use \`watch\` where changing one field should change others (resetting dependent fields, deriving values) with setState, pushState or removeState, at most 8,000 of them per change; an element watches at most ${MAX_WATCH_PATHS} paths. sendPrompt, insertPrompt, openLink and copyText never run from watch.`,
   },
 ]
 

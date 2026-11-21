@@ -50,8 +50,18 @@ export interface CanvasState {
   readonly generation: number
   /** The latest block is still being written: its fence is open and its message has not completed. */
   readonly streaming: boolean
-  /** A patch arrived with no earlier version known; the spec is built on an empty one. */
+  /**
+   * The spec rests on a base not loaded and cannot render: a patch arrived with no earlier version known, and the
+   * spec built on an empty one does not hold its whole tree yet (see `holdsWholeTree`).
+   */
   readonly missingBase: boolean
+  /**
+   * The spec rests on a base not loaded (a patch arrived with no earlier version known), which older messages may hold:
+   * the base is looked for (see needsBackfill in src/runtime/session-index.ts), and meanwhile the canvas does not
+   * settle, even when it renders, so a spec without its base is never saved. False once the whole history was loaded
+   * (FoldOptions.searched): a base not found there does not exist, and the canvas settles as it is.
+   */
+  readonly baseUnknown: boolean
   /** The first block seen in this fold, or where the snapshot it started from says the canvas first appeared. */
   readonly first: BlockRef
   /** The last block applied. */
@@ -70,9 +80,30 @@ export interface FoldResult {
   readonly canvases: ReadonlyMap<string, CanvasState>
   /** Canvases a block closed (and no later block recreated). Their snapshots should be deleted. */
   readonly removed: ReadonlySet<string>
+  /**
+   * Canvases not opened because MAX_CANVASES were live where their blocks are (and that neither opened nor were closed
+   * later), patches to them included.
+   */
+  readonly refused: ReadonlySet<string>
 }
 
-type Fold = (base: Readonly<Record<string, CanvasSnapshot>>, blocks: readonly CanvasBlock[]) => FoldResult
+/**
+ * How many canvases a session has open at once. Each opens a tab, and a 99 KB reply that named 1,100 canvases opened
+ * 1,100 tabs and kept the window busy for over a minute while it streamed. A block for another canvas while this many
+ * are open is not folded (see FoldResult.refused); a canvas a block closes makes room.
+ */
+export const MAX_CANVASES = 32
+
+export interface FoldOptions {
+  /** The session's whole history is loaded: a canvas whose base is not found has none (see `baseUnknown`). */
+  readonly searched?: boolean
+}
+
+type Fold = (
+  base: Readonly<Record<string, CanvasSnapshot>>,
+  blocks: readonly CanvasBlock[],
+  options?: FoldOptions,
+) => FoldResult
 
 /**
  * Folds canvas blocks, in transcript order, onto the canvases' snapshots: a block that sets `/root` (or says
@@ -85,8 +116,9 @@ type Fold = (base: Readonly<Record<string, CanvasSnapshot>>, blocks: readonly Ca
 export function foldCanvases(
   base: Readonly<Record<string, CanvasSnapshot>>,
   blocks: readonly CanvasBlock[],
+  options?: FoldOptions,
 ): FoldResult {
-  return createCanvasFolder()(base, blocks)
+  return createCanvasFolder()(base, blocks, options)
 }
 
 /**
@@ -132,6 +164,8 @@ interface Node {
   readonly state?: CanvasState
   readonly generation: number
   readonly removed: boolean
+  /** The state rests on a base not loaded, whether or not the history was searched (see `baseUnknown`). */
+  readonly unknown?: boolean
 }
 
 /** The last computation at one block position, so a growing block applies only its new patches. */
@@ -146,7 +180,7 @@ interface Applied {
 interface CanvasCache {
   readonly empty: Node
   readonly snapshots: WeakMap<CanvasSnapshot, Node>
-  readonly steps: WeakMap<CanvasBlock, { readonly prev: Node; readonly next: Node }>
+  readonly steps: WeakMap<CanvasBlock, { readonly prev: Node; readonly next: Node; readonly searched: boolean }>
   applied: Map<string, Applied>
 }
 
@@ -293,6 +327,7 @@ export function createCanvasFolder(): Fold {
           generation: snapshot.generation,
           streaming: false,
           missingBase: false,
+          baseUnknown: false,
           first: snapshot.first ?? snapshot.after,
           last: snapshot.after,
           lineErrors: NO_ERRORS,
@@ -316,11 +351,18 @@ export function createCanvasFolder(): Fold {
     return applyPatches(applied.output, patches, known.length)
   }
 
-  const step = (id: string, cache: CanvasCache, visited: Set<string>, prev: Node, item: CanvasBlock): Node => {
+  const step = (
+    id: string,
+    cache: CanvasCache,
+    visited: Set<string>,
+    prev: Node,
+    item: CanvasBlock,
+    searched: boolean,
+  ): Node => {
     const key = refKey(item.ref)
     visited.add(key)
     const memo = cache.steps.get(item)
-    if (memo && memo.prev === prev) return memo.next
+    if (memo && memo.prev === prev && memo.searched === searched) return memo.next
 
     const applied = cache.applied.get(key)
     const previous = applied?.node
@@ -339,25 +381,31 @@ export function createCanvasFolder(): Fold {
       const replace = replaces(item.block, input, !item.closed && !item.complete)
       let spec: Spec | null
       let missingBase: boolean
+      let unknown: boolean
       if (replace) {
         spec = extend(applied, true, null, patches) ?? applyPatches(EMPTY_SPEC, patches)
-        missingBase = false
+        missingBase = unknown = false
       } else if (patches.length === 0) {
         spec = input
         missingBase = before?.missingBase ?? false
+        unknown = prev.unknown ?? false
       } else {
         spec = extend(applied, false, input, patches) ?? applyPatches(input ?? EMPTY_SPEC, patches)
-        // Built on an unknown base, until the spec holds all it renders: a new canvas started with a `replace` of
-        // `/root` whose root element came in a later block waited for a base that does not exist, and never settled.
+        // Built on an unknown base: it renders once the spec holds all it renders (a new canvas started with a
+        // `replace` of `/root` whose root element came in a later block), but it settles only once the base is found
+        // or the whole history was searched (an old canvas's view switch whose base is in messages not loaded, which
+        // a later block rewrote the switched-to element of, lost its title and state and was saved so).
+        unknown = (prev.unknown ?? false) || input === null
         missingBase = ((before?.missingBase ?? false) || input === null) && !holdsWholeTree(spec)
       }
+      const baseUnknown = unknown && !searched
 
       const generation = replace ? prev.generation + 1 : prev.generation
       const title = header.title ?? before?.title
       const first = before?.first ?? item.ref
       const old = previous?.state
       let settled = before?.settled
-      if (item.closed && item.complete && spec !== null && !missingBase) {
+      if (item.closed && item.complete && spec !== null && !missingBase && !baseUnknown) {
         const reuse = old?.settled
         settled =
           reuse &&
@@ -385,6 +433,8 @@ export function createCanvasFolder(): Fold {
         old.generation === generation &&
         old.streaming === streaming &&
         old.missingBase === missingBase &&
+        old.baseUnknown === baseUnknown &&
+        previous.unknown === unknown &&
         sameRef(old.first, first) &&
         sameRef(old.last, item.ref) &&
         old.lineErrors === lineErrors &&
@@ -400,6 +450,7 @@ export function createCanvasFolder(): Fold {
             generation,
             streaming,
             missingBase,
+            baseUnknown,
             first,
             last: item.ref,
             lineErrors,
@@ -407,17 +458,19 @@ export function createCanvasFolder(): Fold {
           },
           generation,
           removed: false,
+          unknown,
         }
       }
       if (settled && settled !== before?.settled) producedBy.set(settled, next)
       cache.applied.set(key, { input: replace ? null : input, replace, patches, output: spec, node: next })
     }
 
-    cache.steps.set(item, { prev, next })
+    cache.steps.set(item, { prev, next, searched })
     return next
   }
 
-  return (base, blocks) => {
+  return (base, blocks, options = {}) => {
+    const searched = options.searched ?? false
     const nodes = new Map<string, Node>()
     const visited = new Map<string, Set<string>>()
     const start = (id: string) => {
@@ -431,12 +484,34 @@ export function createCanvasFolder(): Fold {
     }
 
     for (const id of Object.keys(base)) start(id)
+    // Each block is judged by the canvases open where it is: a canvas of the base counts from its first block on, so
+    // older blocks a backfill loaded are not judged by canvases that opened after them (a canvas the agent closed later
+    // was refused, and the newest canvas said so).
+    const opening: BlockRef[] = []
+    for (const node of nodes.values()) if (node.state) opening.push(node.state.first)
+    opening.sort(compareRefs)
+    let opened = 0
+    let open = 0
+    const refused = new Set<string>()
     for (const item of blocks) {
+      for (; opened < opening.length && compareRefs(opening[opened]!, item.ref) <= 0; opened++) open++
       const id = item.canvas
       const snapshot = own(base, id)
       if (snapshot && compareRefs(item.ref, snapshot.after) <= 0) continue
       const prev = start(id)
-      nodes.set(id, step(id, cacheFor(id), visited.get(id)!, prev, item))
+      if (!prev.state && !item.block.header.close) {
+        // A patch to a canvas that was not opened has nothing to apply to: it is not opened either (rather than shown
+        // as missing its base, which no rescan finds). The canvas opens once the agent sends it whole while there is
+        // room.
+        const patch = refused.has(id) && !replaces(item.block, null, !item.closed && !item.complete)
+        if (open >= MAX_CANVASES || patch) {
+          refused.add(id)
+          continue
+        }
+      }
+      const next = step(id, cacheFor(id), visited.get(id)!, prev, item, searched)
+      open += (next.state ? 1 : 0) - (prev.state ? 1 : 0)
+      nodes.set(id, next)
     }
 
     // Forget positions and canvases this fold no longer has.
@@ -456,6 +531,9 @@ export function createCanvasFolder(): Fold {
       else if (node.removed) removed.add(id)
     }
     live.sort((a, b) => compareRefs(a.first, b.first) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    return { canvases: new Map(live.map((state) => [state.id, state])), removed }
+    const canvases = new Map(live.map((state) => [state.id, state]))
+    // A canvas that opened later, or that the agent closed, is not refused.
+    for (const id of refused) if (canvases.has(id) || removed.has(id)) refused.delete(id)
+    return { canvases, removed, refused }
   }
 }

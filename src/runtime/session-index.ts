@@ -34,6 +34,11 @@ export interface SessionIndexInput {
   readonly revert?: Accessor<string | undefined>
   /** Messages the server no longer has (see `unverified`): the snapshots taken after one of them are gone. */
   readonly deleted?: Accessor<ReadonlySet<string>>
+  /**
+   * The session's whole history is loaded (a backfill reached its first message): a canvas whose base is not found
+   * has none, and settles as it is (see `baseUnknown` in src/protocol/fold.ts).
+   */
+  readonly searched?: Accessor<boolean>
 }
 
 export interface SessionIndex {
@@ -47,6 +52,8 @@ export interface SessionIndex {
   exists(id: string): boolean
   /** Canvases a block closed; their snapshots should be deleted. */
   readonly removed: Accessor<ReadonlySet<string>>
+  /** Canvases not opened because MAX_CANVASES were open (see FoldResult.refused in src/protocol/fold.ts). */
+  readonly refused: Accessor<ReadonlySet<string>>
   /**
    * Whether a `spec` or `canvas` block with exactly this normalized text (`ParsedBlock.text`) is in an assistant text
    * part: the block is the agent's own (trust). Compared exactly, never by hash.
@@ -64,8 +71,15 @@ export interface SessionIndex {
   readonly fresh: Accessor<readonly string[]>
   consumeFresh(id: string): void
   /**
-   * A canvas lacks its base (a patch with no earlier version loaded), or a snapshot is newer than the newest loaded
-   * message (a revert). Older messages should be loaded with `backfill`.
+   * Canvases reported fresh that the agent closed again in the reply that started them, not consumed yet: a tab opened
+   * for such a canvas should close again (a reply that opened and closed 650 canvases left a tab for each).
+   */
+  readonly withdrawn: Accessor<readonly string[]>
+  consumeWithdrawn(id: string): void
+  /**
+   * A canvas lacks its base (a patch with no earlier version loaded, even one that renders, while the history has not
+   * been searched to its start), or a snapshot is newer than the newest loaded message (a revert). Older messages
+   * should be loaded with `backfill`.
    */
   readonly needsBackfill: Accessor<boolean>
   /**
@@ -359,7 +373,7 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   )
 
   const fold = createMemo(() => {
-    const result = folder(base(), scan().blocks)
+    const result = folder(base(), scan().blocks, { searched: input.searched?.() ?? false })
     for (const state of result.canvases.values()) {
       const settled = state.settled
       if (!settled) continue
@@ -375,6 +389,7 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   const canvases = createMemo(() => [...fold().canvases.values()], undefined, { equals: sameArray })
   const canvasIds = createMemo(() => canvases().map((state) => state.id), undefined, { equals: sameArray })
   const removed = createMemo(() => fold().removed, undefined, { equals: sameSet })
+  const refused = createMemo(() => fold().refused, undefined, { equals: sameSet })
 
   // Per-id selectors, owned by the index's root, not by whichever component asked first.
   const byId = new Map<string, Accessor<CanvasState | undefined>>()
@@ -406,6 +421,8 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
   const reported = new Set<string>()
   const retired = new Set<string>()
   const [consumedVersion, setConsumedVersion] = createSignal(0)
+  // The message that started each canvas reported fresh, until it is withdrawn (see `withdrawn`) or its reply is over.
+  const startedIn = new Map<string, string>()
 
   const fresh = createMemo(
     () => {
@@ -421,11 +438,37 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
         // messages, not a new canvas.
         if (state.spec === null || state.missingBase) continue
         const messageID = state.first.messageID
-        if (messageID > mark && complete.get(messageID) === false) ids.push(id)
+        if (messageID > mark && complete.get(messageID) === false) {
+          ids.push(id)
+          startedIn.set(id, messageID)
+        }
       }
       // Report each canvas at most once: one that was reported and is no longer fresh does not come back.
       for (const id of reported) if (!ids.includes(id)) retired.add(id)
       for (const id of ids) reported.add(id)
+      return ids.length === 0 ? NO_IDS : ids
+    },
+    undefined,
+    { equals: sameArray },
+  )
+
+  const [withdrawnVersion, setWithdrawnVersion] = createSignal(0)
+  const withdrawn = createMemo(
+    () => {
+      withdrawnVersion()
+      fresh()
+      if (startedIn.size === 0) return NO_IDS
+      const { blocks, complete } = scan()
+      const gone = removed()
+      // The message of each started canvas's last block: its close, once the canvas is gone.
+      const lastIn = new Map<string, string>()
+      for (const block of blocks) if (startedIn.has(block.canvas)) lastIn.set(block.canvas, block.ref.messageID)
+      const ids: string[] = []
+      for (const [id, messageID] of startedIn) {
+        if (gone.has(id) && lastIn.get(id) === messageID) ids.push(id)
+        // A canvas that outlived its reply stays: the agent closed it later, or never.
+        else if (complete.get(messageID) !== false) startedIn.delete(id)
+      }
       return ids.length === 0 ? NO_IDS : ids
     },
     undefined,
@@ -466,7 +509,7 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
 
   const needsBackfill = createMemo(() => {
     if (!ready()) return false
-    if (canvases().some((state) => state.missingBase)) return true
+    if (canvases().some((state) => state.baseUnknown)) return true
     const snapshots = input.snapshots() ?? {}
     return Object.keys(snapshots).some((id) => {
       const snapshot = snapshots[id]
@@ -480,6 +523,7 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
     canvas,
     exists,
     removed,
+    refused,
     knows: (text) => known().has(text),
     latestInline: (id) => latest().get(id),
     fresh,
@@ -487,6 +531,11 @@ export function createSessionIndex(input: SessionIndexInput): SessionIndex {
       if (consumed.has(id)) return
       consumed.add(id)
       setConsumedVersion((version) => version + 1)
+    },
+    withdrawn,
+    consumeWithdrawn(id) {
+      if (!startedIn.delete(id)) return
+      setWithdrawnVersion((version) => version + 1)
     },
     needsBackfill,
     staleSnapshots,

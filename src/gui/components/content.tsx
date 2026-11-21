@@ -1,12 +1,15 @@
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
 import { Dynamic } from "solid-js/web"
+import type { BaseComponentProps } from "@json-render/solid"
 import type { ComponentName } from "../../catalog/components.ts"
 import { isIconName } from "../../catalog/icons.ts"
 import { safeUrl } from "../../protocol/url.ts"
 import { useHost, useSurface, type Host } from "../host.ts"
 import { openLink } from "../outward.ts"
-import { JOINER, linkTarget, prepareMarkdown, stripJoiners, type MarkdownPart } from "./markdown.ts"
-import { list, oneOf, str, type GenuiComponent } from "./shared.tsx"
+import { ITEM_LISTS, splitKeys } from "../costs.ts"
+import { markdownCut } from "../issues.ts"
+import { JOINER, linkTarget, prepareMarkdown, shownLength, stripJoiners, type MarkdownPart } from "./markdown.ts"
+import { amount, CutNote, firstItems, oneOf, str, useCut, useListCut, type GenuiComponent } from "./shared.tsx"
 
 // Content components: Heading, Text, Markdown, Code, Badge, Alert, Keybind, Icon. Styles: src/gui/styles/content.css.
 
@@ -29,11 +32,26 @@ const TONES = ["neutral", "info", "success", "warning", "danger"] as const
  *   renderer does.
  * - Copying a selection drops the invisible joiners the neutralizing added.
  */
-export function MarkdownText(props: { readonly text: string }) {
+export function MarkdownText(props: {
+  readonly text: string
+  /** The element the text belongs to, which reports a cut text (see useCut). */
+  readonly owner: BaseComponentProps<Record<string, unknown>>
+}) {
   const host = useHost()
   const surface = useSurface()
+  // What shows of a long text (see shownLength): the rest is said under it and reported.
+  const cut = createMemo(() => shownLength(props.text), undefined, {
+    equals: (a, b) => a.shown === b.shown && a.reason === b.reason,
+  })
+  const total = () => props.text.length
+  useCut(props.owner, () => {
+    const { shown, reason } = cut()
+    return reason ? markdownCut(shown, total(), reason) : undefined
+  })
+  const note = () =>
+    cut().reason ? host.t("c.markdown.cut", { shown: amount(cut().shown), total: amount(total()) }) : ""
   // Prose neutralized, all parts sharing the text's budget for the renderer's work (see MarkdownBudget).
-  const parts = createMemo(() => prepareMarkdown(props.text, host.t("c.markdown.image")))
+  const parts = createMemo(() => prepareMarkdown(props.text, host.t("c.markdown.image"), cut()))
 
   const intercept = (event: MouseEvent) => {
     if (event.defaultPrevented) return
@@ -80,11 +98,12 @@ export function MarkdownText(props: { readonly text: string }) {
           </Show>
         )}
       </Index>
+      <CutNote text={note()} />
     </div>
   )
 }
 
-const Markdown: GenuiComponent<"Markdown"> = (ctx) => <MarkdownText text={str(ctx.props.content)} />
+const Markdown: GenuiComponent<"Markdown"> = (ctx) => <MarkdownText text={str(ctx.props.content)} owner={ctx} />
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Heading, Text
@@ -323,15 +342,24 @@ function keyPart(raw: string, t: Host["t"]): KeyPart {
   return { shown, spoken: shown }
 }
 
+/** The non-blank keys of a Keybind's `keys`, at most `max` of them, and how many it has in all. */
+function keybindKeys(raw: unknown, max: number): { readonly keys: string[]; readonly total: number } {
+  // A sloppy "Mod+K" string instead of ["Mod", "K"].
+  if (typeof raw === "string") return splitKeys(raw, max)
+  const { items, total } = firstItems(raw, max, (key) => {
+    const text = str(key)
+    return text.trim() === "" ? undefined : text
+  })
+  return { keys: items, total }
+}
+
 const Keybind: GenuiComponent<"Keybind"> = (ctx) => {
   const host = useHost()
-  const parts = createMemo(() => {
-    const raw: unknown = ctx.props.keys
-    // A sloppy "Mod+K" string instead of ["Mod", "K"].
-    const keys = typeof raw === "string" ? raw.split("+") : list(raw).map((key) => str(key))
-    return keys.filter((key) => key.trim() !== "").map((key) => keyPart(key, host.t))
-  })
+  // At most ITEM_LISTS.Keybind.max keys (src/gui/costs.ts, which the render budget charges); the rest is said.
+  const keys = createMemo(() => keybindKeys(ctx.props.keys, ITEM_LISTS.Keybind.max))
+  const parts = createMemo(() => keys().keys.map((key) => keyPart(key, host.t)))
   const shown = createMemo(() => parts().map((part) => part.shown))
+  const cut = useListCut(ctx, "Keybind", () => ({ shown: keys().keys.length, total: keys().total }))
 
   return (
     <Show when={parts().length > 0}>
@@ -347,6 +375,7 @@ const Keybind: GenuiComponent<"Keybind"> = (ctx) => {
           <host.ui.Keybind keys={shown()} />
         </span>
       </kbd>
+      <CutNote text={cut()} inline />
     </Show>
   )
 }
