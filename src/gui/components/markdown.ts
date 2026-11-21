@@ -411,6 +411,12 @@ class Sink {
   readonly tasks: number[] = []
   /** The definitions genui writes again: each one's text as marked reads it, by row. */
   readonly definitions = new Map<number, string>()
+  /**
+   * Where marked cuts a list item's lines that go on without its indentation (lazy lines), as (row, column of the row)
+   * pairs, where the item goes on as written: it looks there for a heading, fence or rule that ends the item before the
+   * next lazy line (see neutralizeLines).
+   */
+  readonly lazy: number[] = []
   /** What the model did, to stop it on text built to make it slow (see `modelLimit`). */
   model = 0
 
@@ -470,6 +476,15 @@ class Sink {
   /** Whether genui can write the definition on a row again: its text, as marked reads it, ends the row. */
   writable(row: number, text: string): boolean {
     return this.rows[row]?.endsWith(text) ?? false
+  }
+  /**
+   * A list item's lazy line, which marked cuts at `column` of the line as this level sees it: kept where that line ends
+   * its row and holds no tab (a quote's or an item's lines are the ends of their rows; marked widens tabs).
+   */
+  lazyLine(line: Line, column: number) {
+    const row = this.kinds ? this.rows[line.r] : undefined
+    if (row !== undefined && !line.t.includes("\t") && row.endsWith(line.t))
+      this.lazy.push(line.r, row.length - line.t.length + column)
   }
   definition(row: number, text: string) {
     if (!this.definitions.has(row)) this.definitions.set(row, text)
@@ -1496,6 +1511,11 @@ class BlockLexer {
             if (previousIndent < previous.length && previousIndent >= 4) break
             if (mayEnd(line) && (fencesBegin.test(line) || headingBegin.test(line) || hrBegin.test(line))) break
             itemLines.push(rawLine)
+            // Before the next lazy line, marked cuts this one here and ends the item if a heading, fence or rule starts
+            // there: where none does as written, genui keeps one from starting there (see neutralizeLines).
+            const cut = withoutTabs.slice(indent)
+            if (!(mayEnd(cut) && (fencesBegin.test(cut) || headingBegin.test(cut) || hrBegin.test(cut))))
+              sink.lazyLine(rawLine, indent)
           }
           blankLine = blank
           itemRaw.push(rawLine)
@@ -2806,6 +2826,8 @@ interface PartModel {
   readonly kinds: Uint8Array
   readonly starts: Uint8Array
   readonly definitions: ReadonlyMap<number, string>
+  /** Where marked cuts its list items' lazy lines (see Sink.lazy). */
+  readonly lazy: readonly number[]
   readonly sink: Sink
   /** The row of the top-level block where the model stopped, on text built to make it slow (-1: it did not). */
   readonly stopped: number
@@ -2822,13 +2844,13 @@ function partModel(lines: readonly string[]): PartModel {
   const lexer = new BlockLexer(sink, modelLimit(chars, lines.length))
   try {
     lexer.lex(lines.map((t, r) => ({ t, r })))
-    return { kinds, starts, definitions: sink.definitions, sink, stopped: -1 }
+    return { kinds, starts, definitions: sink.definitions, lazy: sink.lazy, sink, stopped: -1 }
   } catch (error) {
     // Text built to make the model slow: all prose (written again, and defused, as such).
     if (!(error instanceof Abort)) throw error
     kinds.fill(PROSE)
     starts.fill(0)
-    return { kinds, starts, definitions: new Map<number, string>(), sink, stopped: lexer.topRow }
+    return { kinds, starts, definitions: new Map<number, string>(), lazy: [], sink, stopped: lexer.topRow }
   }
 }
 
@@ -2841,12 +2863,18 @@ const BLOCK_TYPES: Readonly<Record<string, number>> = {
   item: 8,
 }
 
+/** The structure the model read in a part (see `structureEvents`). */
+interface PartEvents {
+  readonly rows: Int32Array
+  readonly events: Float64Array
+}
+
 /**
  * The structure the model read in a part, as (row, event) pairs sorted by row (events of a row in the order they were
  * found): each inline run's first row and the rows added to it, code and math blocks, blocks (type and count; a math
  * block is its rows), nesting past MAX_NESTING, and each row's kind.
  */
-function structureEvents(model: PartModel, rowCount: number): { rows: Int32Array; events: Float64Array } {
+function structureEvents(model: PartModel, rowCount: number): PartEvents {
   const { sink, kinds, starts } = model
   const rowList: number[] = []
   const eventList: number[] = []
@@ -2885,19 +2913,76 @@ function structureEvents(model: PartModel, rowCount: number): { rows: Int32Array
 const sameEvent = (was: number, is: number) =>
   was === is || (was === 4 && is === 3) || ((was === 8 + 2 * MATH || was === 9 + 2 * MATH) && is === was - 2)
 
+/** The event of a paragraph block (see `structureEvents`). */
+const PARAGRAPH_EVENT = 16 + BLOCK_TYPES.paragraph! + 16
+
 /**
- * The first row where the model reads a part as written (`a`) and neutralized (`b`) differently (-1: it reads them
- * alike).
+ * The first row before `limit` where the model reads a part (`is`: its events, see `structureEvents`) otherwise than
+ * it read the part as written (`was`), -1 where it reads them alike; and the index of `is`'s first event at `limit`
+ * or after. Alike, each row has the events it had (see `sameEvent`), and nothing more; it may lack only the paragraph
+ * of a row whose run it has: a loose list's items read as a tight list's (cut before the blank line that made it
+ * loose, say), whose text marked lexes the same but shows in no paragraph of its own. So it builds no block, run or
+ * code block the model did not count as written, and its every line is read as the same kind (prose, code, math, a
+ * definition).
+ */
+function readsLess(was: PartEvents, is: PartEvents, limit: number): { readonly row: number; readonly tail: number } {
+  let a = 0
+  let b = 0
+  const left: number[] = []
+  const right: number[] = []
+  while ((a < was.rows.length && was.rows[a]! < limit) || (b < is.rows.length && is.rows[b]! < limit)) {
+    const row = Math.min(
+      a < was.rows.length && was.rows[a]! < limit ? was.rows[a]! : limit,
+      b < is.rows.length && is.rows[b]! < limit ? is.rows[b]! : limit,
+    )
+    let endA = a
+    let endB = b
+    while (endA < was.rows.length && was.rows[endA] === row) endA++
+    while (endB < is.rows.length && is.rows[endB] === row) endB++
+    // Mostly the same events in the same order.
+    let same = endA - a === endB - b
+    for (let index = 0; same && index < endB - b; index++)
+      same = sameEvent(was.events[a + index]!, is.events[b + index]!)
+    if (!same) {
+      left.length = 0
+      right.length = 0
+      for (let index = a; index < endA; index++) left.push(was.events[index]!)
+      for (let index = b; index < endB; index++) right.push(is.events[index]!)
+      left.sort((x, y) => x - y)
+      right.sort((x, y) => x - y)
+      // The same events first, then the ones `sameEvent` takes for others.
+      const extra: number[] = []
+      const lacks: number[] = []
+      let i = 0
+      let j = 0
+      while (i < left.length || j < right.length) {
+        if (j >= right.length || (i < left.length && left[i]! < right[j]!)) lacks.push(left[i++]!)
+        else if (i >= left.length || right[j]! < left[i]!) extra.push(right[j++]!)
+        else {
+          i++
+          j++
+        }
+      }
+      for (const event of extra) {
+        const at = lacks.findIndex((other) => sameEvent(other, event))
+        if (at < 0) return { row, tail: endB }
+        lacks.splice(at, 1)
+      }
+      const run = right.includes(1)
+      for (const event of lacks) if (event !== PARAGRAPH_EVENT || !run) return { row, tail: endB }
+    }
+    a = endA
+    b = endB
+  }
+  return { row: -1, tail: b }
+}
+
+/**
+ * The first row where the model reads a part neutralized (`b`) otherwise than as written (`a`), -1 where it reads it
+ * alike (see `readsLess`).
  */
 function divergence(a: PartModel, b: PartModel, rowCount: number): number {
-  const x = structureEvents(a, rowCount)
-  const y = structureEvents(b, rowCount)
-  const length = Math.min(x.rows.length, y.rows.length)
-  for (let index = 0; index < length; index++)
-    if (x.rows[index] !== y.rows[index] || !sameEvent(x.events[index]!, y.events[index]!))
-      return Math.min(x.rows[index]!, y.rows[index]!)
-  if (x.rows.length !== y.rows.length) return (x.rows.length > length ? x.rows : y.rows)[length]!
-  return -1
+  return readsLess(structureEvents(a, rowCount), structureEvents(b, rowCount), rowCount + 1).row
 }
 
 /**
@@ -2938,34 +3023,59 @@ function joinedStarts(rows: readonly string[]): { readonly starts: number[]; rea
 /** The lines a cut text ends with, after the line break before the cut (see `checkedParts`). */
 const ENDING = ["", "", "…"] as const
 
-/** The event of a paragraph block (see `structureEvents`). */
-const PARAGRAPH_EVENT = 16 + BLOCK_TYPES.paragraph! + 16
+/**
+ * Where the model reads `rows`, a part's first `keep` rows neutralized and then ENDING (`keep` at least 1), otherwise
+ * than it read those rows in the part as written (`was`: its events, see `structureEvents`). -1 where it reads them
+ * alike (see `readsLess`: a loose list cut before the blank line that made it loose shows its items' text in no
+ * paragraphs), with the "…" a paragraph of its own, or gone (marked's blockquote loses the lines after a list it lexes
+ * again with lazy lines; MarkdownText's note still says the text is cut): so the rows before the cut are the ones the
+ * first reading checked, and cutting there changed nothing in them that marked builds more of (no block before the cut
+ * was decided by a line after it). Otherwise the first row before the cut where the two readings differ (the last one
+ * before it, where they differ only after it): a list item's first row, say, cut from the lazy lines it went on to,
+ * which marked's blockquote lexes once where it lexed it twice. A cut before that row may read alike (see `cutRow`).
+ */
+function cutDivergence(was: PartEvents, rows: readonly string[], keep: number): number {
+  const read = partModel(rows)
+  if (read.stopped >= 0) return Math.min(keep - 1, read.stopped)
+  const is = structureEvents(read, rows.length)
+  const { row, tail } = readsLess(was, is, keep)
+  if (row >= 0) return Math.min(keep - 1, row)
+  if (is.rows.length === tail) return -1
+  const dots = keep + ENDING.length - 1
+  if (
+    is.rows.length === tail + 2 &&
+    is.rows[tail] === dots &&
+    is.events[tail] === 1 &&
+    is.rows[tail + 1] === dots &&
+    is.events[tail + 1] === PARAGRAPH_EVENT
+  )
+    return -1
+  return Math.min(keep - 1, is.rows[tail]!)
+}
 
 /**
- * Whether the model reads `rows`, a part's first `keep` rows neutralized and then ENDING, as it read those rows in the
- * part as written (`model`), with the "…" a paragraph of its own, or gone (marked's blockquote loses the lines after a
- * list it lexes again with lazy lines; MarkdownText's note still says the text is cut): so the rows before the cut are
- * the ones the first reading checked, and cutting there changed nothing in them (no block before the cut was decided
- * by a line after it).
+ * How many times a cut part is read at most (see `cutRow`): at the cut, and at the cuts it steps back to. Each reading
+ * is of the rows before its cut, no later than the first, so a cut part costs at most this many readings of what shows
+ * of it.
  */
-function readsAsCut(model: PartModel, rows: readonly string[], keep: number): boolean {
-  const read = partModel(rows)
-  if (read.stopped >= 0) return false
-  const was = structureEvents(model, model.kinds.length)
-  const is = structureEvents(read, rows.length)
-  let before = 0
-  while (before < was.rows.length && was.rows[before]! < keep) before++
-  if (is.rows.length !== before + 2 && is.rows.length !== before) return false
-  for (let index = 0; index < before; index++)
-    if (is.rows[index] !== was.rows[index] || !sameEvent(was.events[index]!, is.events[index]!)) return false
-  if (is.rows.length === before) return true
-  const dots = keep + ENDING.length - 1
-  return (
-    is.rows[before] === dots &&
-    is.events[before] === 1 &&
-    is.rows[before + 1] === dots &&
-    is.events[before + 1] === PARAGRAPH_EVENT
-  )
+const CUT_READINGS = 4
+
+/**
+ * Where a part is cut at its row `row` at the latest (a row of the part), so that marked reads what is left of it as
+ * the model read the part as written (`model` of `lines`; `rows`, the lines neutralized): at `row` (see `settleRow`),
+ * if the rows before it read alike cut there (see `cutDivergence`), or else before the first row where they read
+ * otherwise, and so on, CUT_READINGS readings at most; 0 (the part's start) where none of them reads alike. Each cut
+ * is earlier than the one before, so it only ever shows less.
+ */
+function cutRow(model: PartModel, lines: readonly string[], rows: readonly string[], row: number): number {
+  const was = structureEvents(model, lines.length)
+  let keep = settleRow(model, lines, row)
+  for (let reading = 0; keep > 0 && reading < CUT_READINGS; reading++) {
+    const differs = cutDivergence(was, [...rows.slice(0, keep), ...ENDING], keep)
+    if (differs < 0) return keep
+    keep = settleRow(model, lines, differs)
+  }
+  return 0
 }
 
 /**
@@ -3031,8 +3141,24 @@ function neutralizeLines(
   for (let row = 0; row < rows.length; row++)
     if (kinds[row] !== CODE && kinds[row] !== MATH && kinds[row] !== DEF && TAG_LINE.test(rows[row]!))
       rows[row] += JOINER
+  // marked cuts a list item's lazy line at the item's content column and ends the item if a heading starts there: so
+  // where genui's link puts its `#` there (a link text as long as the column less three, `[1](` after `10. `), the
+  // address is written in angle brackets (`[1](<#genui-link:…>)`, the same link), and `<` starts nothing. A model's
+  // `](` is broken by a joiner, so `](#genui-link:` is genui's own.
+  for (let index = 0; index < model.lazy.length; index += 2) {
+    const row = model.lazy[index]!
+    const at = model.lazy[index + 1]!
+    const line = rows[row]!
+    if (kinds[row] !== PROSE || !line.startsWith(LINK_PREFIX, at) || !line.startsWith("](", at - 2)) continue
+    let end = at + LINK_PREFIX.length
+    while (end < line.length && TARGET_CHAR.test(line[end]!)) end++
+    rows[row] = `${line.slice(0, at)}<${line.slice(at, end)}>${line.slice(end)}`
+  }
   return rows
 }
+
+/** A character of an address genui encodes (see `encodeTarget`). */
+const TARGET_CHAR = /[A-Za-z0-9%_-]/
 
 /**
  * A display-math block or a math fence, as math while the budget pays for it; past that, as a code block of its own
@@ -3078,12 +3204,13 @@ export interface RenderedMarkdown {
  * `lines`, and where marked's block work on the neutralized text passes MAX_BLOCK_WORK (neutralizing lengthens lines,
  * a `www.` address tenfold, and marked's scans read them by the character), with reason `work`. That is only ever less
  * than `markdownShape` charged for: the parts it hands the renderer are read as the model read the text as written, up
- * to the cut.
+ * to the cut, or as less (a loose list as a tight one: see `readsLess`).
  *
  * It runs only for a text that renders. Its work is the model's reading of the parts as written and neutralized, and
- * neutralizing them once (see `checkedParts`): 0.15 to 0.45 s for 500,000 characters of links, in the task that
- * renders the element, which the render budget's slice gives such an element alone (see TASK_UNITS in
- * src/runtime/budget.ts).
+ * neutralizing them once, and for a cut part, up to CUT_READINGS readings of what shows of it (see `checkedParts`; in
+ * Chromium, at most about 10 ms more for 495,000 characters cut at their end, when every reading is needed): 0.15 to
+ * 0.45 s for 500,000 characters of links, in the task that renders the element, which the render budget's slice gives
+ * such an element alone (see TASK_UNITS in src/runtime/budget.ts).
  * `imageLabel` is the link text for an image without alt text.
  */
 export function renderMarkdown(text: string, imageLabel: string): RenderedMarkdown {
@@ -3152,21 +3279,23 @@ function keepRendered(text: string, label: string, model: number, rendered: Rend
 
 /**
  * The parts the renderer gets of a text's first `shown` characters, and how many characters of the text they show: the
- * parts of what shows, the prose ones neutralized, each checked (see `firstDivergence`). Where the model reads a part
+ * parts of what shows, the prose ones neutralized, each checked (see `readNeutralized`). Where the model reads a part
  * neutralized otherwise than as written, the text is cut at the start of that row (see `settleRow`): the parts before
  * it stay as they are (each is lexed on its own, and the budget is spent in order, so a cut after them changes
  * nothing), and so do the part's rows before the cut, neutralized as they were. Those rows, then the lines a cut text
- * ends with, are read once more, and must read as they did as written (see `readsAsCut`); if they do not, the text is
- * cut at the start of the part. So marked gets only text whose blocks, runs and code blocks are the ones the model
- * counted and cut by, and whose every line it lexes inline was written as prose (within the emphasis, escape and math
- * budgets).
+ * ends with, are read once more, and must read as they did as written (see `cutDivergence`); if they do not, the cut
+ * steps back before the first row where they read otherwise, and is read again, CUT_READINGS readings at most (see
+ * `cutRow`); if none reads alike, the text is cut at the start of the part. So marked gets only text whose blocks,
+ * runs and code blocks are among the ones the model counted and cut by (a loose list may read as a tight one, its
+ * paragraphs gone: see `readsLess`), and whose every line it lexes inline was written as prose (within the emphasis,
+ * escape and math budgets).
  *
  * marked's block work is tallied on the parts as it gets them, neutralized, sharing MAX_BLOCK_WORK in their order (the
  * model's cut tallied it on the text as written, and neutralizing lengthens lines that marked's scans read by the
  * character): where it passes the bound, the text is cut the same way, with reason `work`.
  *
- * Its work: the model reads each part as written and neutralized, and neutralizes it once; a cut part is read once
- * more, up to the cut, and nothing is neutralized again.
+ * Its work: the model reads each part as written and neutralized, and neutralizes it once; a cut part is read up to
+ * CUT_READINGS times more, each time up to a cut no later than the first, and nothing is neutralized again.
  */
 function checkedParts(
   text: string,
@@ -3210,10 +3339,9 @@ function checkedParts(
         parts.push({ kind: "markdown", text: rows.join("\n") })
         continue
       }
-      const keep = settleRow(model, part, Math.min(row, last - segment.from))
-      const cut = [...rows.slice(0, keep), ...ENDING]
-      if (readsAsCut(model, cut, keep)) {
-        parts.push({ kind: "markdown", text: cut.join("\n") })
+      const keep = cutRow(model, part, rows, Math.min(row, last - segment.from))
+      if (keep > 0) {
+        parts.push({ kind: "markdown", text: [...rows.slice(0, keep), ...ENDING].join("\n") })
         return { shown: starts[segment.from + keep]!, parts, reason }
       }
       parts.push({ kind: "markdown", text: ENDING.join("\n") })

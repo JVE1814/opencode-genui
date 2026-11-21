@@ -130,7 +130,7 @@ const CUT_REASONS: Readonly<Record<MarkdownCutReason, string>> = {
   paragraph: `a paragraph (or a list item, or a table row) runs past ${count(MAX_PARAGRAPH)} characters there: split it into shorter ones`,
   blocks: `its paragraphs, list items, table cells, links, emphases or code spans are too many and too close there (a text shows at most ${count(MAX_MARKDOWN_BLOCKS)} beyond one per ${CHARS_PER_BLOCK} characters): use fewer, longer ones`,
   nesting: `lists and quotes nest more than ${MAX_NESTING} deep there: nest them less`,
-  work: "the renderer would read the lines there again and again (lines with no blank line between them, in a list item or a quote, or around rules): put blank lines between paragraphs and items",
+  work: "the renderer would read the lines there again and again (lines with no blank line between them, in a list item or a quote, or around rules): put blank lines between paragraphs, between items, and between the lines of a long item",
   lines:
     "the renderer would read the lines there otherwise once genui made their links and tags inert (a line of a list item or a quote without its indentation): indent such lines, or put a blank line before them",
 }

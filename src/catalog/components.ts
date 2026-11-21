@@ -130,7 +130,7 @@ export const componentDefinitions = {
   Markdown: {
     props: z.object({ content: z.string() }),
     description:
-      "Rich text as Markdown: lists, links, tables, code. Each code block counts as an element. Cut at a paragraph over 20,000 characters, lists or quotes nested over 8 deep, many tiny blocks or links, or long runs of lines without blank lines or indents.",
+      "Rich text as Markdown: lists, links, tables, code. Each code block counts as an element. Cut at a paragraph over 20,000 characters, lists or quotes nested over 8 deep, many tiny blocks or links, or long runs of lines without blank lines.",
   },
   Code: {
     props: z.object({ code: z.string(), language: z.string().optional(), title: z.string().optional() }),

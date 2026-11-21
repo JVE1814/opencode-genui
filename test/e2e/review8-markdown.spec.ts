@@ -4,10 +4,11 @@ import "../../playground/hooks.ts"
 import { add, block, element, root } from "../../playground/scenarios/build.ts"
 
 // Regression tests for the eighth review's Markdown findings ([R7S2-2], [R7S1-5], [R7F2-3], [R7F2-2], [R7F1-1],
-// [R7S2-4]), the ninth's ([R8S-1], [R8S-2], [R8F-2], [R8C-1], [R8C-2]) and the tenth's ([R8D-1], [R8D-2], [R8E-1]) in
-// the playground. Timing is the page's own long tasks (PerformanceObserver "longtask"), with each message appended in a
-// task of the page's own. The playground's ui.Markdown is not marked, so marked's block lexing is timed in the page on
-// its own (the model's cut decides what it gets). See test/unit/review8-markdown.test.ts.
+// [R7S2-4]), the ninth's ([R8S-1], [R8S-2], [R8F-2], [R8C-1], [R8C-2]), the tenth's ([R8D-1], [R8D-2], [R8E-1]), the
+// eleventh's ([R8G-1]) and the twelfth's ([R8H-1], [R8H-2]) in the playground. Timing is the page's own long tasks
+// (PerformanceObserver "longtask"), with each message appended in a task of the page's own. The playground's
+// ui.Markdown is not marked, so marked's block lexing is timed in the page on its own (the model's cut decides what it
+// gets). See test/unit/review8-markdown.test.ts.
 
 const pageErrors = new WeakMap<Page, string[]>()
 test.beforeEach(({ page }) => {
@@ -497,5 +498,90 @@ test.describe("Markdown built to make marked's block lexer slow is cut, and says
       // at twice the time a unit of the other shapes took [R8C-2].)
       expect({ shape, marked: marked < Math.max(1000, 3 * reference) }).toEqual({ shape, marked: true })
     }
+  })
+})
+
+test.describe("a cut that would not read alike steps back, rather than showing nothing [R8G-1]", () => {
+  test("quoted lists whose items go on to lazy lines show most of what their charge allows, with a note", async ({
+    page,
+  }) => {
+    // The cut for marked's work landed on a quoted item's lazy line, where the rows before it did not read as they
+    // did, so the text was cut at its start: "Showing the first 0 of 20,000 characters" (and of 44,000), no link, where
+    // the charge allowed all of it. Now it is cut before that item.
+    await boot(page)
+    const words = "alpha beta gamma delta service cache token queue".split(" ")
+    let state = 3
+    const word = () => words[(state = (Math.imul(state, 1664525) + 1013904223) >>> 0) % words.length]!
+    let references = ""
+    while (references.length < 44_000)
+      references += `> - ${word()} ${word()} [${word()}](https://${word()}.io)\n${word()} https://${word()}.dev/x\n`
+    for (const content of ["> - www.a\nwww.b\n".repeat(1250), references]) {
+      await page.evaluate(() => window.__genui.appendUser("go"))
+      await say(page, `Here:\n\n${block("spec", undefined, [root("m"), element("m", "Markdown", { content })])}\n`)
+      const surface = page.locator('[data-genui][data-surface="inline"]').last()
+      const note = surface.locator("[data-gu-cut]")
+      await expect(note).toContainText(`of ${content.length.toLocaleString()} characters`)
+      const shown = Number(/first ([\d,]+)/.exec((await note.textContent()) ?? "")![1]!.replaceAll(",", ""))
+      expect({ length: content.length, shown: shown > content.length / 2 }).toEqual({
+        length: content.length,
+        shown: true,
+      })
+      expect(await surface.locator('[data-gu="markdown"] a').count()).toBeGreaterThan(500)
+      expect(await issueText(surface)).toContain("blank lines")
+    }
+  })
+})
+
+test.describe("a loose list cut before the blank line that made it loose reads as a tight one [R8H-1]", () => {
+  test("a long first item of a loose list shows most of what its charge allows, with links and a note", async ({
+    page,
+  }) => {
+    // Cut for marked's work inside the first item, the list was tight, and the rows before the cut did not read as
+    // they did: "Showing the first 10 of 12,037 characters" (8 of 20,026), no link and no list item, where the charge
+    // allowed all of it; the issue's advice (blank lines between items) was what made the list loose.
+    await boot(page)
+    const texts = [
+      "## Links\n\n- References:\n" + "  www.a.com\n".repeat(1000) + "\n- Next item\n",
+      "Intro.\n\n- Sources\n" + "  [a](https://a.io)\n".repeat(1000) + "\n- More\n",
+    ]
+    for (const content of texts) {
+      await page.evaluate(() => window.__genui.appendUser("go"))
+      await say(page, `Here:\n\n${block("spec", undefined, [root("m"), element("m", "Markdown", { content })])}\n`)
+      const surface = page.locator('[data-genui][data-surface="inline"]').last()
+      const note = surface.locator("[data-gu-cut]")
+      await expect(note).toContainText(`of ${content.length.toLocaleString()} characters`)
+      const shown = Number(/first ([\d,]+)/.exec((await note.textContent()) ?? "")![1]!.replaceAll(",", ""))
+      expect({ length: content.length, shown: shown > content.length / 2 }).toEqual({
+        length: content.length,
+        shown: true,
+      })
+      expect(await surface.locator('[data-gu="markdown"] a').count()).toBeGreaterThan(500)
+      expect(await issueText(surface)).toContain("between the lines of a long item")
+    }
+  })
+})
+
+test.describe("a link at the column where marked cuts a list item's lazy line keeps the item whole [R8H-2]", () => {
+  test("a loose list whose item goes on to a line starting with a one-character link shows whole, every link", async ({
+    page,
+  }) => {
+    // genui's `[x](#genui-link:…)` put its `#` at the column where marked cuts the item's lazy line, where marked read a
+    // heading and ended the item: "Showing the first 8 of 33,593 characters", no list item. The address is written in
+    // angle brackets there now, the same link.
+    await boot(page)
+    const item = (i: number) => `  - item ${i} [ref](https://a.io/${i})\nmore text about ${i}\n`
+    const items = (from: number) => Array.from({ length: 300 }, (_, i) => item(from + i)).join("")
+    const content = `Intro.\n\n${items(0)}  - nested\n[x](https://b.io)\nafter\n${items(300)}\n  - last\n`
+    await say(page, `Here:\n\n${block("spec", undefined, [root("m"), element("m", "Markdown", { content })])}\n`)
+    const surface = page.locator('[data-genui][data-surface="inline"]').last()
+    await expect(surface.getByText("more text about 599")).toBeVisible({ timeout: 20_000 })
+    await expect(surface.locator("[data-gu-cut]")).toHaveCount(0)
+    await expect(surface.locator('[data-gu-chrome="issues"]')).toHaveCount(0)
+    const links = surface.locator('[data-gu="markdown"] a')
+    expect(await links.count()).toBe(601)
+    // The one written in angle brackets is a link like the others: genui's address, no new window.
+    const bracketed = surface.locator('[data-gu="markdown"] a', { hasText: /^x$/ })
+    await expect(bracketed).toHaveAttribute("href", /^#genui-link:https%3A%2F%2Fb%2Eio/)
+    await expect(bracketed).not.toHaveAttribute("target", /./)
   })
 })

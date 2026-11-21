@@ -243,8 +243,8 @@ const unescape = (text: string) => text.replace(/\\([!-/:-@[-`{-~])/g, "$1")
 
 /**
  * Inline Markdown: `code`, **strong**, *em* / _em_, [links](https://...), fragment links with a single-quoted title
- * (`[text](#target 'title')`, rendered without `external-link`, as the app renders `#` links), backslash escapes.
- * Anything else stays text.
+ * (`[text](#target 'title')`, rendered without `external-link`, as the app renders `#` links), an address in angle
+ * brackets (`[text](<#target>)`, as marked reads it), backslash escapes. Anything else stays text.
  */
 export function inline(text: string): JSX.Element[] {
   const out: JSX.Element[] = []
@@ -259,7 +259,7 @@ export function inline(text: string): JSX.Element[] {
     else if (match[4] !== undefined) out.push(<em>{inline(match[4])}</em>)
     else if (match[5] !== undefined) out.push(<em>{inline(match[5])}</em>)
     else if (match[6] !== undefined) {
-      const href = match[7]!
+      const href = match[7]!.startsWith("<") ? match[7]!.slice(1, -1) : match[7]!
       const title = match[8] === undefined ? undefined : unescape(match[8])
       out.push(
         href.startsWith("#") ? (

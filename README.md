@@ -199,22 +199,24 @@ Specs are written by a model and treated as data:
     renders. The render budget charges a text by the model's reading of it as written, in time linear in its length,
     whether or not the text then shows. A text that renders is read once more as genui hands it to marked: making links
     and tags inert lengthens lines, and marked decides some blocks by a line's length (a list item's or a quote's lines
-    that are not indented), so where the model reads the two differently the text is cut, at that line; it then shows
-    less than it was charged for, never more. A text shows up to 500,000 characters, and is cut where one run of
-    inline text (a paragraph, a list item's text, a heading or a table cell, as marked lexes them) passes 20,000
-    characters, since marked's inline work grows faster than a paragraph; where lists or quotes nest deeper than 8;
-    where its paragraphs, headings, rules, quotes, list items and table cells, with its links, emphases, code spans,
-    math and line breaks (each a node the renderer builds; counted so as never to fall short of what marked builds),
-    pass 10,000 beyond one per 25 characters; or where marked's block lexer would do more than 40 million characters'
-    worth of scanning beyond what it reads, in the text as genui hands it (about 0.1 s; making an address inert makes
-    its line up to ten times longer; marked reads lines again where no blank line separates them in a list item or a
-    quote, or between rules, and lines that start with spaces or with `|`, `:` or `-` cost it more: a quoted list of
-    80 KB whose items go on to lines without the `>` shows whole). A note says "Showing the first N of M characters",
-    and the agent gets an issue that says why. A text shows its first 32 fenced code blocks as code blocks of their own
-    (the app's code block component) and the rest as code within its Markdown; every code block marked renders (fenced
-    or indented, in a quote or a list item too) and every display math block costs the render budget, 4 units on its
-    own and 1 within the Markdown, and so do its blocks and inline elements beyond one per 25 characters, a tenth of a
-    unit each, as Table cells (a large text of tiny links or emphases costs more than a UI holds, and is refused).
+    that are not indented), so where the model reads the two differently the text is cut, at that line or before it (a
+    list that reads only as tight where it was loose, its items' text in no paragraph of its own, builds less, and is
+    not cut for that); it then shows less than it was charged for, never more. A text shows up to 500,000 characters,
+    and is cut where one run of inline text (a paragraph, a list item's text, a heading or a table cell, as marked lexes
+    them) passes 20,000 characters, since marked's inline work grows faster than a paragraph; where lists or quotes nest
+    deeper than 8; where its paragraphs, headings, rules, quotes, list items and table cells, with its links, emphases,
+    code spans, math and line breaks (each a node the renderer builds; counted so as never to fall short of what marked
+    builds), pass 10,000 beyond one per 25 characters; or where marked's block lexer would do more than 40 million
+    characters' worth of scanning beyond what it reads, in the text as genui hands it (about 0.1 s; making an address
+    inert makes its line up to ten times longer; marked reads lines again where no blank line separates them in a list
+    item or a quote, or between rules, and lines that start with spaces or with `|`, `:` or `-` cost it more: a quoted
+    list of 80 KB whose items go on to lines without the `>` shows whole). A note says "Showing the first N of M
+    characters", and the agent gets an issue that says why. A text shows its first 32 fenced code blocks as code blocks
+    of their own (the app's code block component) and the rest as code within its Markdown; every code block marked
+    renders (fenced or indented, in a quote or a list item too) and every display math block costs the render budget, 4
+    units on its own and 1 within the Markdown, and so do its blocks and inline elements beyond one per 25 characters, a
+    tenth of a unit each, as Table cells (a large text of tiny links or emphases costs more than a UI holds, and is
+    refused).
   - State actions in a row (setState, pushState, removeState), and the first actions of the watches one change wakes,
     run in one batch, so the UI re-evaluates once instead of once per write; a write calls only the watches of its own
     path, and a watch is not woken by its own writes. `validateForm` checks every field and writes all results at once;
@@ -346,11 +348,21 @@ playground/        fake desktop host for development and end-to-end tests
   address goes on to another line shows as text.
 - A Markdown text is cut at a list item's or a quote's line that goes on without its indentation when making a tag,
   image, link or address in it inert changes how marked reads the lines after it (and at display math past the math
-  budget in such lines, which genui shows as a code block); where the lines before it would then read otherwise too,
-  it is cut after the fenced code block before them, or shows nothing. The note and the issue say so, and indenting
-  those lines avoids it. A quoted list whose items each go on to a line without the `>` is cut for marked's work past
-  about 80 KB when those lines are sentences, and sooner when they are shorter (with lines of a few characters marked
-  took 3.6 s for 100 KB).
+  budget in such lines, which genui shows as a code block); indenting those lines avoids it. (Where marked looks for a
+  heading at the item's content column of such a line, genui writes a link's address in angle brackets, the same link,
+  so that its `#genui-link:` does not start one there: `[1](…)` after `10. ` no longer cuts the text. Where two list
+  levels' content columns are next to each other, a `10. ` item inside a `100. ` one say, that only moves the `#` onto
+  the other level's column, and the text is still cut there.) A quoted list
+  whose items each go on to a line without the `>` is cut for marked's work past about 80 KB when those lines are
+  sentences, and sooner when they are shorter (with lines of a few characters marked took 3.6 s for 100 KB), and so is a
+  list item of short lines of addresses past about 10 KB; blank lines between the items, or between the lines of a long
+  item, avoid it. Where the lines before either cut would then read otherwise too (a quoted item kept without the line
+  it goes on to, say), the cut moves back before the first line that would, up to three times; failing that, the text is
+  cut after the fenced code block before them, or shows nothing. A loose list cut before the blank line that made it
+  loose reads as a tight one, which builds less, so that alone moves nothing. A quote nested in a quote whose last line
+  goes on without any `>` (which marked itself shows only the start of: it lexes the nested quote again with that line
+  and loses most of its items) shows nothing of the quote when it is cut, since cut, marked would build the items the
+  charge never counted. The note and the issue say so.
 - A Markdown text's links, emphases, code spans, math and line breaks are counted by the characters each needs, so as
   never to count fewer than marked builds: bold counts as two (its two `**` could make two emphases), and so does a
   `[link](…)` whose address holds `://` or `www.`. A text dense with them is charged up to twice what it builds, and

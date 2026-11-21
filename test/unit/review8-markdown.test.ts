@@ -7,6 +7,9 @@ import {
   CHARS_PER_BLOCK,
   codeBlocks,
   JOINER,
+  LINK_PREFIX,
+  linkTarget,
+  type MarkdownPart,
   markdownShape,
   MAX_BLOCK_WORK,
   MAX_MARKDOWN_BLOCKS,
@@ -21,6 +24,7 @@ import {
   SHAPE_CACHE_CHARS,
   shownLength,
   splitMarkdown,
+  stripJoiners,
 } from "../../src/gui/components/markdown.ts"
 import { CELLS_PER_UNIT, CODE_PART_UNITS, domUnits, markdownUnits, MAX_TABLE_CELLS } from "../../src/gui/costs.ts"
 import { markdownCut, tooLarge } from "../../src/gui/issues.ts"
@@ -1306,4 +1310,359 @@ describe("a text's links, emphases and code spans count with its blocks, charged
     expect(failures).toEqual([])
     expect(total).toBeGreaterThan(100_000)
   }, 120_000)
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A cut that would not read alike steps back [review11#R8G-1]
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A quoted reference list of `size` characters: each item a few words and a link, going on to a lazy line. */
+function quotedReferences(size: number): string {
+  const words = "alpha beta gamma delta service cache token queue".split(" ")
+  let state = 3
+  const word = () => words[(state = (Math.imul(state, 1664525) + 1013904223) >>> 0) % words.length]!
+  let text = ""
+  while (text.length < size)
+    text += `> - ${word()} ${word()} [${word()}](https://${word()}.io)\n${word()} https://${word()}.dev/x\n`
+  return text
+}
+
+/**
+ * Quoted and lazy lists as people write them: items of a few words and a link (or none), going on to lazy lines of
+ * links or sentences (some indented short of the item's content), with a blank line now and then.
+ */
+function lazyList(draw: (n: number) => number, size: number): string {
+  const pick = <T>(values: readonly T[]) => values[draw(values.length)]!
+  const words = "the scheduler retries jobs whose window overlaps a deploy cache config service token queue 1".split(
+    " ",
+  )
+  const word = () => pick(words)
+  const link = () =>
+    pick([
+      `www.${word()}.com`,
+      `https://${word()}.dev/${word()}`,
+      `[${word()}](https://${word()}.io)`,
+      `<https://${word()}.org>`,
+      `[${word()}][r${draw(4)}]`,
+    ])
+  const sentence = (count: number, links: number) => {
+    const out = Array.from({ length: count }, word)
+    for (let index = 0; index < links; index++) out.splice(draw(out.length + 1), 0, link())
+    return out.join(" ") || word()
+  }
+  const marker = pick(["> - ", "> 1. ", "> * ", "> - ", "> 1. ", "> - > ", "> > - ", "- ", "> ", "1. ", "> 10. "])
+  const most = 2 + draw(6)
+  const lazy = 1 + draw(3)
+  const indent = draw(5) === 0 ? " ".repeat(1 + draw(4)) : ""
+  const blankEvery = draw(5) === 0 ? 3 + draw(6) : 0
+  let text = "[r0]: https://a.example\n[r1]: https://b.example\n[r2]: https://c.example\n[r3]: https://d.example\n\n"
+  for (let item = 0; text.length < size; item++) {
+    text += `${marker}${sentence(draw(most), draw(5) ? 1 : 0)}\n`
+    for (let line = 0, lines = draw(5) ? 1 + draw(lazy) : 0; line < lines; line++)
+      text += `${indent}${draw(2) ? link() : sentence(draw(most), 1)}\n`
+    if (blankEvery && item % blankEvery === blankEvery - 1) text += "\n"
+  }
+  return text
+}
+
+/**
+ * What renders of a text against its charge: the code blocks, blocks and inline nodes the app's marked builds of what
+ * renderMarkdown hands it, as render units counted as the charge counts them (see the test of generated documents
+ * above), and the lines the model read for it.
+ */
+function renderedAgainstCharge(text: string) {
+  const charged = markdownShape(text)
+  const before = markdownWork()
+  const { cut, parts } = renderMarkdown(text, "Image")
+  const modeled = markdownWork().modeled - before.modeled
+  let code = 0
+  let own = 0
+  let blocks = 0
+  for (const part of parts) {
+    if (part.kind === "code") {
+      own++
+      code++
+      continue
+    }
+    const read = lex(part.text)
+    code += read.code + read.math
+    for (const count of Object.values(read.blocks)) blocks += count
+  }
+  const allowed = Math.floor(charged.cut.shown / CHARS_PER_BLOCK)
+  const units =
+    own * CODE_PART_UNITS +
+    (code - own) +
+    Math.floor(Math.min(MAX_MARKDOWN_BLOCKS, Math.max(0, blocks - allowed)) / CELLS_PER_UNIT)
+  return { charged, cut, parts, units, modeled, nodes: renderedNodes(text) }
+}
+
+describe("a cut that would not read alike steps back, rather than showing nothing [review11#R8G-1]", () => {
+  test("quoted lists whose items go on to lazy lines show most of what their charge allows, cut for marked's work", () => {
+    // The work cut landed on a quoted item's lazy line: cut there, the item's first row lost the lines it went on to,
+    // which marked's blockquote lexes once where it lexed it twice, so the rows before the cut did not read as they
+    // did, and the text was cut at its start: "Showing the first 0 of 20,000 characters" (and of 44,000), where the
+    // charge allowed all of it. The cut now steps back before that item.
+    for (const text of ["> - www.a\nwww.b\n".repeat(1250), quotedReferences(44_000)]) {
+      const charged = markdownShape(text).cut
+      expect(charged).toEqual({ shown: text.length })
+      const { cut, parts } = renderMarkdown(text, "Image")
+      expect(cut.reason).toBe("work")
+      expect({ length: text.length, more: cut.shown > charged.shown / 2 }).toEqual({ length: text.length, more: true })
+      expect(handedWork(parts)).toBeLessThanOrEqual(MAX_BLOCK_WORK)
+      // Before an item: after the line its previous item went on to.
+      expect(text.slice(cut.shown).startsWith("> - ")).toBe(true)
+      const last = parts.at(-1)!
+      expect(last.kind === "markdown" && last.text.endsWith("\n\n\n…")).toBe(true)
+    }
+  })
+
+  test("generated quoted and lazy lists never show nothing where their charge allows text", () => {
+    // Quoted and lazy lists of 15 to 100 KB, and a growing one at every 4 KB from 36 KB: before, 8 of the 36 showed
+    // nothing, and the growing one did from 40 KB on. Whatever the check cuts, what renders is within the charge (in
+    // render units, blocks and inline nodes), what marked gets is within the bound on its block work, and a cut part
+    // is read a few times more at most.
+    const texts: string[] = []
+    for (let seed = 1; seed <= 36; seed++) {
+      const draw = seeded(seed * 7_919)
+      texts.push(lazyList(draw, 15_000 + draw(85_000)))
+    }
+    const growing = lazyList(seeded(2), 100_000)
+    for (let size = 36_000; size <= 100_000; size += 4000)
+      texts.push(growing.slice(0, growing.lastIndexOf("\n", size) + 1))
+    const failures: string[] = []
+    let cut = 0
+    for (const text of texts) {
+      const got = renderedAgainstCharge(text)
+      const out: string[] = []
+      if (got.cut.shown < got.charged.cut.shown) cut++
+      if (got.charged.cut.shown > 0 && got.cut.shown === 0) out.push(`shows nothing of ${got.charged.cut.shown}`)
+      if (got.cut.shown > got.charged.cut.shown) out.push(`shows ${got.cut.shown}, charged ${got.charged.cut.shown}`)
+      if (handedWork(got.parts) > MAX_BLOCK_WORK) out.push(`work ${handedWork(got.parts)}`)
+      if (got.units > markdownUnits(text)) out.push(`units: ${got.units}, charged ${markdownUnits(text)}`)
+      if (got.charged.blocks < MAX_MARKDOWN_BLOCKS && got.nodes.nodes > got.nodes.allowed)
+        out.push(`nodes: ${got.nodes.nodes}, allowed ${got.nodes.allowed}`)
+      // Read as written and neutralized, and the cut at most four times (renderedNodes renders it again from the cache).
+      if (got.modeled > 6 * rowCount(text) + 30) out.push(`read ${got.modeled} lines of ${rowCount(text)}`)
+      if (out.length && failures.length < 5)
+        failures.push(`${JSON.stringify(text.slice(0, 120))}\n  ${out.join("\n  ")}`)
+    }
+    expect(failures).toEqual([])
+    // The check cut many of them where they render.
+    expect(cut).toBeGreaterThan(10)
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A loose list cut before the blank line that made it loose [review12#R8H-1]
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The blocks the model reads in the Markdown parts genui hands marked, by type, summed over the parts. */
+function handedBlocks(parts: readonly MarkdownPart[]): Record<string, number> {
+  const blocks: Record<string, number> = {}
+  for (const part of parts)
+    if (part.kind === "markdown")
+      for (const [type, count] of Object.entries(blockStructure(part.text).blocks))
+        blocks[type] = (blocks[type] ?? 0) + count
+  return blocks
+}
+
+/**
+ * Loose lists as people write them: a few items (in a quote, sometimes), one of them (the first, half the time) a long
+ * run of short links, indented or not, and a blank line after each item.
+ */
+function looseList(draw: (n: number) => number): string {
+  const pick = <T>(values: readonly T[]) => values[draw(values.length)]!
+  const words = "api ui db io cdn docs blog status build release".split(" ")
+  const word = () => pick(words)
+  const link = () =>
+    pick([
+      `www.${word()}.com`,
+      `[${word()}](https://${word()}.io)`,
+      `https://${word()}.dev`,
+      `<https://${word()}.org>`,
+      `[${draw(9)}](https://${word()}.io)`,
+    ])
+  const marker = pick(["- ", "* ", "1. ", "10. ", "  - ", "> - ", "> 1. "])
+  const quote = marker.startsWith(">") ? "> " : ""
+  const indent = draw(3) ? " ".repeat(marker.length - quote.length) : ""
+  let text = draw(2) ? `## ${word()} links\n\n` : draw(2) ? "Intro.\n\n" : ""
+  const items = 2 + draw(5)
+  const long = draw(2) ? 0 : draw(items)
+  for (let item = 0; item < items; item++) {
+    text += `${marker}${word()} ${word()}\n`
+    for (let line = 0, lines = item === long ? 300 + draw(1200) : draw(4); line < lines; line++)
+      text += `${quote}${indent}${link()}${draw(3) ? "" : ` ${word()}`}\n`
+    text += quote ? ">\n" : "\n"
+  }
+  return text
+}
+
+describe("a loose list cut before the blank line that made it loose reads as a tight one, not as nothing [review12#R8H-1]", () => {
+  test("loose lists cut for marked's work show most of what their charge allows, their items' text in no paragraph", () => {
+    // Cut inside the list, before the blank line that made it loose, the list was tight: marked shows its items' text
+    // in no paragraph, so the rows before the cut did not read as they did, and the cut stepped back before the list:
+    // "Showing the first 8 of 20,026 characters" (10 of 12,037; 0 of 9,009; 0 of 8,014), no link, where the charge
+    // allowed all of it. Read alike now: the same blocks, runs and code blocks, less those paragraphs.
+    const texts: Record<string, string> = {
+      "an item of links": "Intro.\n\n- Sources\n" + "  [a](https://a.io)\n".repeat(1000) + "\n- More\n",
+      "an item of addresses": "## Links\n\n- References:\n" + "  www.a.com\n".repeat(1000) + "\n- Next item\n",
+      "an item of lazy addresses": "- a\n" + "www.a\n".repeat(1500) + "\n- b\n",
+      "a quoted item of addresses": "> - a\n" + "> www.a\n".repeat(1000) + ">\n> - b\n",
+    }
+    for (const [name, text] of Object.entries(texts)) {
+      const charged = markdownShape(text).cut
+      expect({ name, charged }).toEqual({ name, charged: { shown: text.length } })
+      const { cut, parts } = renderMarkdown(text, "Image")
+      expect({ name, reason: cut.reason, more: cut.shown > charged.shown / 2 }).toEqual({
+        name,
+        reason: "work",
+        more: true,
+      })
+      expect(handedWork(parts)).toBeLessThanOrEqual(MAX_BLOCK_WORK)
+      // As written, the list is loose: each item's text is a paragraph. What marked gets shows the first item, cut, as a
+      // tight list's (its text in no paragraph), and the "…" in a paragraph of its own.
+      const written = blockStructure(text).blocks
+      const handed = handedBlocks(parts)
+      expect({ name, items: handed.item, paragraphs: handed.paragraph }).toEqual({
+        name,
+        items: 1,
+        paragraphs: written.paragraph! - written.item! + 1,
+      })
+    }
+  })
+
+  test("generated loose lists show at least half of what their charge allows", () => {
+    // Before, 7 of these 40 showed less than a quarter of what their charge allowed (only the heading or the line
+    // before the list, or nothing): 2 with a long first item cut before the blank line after it [R8H-1], the others a
+    // link at the column where marked cuts a lazy line [R8H-2].
+    const failures: string[] = []
+    let cut = 0
+    for (let seed = 1; seed <= 40; seed++) {
+      const text = looseList(seeded(seed * 104_729))
+      const charged = markdownShape(text).cut
+      const { cut: shown, parts } = renderMarkdown(text, "Image")
+      if (shown.shown < charged.shown) cut++
+      const out: string[] = []
+      if (shown.shown < charged.shown / 2) out.push(`shows ${shown.shown} of ${charged.shown}`)
+      if (handedWork(parts) > MAX_BLOCK_WORK) out.push(`work ${handedWork(parts)}`)
+      if (out.length) failures.push(`${seed}: ${JSON.stringify(text.slice(0, 60))}\n  ${out.join("\n  ")}`)
+    }
+    expect(failures).toEqual([])
+    expect(cut).toBeGreaterThan(10)
+  })
+
+  test("a quote nested in a quote that ends on a line without `>` still shows nothing past the cut, as documented", () => {
+    // marked's blockquote lexes the nested quote again with that line and loses its items: it builds one item of the
+    // text's thousand. Cut anywhere in the quote, the line is gone and marked builds all of them, blocks the charge
+    // never counted, so the text is cut before the quote (README, Limitations).
+    const text = "> > - www.a\n> www.b\n".repeat(1000) + "the end\n"
+    expect(markdownShape(text).cut).toEqual({ shown: text.length })
+    expect(blockStructure(text).blocks.item).toBe(1)
+    expect(blockStructure("> > - www.a\n> www.b\n".repeat(1000)).blocks.item).toBe(1000)
+    expect(renderMarkdown(text, "Image").cut).toEqual({ shown: 0, reason: "work" })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A link at the column where marked cuts a list item's lazy line [review12#R8H-2]
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Lists whose items go on to lines without their indentation that start with a short link (a footnote, `[1](…)`). */
+function footnoteList(draw: (n: number) => number, size: number): string {
+  const pick = <T>(values: readonly T[]) => values[draw(values.length)]!
+  const words = "the scheduler retries jobs whose window overlaps a deploy cache config".split(" ")
+  const sentence = (count: number) => Array.from({ length: count }, () => pick(words)).join(" ")
+  const marker = pick([
+    ...["10. ", "  - ", "-   ", "> 10. ", ">   - ", "  1. ", "- ", "1. "],
+    ...["- 10. ", "1. - ", "> - 10. ", "10. 10. ", "- > 10. ", "  -   - "],
+  ])
+  const quote = marker.startsWith(">") ? pick(["> ", ""]) : ""
+  let text = draw(2) ? "Notes:\n\n" : ""
+  while (text.length < size) {
+    text += `${marker}${sentence(2 + draw(6))}\n`
+    for (let line = 0, lines = draw(3); line < lines; line++) {
+      const label = draw(3) ? String(draw(10)) : pick(["ab", "abc", "x", "12"])
+      text += `${quote}[${label}](https://example.com/${draw(100)}) ${sentence(1 + draw(5))}\n`
+    }
+    if (draw(9) === 0) text += quote ? ">\n" : "\n"
+  }
+  return text
+}
+
+describe("a link at the column where marked cuts a list item's lazy line keeps the item whole [review12#R8H-2]", () => {
+  test("the link's address is written in angle brackets there: the text shows whole, the same links", () => {
+    // marked cuts each lazy line at the item's content column and ends the item where a heading starts there. genui
+    // wrote `[x](https://b.io)` as `[x](#genui-link:…)`, whose `#` is at that column when the link text is three
+    // characters shorter than it (`[1](` after `10. `): marked ended the item there, the model read the text otherwise
+    // than as written and cut it, at 1 to 10% of its charge, and at nothing of a loose list ("Showing the first 8 of
+    // 33,593 characters", no list item).
+    const item = (i: number) => `  - item ${i} [ref](https://a.io/${i})\nmore text about ${i}\n`
+    const items = (from: number) => Array.from({ length: 300 }, (_, i) => item(from + i)).join("")
+    const loose = `Intro.\n\n${items(0)}  - nested\n[x](https://b.io)\nafter\n${items(300)}\n  - last\n`
+    const texts: Record<string, string> = {
+      "a loose list": loose,
+      "the same, tight": loose.replace("\n\n  - last", "\n  - last"),
+      "the same, without the line before it": loose.slice("Intro.\n\n".length),
+      "items of ten": "10. a step\n[1](https://example.com/1) and more\nafter\n".repeat(400),
+      "quoted items of ten": "> 10. a step\n> [1](https://example.com/1) and more\n> after\n".repeat(400),
+      "quoted items at column four": ">   - a step\n[1](https://example.com/1) more\nafter\n".repeat(400),
+    }
+    for (const [name, text] of Object.entries(texts)) {
+      expect({ name, charged: markdownShape(text).cut }).toEqual({ name, charged: { shown: text.length } })
+      const { cut, parts } = renderMarkdown(text, "Image")
+      expect({ name, cut }).toEqual({ name, cut: { shown: text.length } })
+      const handed = parts.map((part) => (part.kind === "markdown" ? part.text : "")).join("\n")
+      expect({ name, bracketed: handed.includes(`](<${LINK_PREFIX}`) }).toEqual({ name, bracketed: true })
+    }
+    // The app's marked reads the address in angle brackets as the same link: its href is genui's, with the title, and
+    // the lazy line after it stays in the item.
+    const html = parser.parse(
+      prepareMarkdown("10. a step\n[1](https://example.com/1) and more\nafter\n", "Image")
+        .map((part) => (part.kind === "markdown" ? part.text : ""))
+        .join(""),
+      { async: false },
+    ) as string
+    expect(/<li>[^]*after[^]*<\/li>/.test(html)).toBe(true)
+    const href = /<a href="([^"]*)"/.exec(html)![1]!
+    expect(linkTarget(href)).toBe("https://example.com/1")
+    expect(stripJoiners(/title="([^"]*)"/.exec(html)![1]!)).toBe("https://example.com/1")
+  })
+
+  test("generated lists of footnote links on lazy lines are never cut for reading otherwise", () => {
+    // Before, 32 of these 40 were cut with reason `lines`, 31 of them at less than a quarter of their charge.
+    const failures: string[] = []
+    for (let seed = 1; seed <= 40; seed++) {
+      const draw = seeded(seed * 7_727)
+      const text = footnoteList(draw, 10_000 + draw(40_000))
+      const charged = markdownShape(text).cut
+      const { cut } = renderMarkdown(text, "Image")
+      if (cut.reason === "lines" || cut.shown < charged.shown / 2)
+        failures.push(`${seed}: ${JSON.stringify(cut)} of ${charged.shown}: ${JSON.stringify(text.slice(0, 60))}`)
+    }
+    expect(failures).toEqual([])
+  })
+
+  test("only genui's own link is written so: a model's `](#genui-link:` stays broken, other links stay as they were", () => {
+    const text = [
+      "10. a step\na](#genui-link:x) more\nafter",
+      "See [1](https://example.com/1).",
+      "10. b\n[1](https://example.com/1)\nmore",
+    ].join("\n\n")
+    const handed = neutralizeMarkdown(text, "Image")
+    expect(handed).toContain(`a]${JOINER}(#genui-link:x) more`)
+    expect(handed).toContain(`See [1](${LINK_PREFIX}`)
+    expect(handed.split(`](<${LINK_PREFIX}`).length - 1).toBe(1)
+    expect(handed).toContain(`10. b\n[1](<${LINK_PREFIX}`)
+  })
+
+  test("where the item ends at that column as written, genui's link there is left so, and the text reads alike", () => {
+    // `![](u)xx` is as long as the item's content column (`  10.   `): as written, marked finds the fence after it there
+    // and ends the item before `next`; genui's `[Image](#genui-link:)` puts its `#` there, which ends it too. Written in
+    // angle brackets there, it went on to `next`, and the text was cut there for reading otherwise.
+    const text = "  10.   a\n![](u)xx```\nnext\n"
+    const { cut, parts } = renderMarkdown(text, "Image")
+    expect(cut).toEqual({ shown: text.length })
+    const handed = parts.map((part) => (part.kind === "markdown" ? part.text : "")).join("")
+    expect(handed).toContain(`[Image](${LINK_PREFIX})xx\`\`\``)
+  })
 })

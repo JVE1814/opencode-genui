@@ -151,7 +151,7 @@ AVAILABLE COMPONENTS (42):
 - Collapsible: { title: string, defaultOpen?: boolean } - A section with a disclosure header; children render inside when open. [accepts children]
 - Heading: { text: string, level?: "h1" | "h2" | "h3" | "h4" } - Section heading. h2 by default; use h1 at most once per surface.
 - Text: { text: string, variant?: "body" | "lead" | "muted" | "caption" | "code", weight?: "regular" | "medium", align?: "start" | "center" | "end" } - A paragraph of plain text; use Markdown for links, lists or emphasis.
-- Markdown: { content: string } - Rich text as Markdown: lists, links, tables, code. Each code block counts as an element. Cut at a paragraph over 20,000 characters, lists or quotes nested over 8 deep, many tiny blocks or links, or long runs of lines without blank lines or indents.
+- Markdown: { content: string } - Rich text as Markdown: lists, links, tables, code. Each code block counts as an element. Cut at a paragraph over 20,000 characters, lists or quotes nested over 8 deep, many tiny blocks or links, or long runs of lines without blank lines.
 - Code: { code: string, language?: string, title?: string } - A syntax-highlighted code block, with copy. language e.g. ts, json, sh.
 - Badge: { text: string, variant?: "default" | "secondary" | "outline" | "success" | "warning" | "danger" | "info" } - A small status label.
 - Alert: { title: string, message?: string, type?: "info" | "success" | "warning" | "error" } - A callout for important information; children (e.g. Buttons) render below the message. [accepts children]
